@@ -37,7 +37,6 @@ async def mark_posted(post_id):
 
 # ------------------ PARSER ------------------
 def extract_fields(text):
-    """Extract Map, Monster, Weapons, Rarity safely"""
     text = text[:1000]  # Limit to first 1000 chars
     def find(label):
         try:
@@ -55,7 +54,7 @@ def extract_fields(text):
 
 # ------------------ REDDIT FETCH ------------------
 def fetch_reddit_user_posts():
-    url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=10"
+    url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=20"
     headers = {"User-Agent": "aqw-discord-bot"}
     try:
         res = requests.get(url, headers=headers, timeout=10)
@@ -68,13 +67,15 @@ def fetch_reddit_user_posts():
     posts = []
     for post in data.get("data", {}).get("children", []):
         d = post["data"]
-        post_id = d.get("id")
-        title = d.get("title", "Untitled")
-        body = d.get("selftext", "")
-        full_text = title + "\n" + body
-        link = "https://reddit.com" + d.get("permalink", "")
+        title = d.get("title", "Untitled").lower()
+        if not any(word in title for word in ["daily", "gift", "drop", "drops"]):
+            continue  # Filter by keywords
 
-        info = extract_fields(full_text)  # Safe parse
+        post_id = d.get("id")
+        body = d.get("selftext", "")
+        full_text = d.get("title", "") + "\n" + body
+
+        info = extract_fields(full_text)
 
         image = None
         if "preview" in d:
@@ -85,8 +86,7 @@ def fetch_reddit_user_posts():
 
         posts.append({
             "id": post_id,
-            "title": title,
-            "url": link,
+            "title": d.get("title", "Untitled"),  # Keep original casing
             "image": image,
             "info": info
         })
@@ -96,8 +96,7 @@ def fetch_reddit_user_posts():
 def create_embed(post):
     info = post["info"]
     embed = discord.Embed(
-        title=post["title"],
-        url=post["url"],
+        title=post["title"],  # No hyperlink
         color=0xff4500
     )
     embed.add_field(
@@ -112,7 +111,8 @@ def create_embed(post):
     )
     if post["image"]:
         embed.set_image(url=post["image"])
-    embed.set_footer(text=f"AQW Reddit Tracker ({REDDIT_USER})")
+    # Remove user info
+    embed.set_footer(text="AQW Tracker")
     return embed
 
 # ------------------ LOOP ------------------
@@ -124,7 +124,6 @@ async def check_posts():
         print("Channel not found")
         return
 
-    # Fetch posts in a thread to avoid blocking
     posts = await asyncio.to_thread(fetch_reddit_user_posts)
 
     for post in posts:
@@ -137,12 +136,11 @@ async def check_posts():
 # ------------------ SLASH COMMAND ------------------
 @bot.tree.command(name="latestdrops", description="Check latest AQW posts from Reddit user")
 async def latestdrops(interaction: discord.Interaction):
-    # Only defer until network fetch is done
     await interaction.response.defer(thinking=True)
     posts = await asyncio.to_thread(fetch_reddit_user_posts)
 
     if not posts:
-        await interaction.followup.send(f"No posts found from u/{REDDIT_USER}.")
+        await interaction.followup.send(f"No relevant daily gifts/drops found.")
         return
 
     embed = create_embed(posts[0])
