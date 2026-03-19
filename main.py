@@ -21,6 +21,7 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1484113318095622315"))
 
 WIKI_BASE = "https://aqwwiki.wikidot.com"
 RECENT_URL = f"{WIKI_BASE}/system:recent-changes"
+AEGIFT_TAG_URL = f"{WIKI_BASE}/system:page-tags/tag/aegift"
 
 DB = "drops.db"
 CHECK_DAYS = 7
@@ -158,9 +159,41 @@ def extract_page_content(url: str) -> dict:
     }
 
 
-def fetch_recent_aegifts() -> list[dict]:
-    log.info("Scanning recent changes...")
+def _fetch_aegift_page_urls() -> set[str]:
+    try:
+        res = requests.get(
+            AEGIFT_TAG_URL,
+            timeout=15,
+            headers={"User-Agent": "aqw-wiki-bot/1.0"},
+        )
+        res.raise_for_status()
+    except Exception as e:
+        log.warning("Failed to fetch aegift tag page: %s", e)
+        return set()
 
+    soup = BeautifulSoup(res.text, "html.parser")
+    urls = set()
+    content = soup.select_one("#page-content") or soup.select_one("#main-content") or soup
+    for a in content.select("a[href]"):
+        href = a.get("href", "")
+        if not href or "system:" in href or "forum:" in href or "/tag/" in href:
+            continue
+        if "aqwwiki.wikidot.com" in href or (href.startswith("/") and not href.startswith("//")):
+            full = _make_absolute(href)
+            if full and "aqwwiki.wikidot.com" in full and "system:" not in full and "/tag/" not in full:
+                urls.add(full.rstrip("/"))
+
+    log.info("Found %d aegift page URLs from tag index", len(urls))
+    return urls
+
+
+def fetch_recent_aegifts() -> list[dict]:
+    log.info("Fetching aegift tag page...")
+    aegift_urls = _fetch_aegift_page_urls()
+    if not aegift_urls:
+        return []
+
+    recent_urls = set()
     try:
         res = requests.get(
             f"{RECENT_URL}?rev_limit=200",
@@ -168,57 +201,49 @@ def fetch_recent_aegifts() -> list[dict]:
             headers={"User-Agent": "aqw-wiki-bot/1.0"},
         )
         res.raise_for_status()
+        soup = BeautifulSoup(res.text, "html.parser")
+        cutoff = datetime.utcnow() - timedelta(days=CHECK_DAYS)
+
+        for row in soup.select("table tr"):
+            cols = row.find_all("td")
+            if len(cols) < 3:
+                continue
+            link = cols[0].find("a")
+            if not link:
+                continue
+            href = link.get("href", "")
+            if not href or href.startswith("#"):
+                continue
+            time_text = cols[2].get_text(strip=True)
+            change_time = parse_wiki_time(time_text)
+            if not change_time or change_time < cutoff:
+                continue
+            page_url = _make_absolute(href).rstrip("/")
+            recent_urls.add(page_url)
     except Exception as e:
-        log.error("Failed fetching recent changes: %s", e)
-        return []
+        log.warning("Failed to fetch recent changes: %s", e)
 
-    soup = BeautifulSoup(res.text, "html.parser")
-    rows = soup.select("table.wiki-content-table tr, table tr")
-
-    cutoff = datetime.utcnow() - timedelta(days=CHECK_DAYS)
-    candidates = []
-
-    for row in rows:
-        cols = row.find_all("td")
-        if len(cols) < 3:
-            continue
-
-        link = cols[0].find("a")
-        if not link:
-            continue
-
-        title = link.get_text(strip=True)
-        href = link.get("href", "")
-        if not href or href.startswith("#"):
-            continue
-
-        time_text = cols[2].get_text(strip=True)
-        change_time = parse_wiki_time(time_text)
-        if not change_time:
-            continue
-        if change_time < cutoff:
-            continue
-
-        page_url = _make_absolute(href)
-        path = urlparse(href).path or href
-        page_id = path.strip("/").replace("/", "-") or href
-
-        candidates.append({
-            "id": page_id,
-            "title": title,
-            "url": page_url,
-        })
-
-    log.info("Found %d recent changes in last %d days", len(candidates), CHECK_DAYS)
+    priority_urls = aegift_urls & recent_urls
+    fallback_urls = aegift_urls - recent_urls
+    urls_to_try = list(priority_urls) + list(fallback_urls)[:15]
+    log.info("Priority (recent+aegift): %d, fallback: %d", len(priority_urls), min(15, len(fallback_urls)))
 
     results = []
-    for c in candidates:
-        data = extract_page_content(c["url"])
+    seen_ids = set()
+    for page_url in urls_to_try:
+        data = extract_page_content(page_url)
         if not data:
             continue
-        data["id"] = c["id"]
+        path = urlparse(page_url).path
+        page_id = path.strip("/").replace("/", "-") or page_url
+        if page_id in seen_ids:
+            continue
+        seen_ids.add(page_id)
+        data["id"] = page_id
         results.append(data)
         log.info("  aegift: %s", data["title"])
+        if len(results) >= 10:
+            break
 
     log.info("Found %d aegift pages", len(results))
     return results
