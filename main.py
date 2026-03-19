@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 # ------------------ CONFIG ------------------
 TOKEN = os.getenv("TOKEN")
-CHANNEL_ID = 1484113318095622315
+CHANNEL_ID = 1484113318095622315  # replace with your channel ID
 DB = "drops.db"
 
 URL = "http://aqwwiki.wikidot.com/system:page-tags/tag/aegift#pages"
@@ -37,15 +37,27 @@ async def mark_posted(item_id):
         await db.commit()
 
 # ------------------ SCRAPER ------------------
+def parse_date(date_text):
+    date_text = date_text.lower().strip()
+    now = datetime.utcnow()
+
+    if "today" in date_text:
+        return now
+    elif "yesterday" in date_text:
+        return now - timedelta(days=1)
+    else:
+        try:
+            return datetime.strptime(date_text, "%d %b %Y")
+        except:
+            return None
+
 def fetch_recent_items():
     res = requests.get(URL)
     soup = BeautifulSoup(res.text, "html.parser")
 
     items = []
-    now = datetime.utcnow()
-    cutoff = now - timedelta(days=7)
+    cutoff = datetime.utcnow() - timedelta(days=7)
 
-    # Wikidot table rows
     rows = soup.select("table tr")
 
     for row in rows:
@@ -60,15 +72,12 @@ def fetch_recent_items():
         item_name = link_tag.text.strip()
         item_url = "http://aqwwiki.wikidot.com" + link_tag["href"]
 
-        # Date column (usually second column)
         date_text = cols[1].text.strip()
+        item_date = parse_date(date_text)
 
-        try:
-            item_date = datetime.strptime(date_text, "%d %b %Y")
-        except:
+        if not item_date:
             continue
 
-        # Filter last 7 days
         if item_date >= cutoff:
             items.append({
                 "id": item_name,
@@ -100,7 +109,7 @@ def create_embed(item, image_url):
     )
     embed.add_field(
         name="Source",
-        value="AQW Wiki (AE Gift)",
+        value="AQW Wiki (AE Gift tag)",
         inline=False
     )
     if image_url:
@@ -126,15 +135,14 @@ async def check_items():
         await channel.send(embed=embed)
         await mark_posted(item["id"])
 
-# ------------------ COMMAND ------------------
-@bot.tree.command(name="latestdrops", description="Show recent AE gifts (last 7 days)")
+# ------------------ SLASH COMMAND ------------------
+@bot.tree.command(name="latestdrops", description="Show recent AE Gift items (last 7 days)")
 async def latestdrops(interaction: discord.Interaction):
     await interaction.response.defer()
 
     items = fetch_recent_items()
-
     if not items:
-        await interaction.followup.send("No recent items found.")
+        await interaction.followup.send("No recent AE Gift items found.")
         return
 
     item = items[0]
