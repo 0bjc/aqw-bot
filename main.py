@@ -4,10 +4,11 @@ from discord.ext import commands, tasks
 import requests
 import aiosqlite
 import re
+import asyncio
 
 # ------------------ CONFIG ------------------
-TOKEN = os.getenv("TOKEN")
-CHANNEL_ID = 1484113318095622315
+TOKEN = os.getenv("TOKEN")  # Railway environment variable
+CHANNEL_ID = 1484113318095622315  # Replace with your Discord channel ID
 REDDIT_USER = "DefNotDatenshi"
 
 DB = "drops.db"
@@ -53,18 +54,23 @@ def fetch_posts():
     url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=10"
     headers = {"User-Agent": "aqw-bot"}
 
-    res = requests.get(url, headers=headers)
-    data = res.json()
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        res.raise_for_status()
+        data = res.json()
+    except Exception as e:
+        print(f"Error fetching Reddit: {e}")
+        return []
 
     posts = []
 
-    for post in data["data"]["children"]:
+    for post in data.get("data", {}).get("children", []):
         d = post["data"]
-
-        title = d["title"]
+        title = d.get("title", "")
         body = d.get("selftext", "")
         full_text = title + "\n" + body
 
+        # Filter keywords
         if not any(word in full_text.lower() for word in ["gift", "drop", "daily"]):
             continue
 
@@ -72,12 +78,15 @@ def fetch_posts():
 
         image = None
         if "preview" in d:
-            image = d["preview"]["images"][0]["source"]["url"]
+            try:
+                image = d["preview"]["images"][0]["source"]["url"]
+            except:
+                image = None
 
         posts.append({
-            "id": d["id"],
+            "id": d.get("id"),
             "title": title,
-            "url": "https://reddit.com" + d["permalink"],
+            "url": "https://reddit.com" + d.get("permalink", ""),
             "image": image,
             "info": info
         })
@@ -87,10 +96,10 @@ def fetch_posts():
 # ------------------ EMBED ------------------
 def create_embed(post):
     info = post["info"]
-
     embed = discord.Embed(
         title="🎁 Daily Gift Drop",
-        color=0x00ff88
+        color=0x00ff88,
+        url=post["url"]
     )
 
     embed.add_field(
@@ -115,8 +124,11 @@ def create_embed(post):
 async def check_posts():
     await bot.wait_until_ready()
     channel = bot.get_channel(CHANNEL_ID)
+    if not channel:
+        print("Channel not found")
+        return
 
-    posts = fetch_posts()
+    posts = await asyncio.to_thread(fetch_posts)
 
     for post in posts:
         if await is_posted(post["id"]):
@@ -126,12 +138,14 @@ async def check_posts():
         await channel.send(embed=embed)
         await mark_posted(post["id"])
 
-# ------------------ COMMAND ------------------
-@bot.tree.command(name="latestdrops", description="Show latest drop")
+# ------------------ SLASH COMMAND ------------------
+@bot.tree.command(name="latestdrops", description="Show latest AQW drops from Reddit user")
 async def latestdrops(interaction: discord.Interaction):
-    await interaction.response.defer()
+    # Defer immediately (prevents "thinking" timeout)
+    await interaction.response.defer(thinking=True)
 
-    posts = fetch_posts()
+    posts = await asyncio.to_thread(fetch_posts)
+
     if not posts:
         await interaction.followup.send("No drops found.")
         return
