@@ -8,12 +8,12 @@ import textwrap
 
 # ------------------ CONFIG ------------------
 TOKEN = os.getenv("TOKEN")
-CHANNEL_ID = 1484113318095622315  # Replace with your channel ID
+CHANNEL_ID = 1484113318095622315
 REDDIT_USER = "DefNotDatenshi"
 
 DB = "drops.db"
-KEYWORDS = ["daily", "gift", "drop", "drops"]  # simple filter
-MAX_LINE_LENGTH = 80  # wrap text to 80 characters per line
+KEYWORDS = ["daily", "gift", "drop", "drops"]
+MAX_LINE_LENGTH = 80
 
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
 
@@ -37,32 +37,26 @@ async def mark_posted(post_id):
         await db.execute("INSERT INTO posted (id) VALUES (?)", (post_id,))
         await db.commit()
 
-# ------------------ MOCK PARAPHRASER ------------------
+# ------------------ PARAPHRASER ------------------
 def paraphrase_text(text: str) -> str:
-    """
-    - Replace & with 'and'
-    - Remove 'amp;'
-    - Wrap text nicely for Discord
-    """
     if not text.strip():
         return "No details provided."
-    
-    # Replace & and remove amp;
+
     text = text.replace("&", "and").replace("amp;", "")
-    
-    # Wrap each paragraph
+
     wrapped_lines = []
     for paragraph in text.splitlines():
         paragraph = paragraph.strip()
         if paragraph:
             wrapped_lines.extend(textwrap.wrap(paragraph, width=MAX_LINE_LENGTH))
-            wrapped_lines.append("")  # blank line between paragraphs
+            wrapped_lines.append("")
     return "\n".join(wrapped_lines).strip()
 
 # ------------------ REDDIT FETCH ------------------
 def fetch_reddit_user_posts():
     url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=20"
     headers = {"User-Agent": "aqw-discord-bot"}
+
     try:
         res = requests.get(url, headers=headers, timeout=10)
         res.raise_for_status()
@@ -71,41 +65,70 @@ def fetch_reddit_user_posts():
         return []
 
     posts = []
+
     for post in data.get("data", {}).get("children", []):
         d = post["data"]
+
         full_text = (d.get("title", "") + "\n" + d.get("selftext", "")).lower()
         if not any(k in full_text for k in KEYWORDS):
             continue
 
+        # ------------------ IMAGE HANDLING ------------------
         image = None
-        if "preview" in d:
+
+        # Case 1: Direct image post
+        if d.get("post_hint") == "image":
+            image = d.get("url_overridden_by_dest")
+
+        # Case 2: Reddit gallery (first image only)
+        elif d.get("is_gallery"):
+            try:
+                media_metadata = d["media_metadata"]
+                first_item = next(iter(media_metadata.values()))
+                image = first_item["s"]["u"]
+            except:
+                image = None
+
+        # Case 3: Preview fallback
+        elif "preview" in d:
             try:
                 image = d["preview"]["images"][0]["source"]["url"]
             except:
                 image = None
 
-        # Paraphrase the body text and fix & / amp;
+        # Case 4: Direct image URL fallback
+        elif d.get("url", "").endswith((".jpg", ".jpeg", ".png", ".gif")):
+            image = d.get("url")
+
+        # Fix encoded URLs
+        if image:
+            image = image.replace("&amp;", "&")
+
+        # ------------------ TEXT ------------------
         body_text = d.get("selftext", "")
         paraphrased_body = paraphrase_text(body_text)
 
         posts.append({
             "id": d.get("id"),
-            "title": d.get("title", "Untitled"),  # plain title
+            "title": d.get("title", "Untitled"),
             "image": image,
             "body": paraphrased_body
         })
+
     return posts
 
 # ------------------ EMBED ------------------
 def create_embed(post):
     embed = discord.Embed(
-        title=post["title"],  # no hyperlink
-        description=post["body"],  # wrapped + & replaced + amp; removed
+        title=post["title"],
+        description=post["body"],
         color=0xff4500
     )
+
     if post["image"]:
         embed.set_image(url=post["image"])
-    embed.set_footer(text="AQW Tracker")  # no username
+
+    embed.set_footer(text="AQW Tracker")
     return embed
 
 # ------------------ LOOP ------------------
@@ -113,14 +136,17 @@ def create_embed(post):
 async def check_posts():
     await bot.wait_until_ready()
     channel = bot.get_channel(CHANNEL_ID)
+
     if not channel:
         print("Channel not found")
         return
 
     posts = await asyncio.to_thread(fetch_reddit_user_posts)
+
     for post in posts:
         if await is_posted(post["id"]):
             continue
+
         embed = create_embed(post)
         await channel.send(embed=embed)
         await mark_posted(post["id"])
@@ -129,6 +155,7 @@ async def check_posts():
 @bot.tree.command(name="latestdrops", description="Check latest AQW daily gifts/drops")
 async def latestdrops(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
+
     posts = await asyncio.to_thread(fetch_reddit_user_posts)
 
     if not posts:
