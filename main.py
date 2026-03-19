@@ -1,21 +1,17 @@
 import os
-
-TOKEN = os.getenv("TOKEN")  # ← securely gets your Discord token from Railway
-CHANNEL_ID = 1484113318095622315  # Replace with your channel ID
 import discord
 from discord.ext import commands, tasks
 import requests
 from bs4 import BeautifulSoup
 import aiosqlite
-import os
 
 # ------------------ CONFIG ------------------
-TOKEN = os.getenv("TOKEN")  # token from Railway environment variables
-CHANNEL_ID = 123456789012345678  # replace with your Discord channel ID
-
-bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
-
+TOKEN = os.getenv("TOKEN")  # Discord bot token from Railway
+CHANNEL_ID = 1484113318095622315  # Replace with your actual Discord channel ID
 DB = "drops.db"
+
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ------------------ DATABASE ------------------
 async def init_db():
@@ -40,17 +36,20 @@ async def mark_posted(item_id):
 # ------------------ SCRAPER ------------------
 def fetch_design_notes():
     """Scrape AQW Design Notes for new gifts/drops"""
-    url = "https://www.aq.com/gamedesignnotes"
+    url = "https://www.aq.com/gamedesignnotes/"
     res = requests.get(url)
     soup = BeautifulSoup(res.text, "html.parser")
 
     posts = []
 
-    for article in soup.select(".post"):
-        title_tag = article.select_one("h2")
+    # AQW Design Notes uses <article> for each update
+    for article in soup.find_all("article"):
+        title_tag = article.find("h3") or article.find("h2")
         if not title_tag:
             continue
-        title = title_tag.text.strip()
+        title = title_tag.get_text(strip=True)
+
+        # Only include drops/gifts
         if any(word in title.lower() for word in ["lucky", "gift", "drop"]):
             posts.append({
                 "id": title,
@@ -114,9 +113,11 @@ def create_embed(data, image_url):
 async def check_drops():
     await bot.wait_until_ready()
     channel = bot.get_channel(CHANNEL_ID)
+    if not channel:
+        print(f"Channel {CHANNEL_ID} not found.")
+        return
 
     posts = fetch_design_notes()
-
     for item in posts:
         if await is_posted(item["id"]):
             continue
@@ -148,4 +149,5 @@ async def on_ready():
     check_drops.start()
     await bot.tree.sync()
 
+# ------------------ RUN ------------------
 bot.run(TOKEN)
