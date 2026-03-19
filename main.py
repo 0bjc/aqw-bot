@@ -12,7 +12,7 @@ CHANNEL_ID = 1484113318095622315
 REDDIT_USER = "DefNotDatenshi"
 
 DB = "drops.db"
-KEYWORDS = ["daily", "gift", "drop", "drops"]
+KEYWORDS = ["daily", "gift", "drop", "drops", "free", "reward"]
 MAX_LINE_LENGTH = 80
 
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
@@ -55,13 +55,18 @@ def paraphrase_text(text: str) -> str:
 # ------------------ REDDIT FETCH ------------------
 def fetch_reddit_user_posts():
     url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=20"
-    headers = {"User-Agent": "aqw-discord-bot"}
+
+    # FIXED USER AGENT (important)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
 
     try:
         res = requests.get(url, headers=headers, timeout=10)
         res.raise_for_status()
         data = res.json()
-    except:
+    except Exception as e:
+        print("Reddit fetch error:", e)
         return []
 
     posts = []
@@ -69,18 +74,25 @@ def fetch_reddit_user_posts():
     for post in data.get("data", {}).get("children", []):
         d = post["data"]
 
-        full_text = (d.get("title", "") + "\n" + d.get("selftext", "")).lower()
+        title = d.get("title", "")
+        selftext = d.get("selftext", "")
+        full_text = (title + " " + selftext).lower()
+
+        # DEBUG: print titles so you know it's working
+        print("Fetched:", title)
+
+        # SMART FILTER
         if not any(k in full_text for k in KEYWORDS):
-            continue
+            # allow image posts even if no keywords
+            if d.get("post_hint") != "image":
+                continue
 
         # ------------------ IMAGE HANDLING ------------------
         image = None
 
-        # Case 1: Direct image post
         if d.get("post_hint") == "image":
             image = d.get("url_overridden_by_dest")
 
-        # Case 2: Reddit gallery (first image only)
         elif d.get("is_gallery"):
             try:
                 media_metadata = d["media_metadata"]
@@ -89,32 +101,29 @@ def fetch_reddit_user_posts():
             except:
                 image = None
 
-        # Case 3: Preview fallback
         elif "preview" in d:
             try:
                 image = d["preview"]["images"][0]["source"]["url"]
             except:
                 image = None
 
-        # Case 4: Direct image URL fallback
         elif d.get("url", "").endswith((".jpg", ".jpeg", ".png", ".gif")):
             image = d.get("url")
 
-        # Fix encoded URLs
         if image:
             image = image.replace("&amp;", "&")
 
         # ------------------ TEXT ------------------
-        body_text = d.get("selftext", "")
-        paraphrased_body = paraphrase_text(body_text)
+        paraphrased_body = paraphrase_text(selftext)
 
         posts.append({
             "id": d.get("id"),
-            "title": d.get("title", "Untitled"),
+            "title": title or "Untitled",
             "image": image,
             "body": paraphrased_body
         })
 
+    print(f"Total matched posts: {len(posts)}")
     return posts
 
 # ------------------ EMBED ------------------
@@ -159,7 +168,7 @@ async def latestdrops(interaction: discord.Interaction):
     posts = await asyncio.to_thread(fetch_reddit_user_posts)
 
     if not posts:
-        await interaction.followup.send("No relevant daily gifts/drops found.")
+        await interaction.followup.send("No posts found (check console logs).")
         return
 
     embed = create_embed(posts[0])
