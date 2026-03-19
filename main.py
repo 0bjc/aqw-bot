@@ -7,7 +7,7 @@ import aiosqlite
 
 # ------------------ CONFIG ------------------
 TOKEN = os.getenv("TOKEN")  # Discord bot token from Railway
-CHANNEL_ID = 1484113318095622315  # Replace with your actual Discord channel ID
+CHANNEL_ID = 1484113318095622315  # Replace with your Discord channel ID
 DB = "drops.db"
 
 intents = discord.Intents.default()
@@ -35,22 +35,22 @@ async def mark_posted(item_id):
 
 # ------------------ SCRAPER ------------------
 def fetch_design_notes():
-    """Scrape AQW Design Notes for new gifts/drops"""
+    """Scrape AQW Design Notes for daily gifts/drops"""
     url = "https://www.aq.com/gamedesignnotes/"
     res = requests.get(url)
     soup = BeautifulSoup(res.text, "html.parser")
 
     posts = []
 
-    # AQW Design Notes uses <article> for each update
+    # Each update is in an <article>
     for article in soup.find_all("article"):
         title_tag = article.find("h3") or article.find("h2")
         if not title_tag:
             continue
         title = title_tag.get_text(strip=True)
 
-        # Only include drops/gifts
-        if any(word in title.lower() for word in ["lucky", "gift", "drop"]):
+        # Filter using the requested words
+        if any(word in title.lower() for word in ["daily gift", "daily drop", "gift", "drop"]):
             posts.append({
                 "id": title,
                 "title": title,
@@ -75,7 +75,6 @@ def get_item_image(item_name):
             return None
 
         item_url = result["href"]
-
         item_res = requests.get(item_url, timeout=10)
         item_soup = BeautifulSoup(item_res.text, "html.parser")
 
@@ -90,11 +89,11 @@ def get_item_image(item_name):
 # ------------------ EMBED ------------------
 def create_embed(data, image_url):
     embed = discord.Embed(
-        title="🍀 Lucky Day Gifts 🍀",
+        title="🍀 AQW Daily Gifts / Drops 🍀",
         color=0x00ff88
     )
     embed.add_field(
-        name="Available for ALL Players",
+        name="Details",
         value=(
             f"**Location:** {data['location']}\n"
             f"**Monster:** {data['monster']}\n"
@@ -129,7 +128,7 @@ async def check_drops():
         await mark_posted(item["id"])
 
 # ------------------ SLASH COMMAND ------------------
-@bot.tree.command(name="latestdrops", description="Check latest AQW drops manually")
+@bot.tree.command(name="latestdrops", description="Check latest AQW daily gifts/drops manually")
 async def latestdrops(interaction: discord.Interaction):
     await interaction.response.defer()
     posts = fetch_design_notes()
