@@ -6,11 +6,11 @@ from bs4 import BeautifulSoup
 import aiosqlite
 
 # ------------------ CONFIG ------------------
-TOKEN = os.getenv("TOKEN")  # Your Railway environment variable
-CHANNEL_ID = 1484113318095622315  # Replace with your Discord channel ID
+TOKEN = os.getenv("TOKEN")  # Your Railway token
+CHANNEL_ID = 1484113318095622315  # Replace with your channel ID
 DB = "drops.db"
 
-URL = "http://aqwwiki.wikidot.com/system:page-tags/tag/aegift#pages"
+TAG_URL = "http://aqwwiki.wikidot.com/system:page-tags/tag/aegift#pages"
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -36,53 +36,51 @@ async def mark_posted(item_id):
         await db.commit()
 
 # ------------------ SCRAPER ------------------
-def fetch_recent_items():
-    """Fetch the top recent AE Gift items from the tag page"""
-    res = requests.get(URL)
+def fetch_items():
+    """Scrape the AE Gift tag page and visit each link to extract items with images"""
+    res = requests.get(TAG_URL)
     soup = BeautifulSoup(res.text, "html.parser")
 
     items = []
-    # Get only the first 15–20 items (newest)
+    # Limit to top 20 links to avoid overloading the wiki
     links = soup.select("table a")[:20]
 
     for link in links:
         item_name = link.text.strip()
         item_url = "http://aqwwiki.wikidot.com" + link["href"]
 
-        items.append({
-            "id": item_name,
-            "name": item_name,
-            "url": item_url
-        })
+        # Visit item page to get image
+        try:
+            item_res = requests.get(item_url, timeout=10)
+            item_soup = BeautifulSoup(item_res.text, "html.parser")
+            img_tag = item_soup.select_one(".item-icon img")
+
+            if not img_tag or not img_tag.get("src"):
+                continue  # Skip items with no image
+
+            image_url = img_tag["src"]
+
+            items.append({
+                "id": item_name,
+                "name": item_name,
+                "url": item_url,
+                "image": image_url
+            })
+
+        except Exception as e:
+            print(f"Error fetching {item_name}: {e}")
+            continue
 
     return items
 
-# ------------------ IMAGE FETCH ------------------
-def get_item_image(item_url):
-    try:
-        res = requests.get(item_url, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
-        img = soup.select_one(".item-icon img")
-        if img:
-            return img["src"]
-    except:
-        return None
-    return None
-
 # ------------------ EMBED ------------------
-def create_embed(item, image_url):
+def create_embed(item):
     embed = discord.Embed(
         title=item["name"],
         url=item["url"],
         color=0x00ff88
     )
-    embed.add_field(
-        name="Source",
-        value="AQW Wiki (AE Gift tag)",
-        inline=False
-    )
-    if image_url:
-        embed.set_image(url=image_url)
+    embed.set_image(url=item["image"])
     embed.set_footer(text="AQW Auto Tracker")
     return embed
 
@@ -92,15 +90,13 @@ async def check_items():
     await bot.wait_until_ready()
     channel = bot.get_channel(CHANNEL_ID)
 
-    items = fetch_recent_items()
+    items = fetch_items()
 
     for item in items:
         if await is_posted(item["id"]):
             continue
 
-        image_url = get_item_image(item["url"])
-        embed = create_embed(item, image_url)
-
+        embed = create_embed(item)
         await channel.send(embed=embed)
         await mark_posted(item["id"])
 
@@ -109,15 +105,14 @@ async def check_items():
 async def latestdrops(interaction: discord.Interaction):
     await interaction.response.defer()
 
-    items = fetch_recent_items()
+    items = fetch_items()
     if not items:
-        await interaction.followup.send("No recent AE Gift items found.")
+        await interaction.followup.send("No AE Gift items found with images.")
         return
 
+    # Show the first valid item
     item = items[0]
-    image_url = get_item_image(item["url"])
-    embed = create_embed(item, image_url)
-
+    embed = create_embed(item)
     await interaction.followup.send(embed=embed)
 
 # ------------------ READY ------------------
