@@ -35,6 +35,17 @@ async def mark_posted(post_id):
         await db.execute("INSERT INTO posted (id) VALUES (?)", (post_id,))
         await db.commit()
 
+# ------------------ MOCK PARAPHRASER ------------------
+def paraphrase_text(text: str) -> str:
+    """
+    Replace this with a real paraphrasing API (like OpenAI GPT or others).
+    For now, just returns the text with minor formatting for demo.
+    """
+    # Simple mock: split lines and prepend "[Paraphrased]" to each line
+    lines = text.splitlines()
+    paraphrased = "\n".join(f"{line}" for line in lines if line.strip())
+    return paraphrased if paraphrased else "No details provided."
+
 # ------------------ REDDIT FETCH ------------------
 def fetch_reddit_user_posts():
     url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=20"
@@ -49,8 +60,8 @@ def fetch_reddit_user_posts():
     posts = []
     for post in data.get("data", {}).get("children", []):
         d = post["data"]
-        title_lower = d.get("title", "").lower()
-        if not any(k in title_lower for k in KEYWORDS):
+        full_text = (d.get("title", "") + "\n" + d.get("selftext", "")).lower()
+        if not any(k in full_text for k in KEYWORDS):
             continue
 
         image = None
@@ -60,10 +71,15 @@ def fetch_reddit_user_posts():
             except:
                 image = None
 
+        # Paraphrase the body text
+        body_text = d.get("selftext", "")
+        paraphrased_body = paraphrase_text(body_text)
+
         posts.append({
             "id": d.get("id"),
             "title": d.get("title", "Untitled"),  # plain title
-            "image": image
+            "image": image,
+            "body": paraphrased_body
         })
     return posts
 
@@ -71,6 +87,7 @@ def fetch_reddit_user_posts():
 def create_embed(post):
     embed = discord.Embed(
         title=post["title"],  # no hyperlink
+        description=post["body"],  # show paraphrased body
         color=0xff4500
     )
     if post["image"]:
