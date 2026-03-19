@@ -14,10 +14,12 @@ from discord.ext import commands, tasks
 TOKEN = os.getenv("TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1484113318095622315"))
 
+# AQW Wiki tag page (aegift)
 AQW_TAG_URL = "https://aqwwiki.wikidot.com/system:page-tags/tag/aegift"
 
 DB = "drops.db"
 
+# ------------------ DISCORD SETUP ------------------
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -56,12 +58,12 @@ async def mark_posted(post_id: str):
         )
         await db.commit()
 
-# ------------------ AQW WIKI FETCH ------------------
-def fetch_aegift_pages() -> list[dict]:
-    log.info("Fetching AQW Wiki aegift pages...")
+# ------------------ FETCH LATEST AEGIFT ------------------
+def fetch_latest_aegift() -> list[dict]:
+    log.info("Fetching latest AQW Wiki aegift page...")
 
     headers = {
-        "User-Agent": "aqw-discord-bot/2.0"
+        "User-Agent": "aqw-discord-bot/2.1"
     }
 
     try:
@@ -73,28 +75,32 @@ def fetch_aegift_pages() -> list[dict]:
 
     soup = BeautifulSoup(res.text, "html.parser")
 
-    posts = []
+    # Get newest page only
+    link = soup.select_one("div.pages-list a")
 
-    # Wikidot list of tagged pages
-    for link in soup.select("div.pages-list a"):
-        title = link.text.strip()
-        href = link.get("href")
+    if not link:
+        log.warning("No aegift pages found.")
+        return []
 
-        if not href or not title:
-            continue
+    title = link.text.strip()
+    href = link.get("href")
 
-        page_url = f"https://aqwwiki.wikidot.com{href}"
-        post_id = href
+    if not href:
+        return []
 
-        posts.append({
-            "id": post_id,
-            "title": title,
-            "body": f"🎁 **AE Gift Page Detected**\n{page_url}",
-            "image": None,
-        })
+    page_url = f"https://aqwwiki.wikidot.com{href}"
+    post_id = href
 
-    log.info("Found %d aegift pages", len(posts))
-    return posts
+    post = {
+        "id": post_id,
+        "title": title,
+        "body": f"🎁 **Latest AE Gift Detected**\n{page_url}",
+        "image": None,
+    }
+
+    log.info("Latest aegift page: %s", title)
+
+    return [post]
 
 # ------------------ EMBED ------------------
 def create_embed(post: dict) -> discord.Embed:
@@ -103,7 +109,6 @@ def create_embed(post: dict) -> discord.Embed:
         description=post["body"],
         color=0xFF4500,
     )
-
     embed.set_footer(text="AQW AE Gift Tracker")
     return embed
 
@@ -117,7 +122,7 @@ async def check_posts():
         log.warning("Channel %s not found", CHANNEL_ID)
         return
 
-    posts = await asyncio.to_thread(fetch_aegift_pages)
+    posts = await asyncio.to_thread(fetch_latest_aegift)
 
     for post in posts:
         if await is_posted(post["id"]):
@@ -134,17 +139,15 @@ async def check_posts():
 # ------------------ SLASH COMMAND ------------------
 @bot.tree.command(
     name="latestdrops",
-    description="Show latest AQW AE Gift pages"
+    description="Show latest AQW AE Gift page"
 )
 async def latestdrops(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
 
-    posts = await asyncio.to_thread(fetch_aegift_pages)
+    posts = await asyncio.to_thread(fetch_latest_aegift)
 
     if not posts:
-        await interaction.followup.send(
-            "No AE Gift pages found."
-        )
+        await interaction.followup.send("No AE Gift page found.")
         return
 
     embed = create_embed(posts[0])
