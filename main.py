@@ -27,7 +27,7 @@ DB = "drops.db"
 CHECK_DAYS = 7
 MAX_DESC_LENGTH = 3800
 MAX_TITLE_LENGTH = 256
-WRAP_WIDTH = 55
+WRAP_WIDTH = 55  # characters per line for Discord embed
 
 # ---------------- DISCORD ----------------
 intents = discord.Intents.default()
@@ -122,11 +122,9 @@ def extract_page_content(url: str) -> dict:
         else title
     )
 
-    content_el = (
-        soup.select_one("#page-content")
-        or soup.select_one("#main-content")
+    content_el = soup.select_one("#page-content") \
+        or soup.select_one("#main-content") \
         or soup.select_one(".page-content, .yui-content")
-    )
 
     content_text = ""
     images = []
@@ -135,9 +133,7 @@ def extract_page_content(url: str) -> dict:
         for el in content_el.select(".page-tags, .page-info-bottom"):
             el.decompose()
 
-        for el in content_el.find_all(
-            "a", href=re.compile(r"system:page-tags/tag")
-        ):
+        for el in content_el.find_all("a", href=re.compile(r"system:page-tags/tag")):
             el.decompose()
 
         for script in content_el.select("script, style"):
@@ -146,7 +142,9 @@ def extract_page_content(url: str) -> dict:
         content_text = content_el.get_text(separator="\n", strip=True)
         content_text = re.sub(r"\n{3,}", "\n\n", content_text)
 
-        # ---------- CLEAN CONTENT (CHANGE #2 ONLY) ----------
+        # ===== ONLY CHANGED SECTION =====
+
+        # Move Price to next line
         content_text = re.sub(
             r"(Price:)\s*",
             r"\n\1 ",
@@ -154,9 +152,8 @@ def extract_page_content(url: str) -> dict:
             flags=re.IGNORECASE,
         )
 
-        content_text = re.sub(
-            r"Sellback:\s*[^\n]+", "", content_text, flags=re.IGNORECASE
-        )
+        # Remove unwanted lines
+        content_text = re.sub(r"Sellback:\s*[^\n]+", "", content_text, flags=re.IGNORECASE)
 
         content_text = re.sub(
             r"Rarity Description:\s*[^\n]+(?:\n(?![A-Z][a-z]+:)[^\n]*)*",
@@ -172,7 +169,7 @@ def extract_page_content(url: str) -> dict:
             flags=re.IGNORECASE,
         )
 
-        # remove Thanks to
+        # REMOVE "Thanks to:"
         content_text = re.sub(
             r"Thanks to:\s*[^\n]+",
             "",
@@ -180,20 +177,18 @@ def extract_page_content(url: str) -> dict:
             flags=re.IGNORECASE,
         )
 
-        content_text = re.sub(
-            r"Also see:[\s\S]*", "", content_text, flags=re.IGNORECASE
-        )
+        content_text = re.sub(r"Also see:[\s\S]*", "", content_text, flags=re.IGNORECASE)
 
         content_text = re.sub(r"\n{3,}", "\n\n", content_text).strip()
+
+        # ===== END CHANGE =====
 
         imgur_urls = []
         other_urls = []
 
         for img in content_el.select("img[src]"):
             src = img.get("src")
-            if not src or any(
-                x in src.lower() for x in ("pixel", "spacer", "icon", "thumb")
-            ):
+            if not src or any(x in src.lower() for x in ("pixel", "spacer", "icon", "thumb")):
                 continue
 
             full_url = _make_absolute(src, url)
