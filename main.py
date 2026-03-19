@@ -1,10 +1,10 @@
 import os
 import discord
 from discord.ext import commands, tasks
-import aiohttp
 import aiosqlite
 import asyncio
 import textwrap
+import aiohttp
 import xml.etree.ElementTree as ET
 
 # ------------------ CONFIG ------------------
@@ -56,16 +56,22 @@ def paraphrase_text(text: str) -> str:
 # ------------------ REDDIT FETCH (RSS) ------------------
 async def fetch_reddit_user_posts():
     url = f"https://www.reddit.com/user/{REDDIT_USER}.rss"
-    headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as res:
+        timeout = aiohttp.ClientTimeout(total=10)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as res:
+                if res.status != 200:
+                    return []
                 text = await res.text()
     except:
         return []
 
-    root = ET.fromstring(text)
+    try:
+        root = ET.fromstring(text)
+    except:
+        return []
 
     posts = []
 
@@ -77,22 +83,17 @@ async def fetch_reddit_user_posts():
 
             full_text = (title + " " + content).lower()
 
-            # ✅ KEYWORD FILTER (same as before)
             if not any(k in full_text for k in KEYWORDS):
                 continue
 
-            # ---------------- IMAGE ----------------
+            # Extract image
             image = None
-
-            # Extract image from HTML content
             if 'img src="' in content:
                 start = content.find('img src="') + 9
                 end = content.find('"', start)
                 image = content[start:end]
 
-            # ---------------- TEXT ----------------
-            clean_text = content.replace("<br>", "\n")
-            body = paraphrase_text(clean_text)
+            body = paraphrase_text(content)
 
             posts.append({
                 "id": post_id,
@@ -144,7 +145,11 @@ async def check_posts():
 async def latestdrops(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
 
-    posts = await fetch_reddit_user_posts()
+    try:
+        posts = await asyncio.wait_for(fetch_reddit_user_posts(), timeout=12)
+    except asyncio.TimeoutError:
+        await interaction.followup.send("Request timed out. Try again.")
+        return
 
     if not posts:
         await interaction.followup.send("No relevant daily gifts/drops found.")
