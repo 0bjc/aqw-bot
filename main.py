@@ -37,12 +37,15 @@ async def mark_posted(post_id):
 
 # ------------------ PARSER ------------------
 def extract_fields(text):
-    """Extract Map, Monster, Weapons, Rarity from Reddit post text"""
+    """Extract Map, Monster, Weapons, Rarity safely"""
+    text = text[:1000]  # Limit to first 1000 chars
     def find(label):
-        pattern = rf"{label}[:\-]\s*(.+)"
-        match = re.search(pattern, text, re.IGNORECASE)
-        return match.group(1).strip() if match else "Unknown"
-
+        try:
+            pattern = rf"{label}[:\-]\s*(.+)"
+            match = re.search(pattern, text, re.IGNORECASE)
+            return match.group(1).strip() if match else "Unknown"
+        except:
+            return "Unknown"
     return {
         "map": find("map"),
         "monster": find("monster"),
@@ -54,7 +57,6 @@ def extract_fields(text):
 def fetch_reddit_user_posts():
     url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=10"
     headers = {"User-Agent": "aqw-discord-bot"}
-
     try:
         res = requests.get(url, headers=headers, timeout=10)
         res.raise_for_status()
@@ -64,7 +66,6 @@ def fetch_reddit_user_posts():
         return []
 
     posts = []
-
     for post in data.get("data", {}).get("children", []):
         d = post["data"]
         post_id = d.get("id")
@@ -73,8 +74,7 @@ def fetch_reddit_user_posts():
         full_text = title + "\n" + body
         link = "https://reddit.com" + d.get("permalink", "")
 
-        # Extract structured fields
-        info = extract_fields(full_text)
+        info = extract_fields(full_text)  # Safe parse
 
         image = None
         if "preview" in d:
@@ -90,7 +90,6 @@ def fetch_reddit_user_posts():
             "image": image,
             "info": info
         })
-
     return posts
 
 # ------------------ EMBED ------------------
@@ -101,7 +100,6 @@ def create_embed(post):
         url=post["url"],
         color=0xff4500
     )
-
     embed.add_field(
         name="Drop Info",
         value=(
@@ -112,10 +110,8 @@ def create_embed(post):
         ),
         inline=False
     )
-
     if post["image"]:
         embed.set_image(url=post["image"])
-
     embed.set_footer(text=f"AQW Reddit Tracker ({REDDIT_USER})")
     return embed
 
@@ -128,6 +124,7 @@ async def check_posts():
         print("Channel not found")
         return
 
+    # Fetch posts in a thread to avoid blocking
     posts = await asyncio.to_thread(fetch_reddit_user_posts)
 
     for post in posts:
@@ -140,8 +137,8 @@ async def check_posts():
 # ------------------ SLASH COMMAND ------------------
 @bot.tree.command(name="latestdrops", description="Check latest AQW posts from Reddit user")
 async def latestdrops(interaction: discord.Interaction):
+    # Only defer until network fetch is done
     await interaction.response.defer(thinking=True)
-
     posts = await asyncio.to_thread(fetch_reddit_user_posts)
 
     if not posts:
