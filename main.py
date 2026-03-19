@@ -16,15 +16,15 @@ import asyncio
 TOKEN = os.getenv("TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1484113318095622315"))
 REDDIT_USER = os.getenv("REDDIT_USER", "DefNotDatenshi")
+REDDIT_SUBREDDIT = os.getenv("REDDIT_SUBREDDIT", "AQW")
 
 DB = "drops.db"
-KEYWORDS = ["daily", "gift", "drop", "drops"]
+KEYWORDS = ["daily", "gift", "drop", "drops", "wheel", "quest"]
+SHOW_LATEST_IF_NO_MATCH = True
 MAX_LINE_LENGTH = 80
 
-# Image host domains that Reddit uses for direct image links
 IMAGE_DOMAINS = ("i.redd.it", "i.imgur.com", "imgur.com")
 
-# Enable message_content if you need to read messages
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -62,46 +62,33 @@ async def mark_posted(post_id: str) -> None:
 
 # ------------------ REDDIT IMAGE EXTRACTION ------------------
 def _fix_reddit_image_url(url: str) -> str:
-    """
-    Reddit API returns URLs with HTML-escaped ampersands (&amp;).
-    Discord embeds fail to load these - must unescape to &.
-    """
     if not url:
         return ""
     return html.unescape(url)
 
 
 def _extract_image_url(post_data: dict) -> str | None:
-    """
-    Extract the best available image URL from a Reddit post.
-    Handles: direct image links (i.redd.it), preview thumbnails, gallery posts.
-    """
     url = post_data.get("url") or ""
-
-    # 1. Direct image URL (e.g. i.redd.it, imgur)
     parsed = urlparse(url)
     if parsed.netloc in IMAGE_DOMAINS:
         return _fix_reddit_image_url(url)
 
-    # 2. Preview image (text posts with embedded images)
     try:
         preview = post_data.get("preview", {})
         images = preview.get("images", [])
         if images:
             first = images[0]
-            # Prefer full-size source over resolutions
             source = first.get("source")
             if source and source.get("url"):
                 return _fix_reddit_image_url(source["url"])
             resolutions = first.get("resolutions", [])
             if resolutions:
-                img_url = resolutions[-1].get("url")  # highest res
+                img_url = resolutions[-1].get("url")
                 if img_url:
                     return _fix_reddit_image_url(img_url)
     except (KeyError, IndexError, TypeError):
         pass
 
-    # 3. Thumbnail (low quality fallback for link posts)
     thumb = post_data.get("thumbnail")
     if thumb and thumb not in ("self", "default", "nsfw", "spoiler", ""):
         return _fix_reddit_image_url(thumb)
@@ -113,54 +100,110 @@ def _extract_image_url(post_data: dict) -> str | None:
 def paraphrase_text(text: str) -> str:
     if not text or not text.strip():
         return "No details provided."
-
     text = text.replace("&", "and")
-
     wrapped_lines = []
     for paragraph in text.splitlines():
         paragraph = paragraph.strip()
         if paragraph:
             wrapped_lines.extend(textwrap.wrap(paragraph, width=MAX_LINE_LENGTH))
             wrapped_lines.append("")
-
     return "\n".join(wrapped_lines).strip()
 
 
 # ------------------ REDDIT FETCH ------------------
-def fetch_reddit_user_posts() -> list[dict]:
-    url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=20"
-    headers = {"User-Agent": "aqw-discord-bot/1.0"}
+REDDIT_BASE_URLS = [
+    "https://www.reddit.com",
+    "https://old.reddit.com",
+]
 
-    try:
-        res = requests.get(url, headers=headers, timeout=10)
-        res.raise_for_status()
-        data = res.json()
-    except requests.RequestException as e:
-        log.error("Reddit request failed: %s", e)
-        return []
-    except ValueError as e:
-        log.error("Invalid Reddit JSON response: %s", e)
-        return []
+
+def fetch_reddit_user_posts() -> list[dict]:
+    headers = {
+        "User-Agent": "aqw-discord-bot/1.0 (by /u/DefNotDatenshi)",
+        "Accept": "application/json",
+    }
+    last_error = None
+    children = []
+
+    for base_url in REDDIT_BASE_URLS:
+        url = f"{base_url}/user/{REDDIT_USER}/submitted.json?limit=25"
+        try:
+            res = requests.get(url, headers=headers, timeout=15)
+            log.info("Reddit %s -> status %s", base_url, res.status_code)
+
+            if res.status_code == 429:
+                log.warning("Reddit rate limited (429), trying next URL...")
+                last_error = "Rate limited"
+                continue
+
+            if res.status_code != 200:
+                log.warning("Reddit returned %s: %s", res.status_code, res.text[:200])
+                last_error = f"HTTP {res.status_code}"
+                continue
+
+            data = res.json()
+            children = data.get("data", {}).get("children", [])
+            break
+        except requests.Timeout:
+            log.warning("Reddit timeout for %s", base_url)
+            last_error = "Timeout"
+            continue
+        except requests.RequestException as e:
+            log.warning("Reddit request failed for %s: %s", base_url, e)
+            last_error = str(e)
+            continue
+        except ValueError as e:
+            log.error("Invalid Reddit JSON: %s", e)
+            return []
+    else:
+        log.warning("User endpoint failed, trying r/%s...", REDDIT_SUBREDDIT)
+        for base_url in REDDIT_BASE_URLS:
+            url = f"{base_url}/r/{REDDIT_SUBREDDIT}/new.json?limit=25"
+            try:
+                res = requests.get(url, headers=headers, timeout=15)
+                if res.status_code == 200:
+                    data = res.json()
+                    raw = data.get("data", {}).get("children", [])
+                    children = [c for c in raw if c.get("data", {}).get("author", "").lower() == REDDIT_USER.lower()]
+                    log.info("r/%s: %d posts by %s", REDDIT_SUBREDDIT, len(children), REDDIT_USER)
+                    break
+            except Exception:
+                pass
+        if not children:
+            log.error("All Reddit sources failed. Last error: %s", last_error)
+            return []
+
+    log.info("Reddit returned %d posts (before keyword filter)", len(children))
 
     posts = []
-    for post in data.get("data", {}).get("children", []):
+    fallback_post = None
+
+    for post in children:
         d = post.get("data", {})
         full_text = (d.get("title", "") + "\n" + d.get("selftext", "")).lower()
-
-        if not any(k in full_text for k in KEYWORDS):
-            continue
-
         image = _extract_image_url(d)
         body_text = d.get("selftext", "")
         paraphrased_body = paraphrase_text(body_text)
-
-        posts.append({
+        parsed = {
             "id": d.get("id"),
             "title": d.get("title", "Untitled"),
             "image": image,
             "body": paraphrased_body,
-        })
+        }
 
+        if not fallback_post:
+            fallback_post = parsed
+
+        if not any(k in full_text for k in KEYWORDS):
+            continue
+
+        posts.append(parsed)
+
+    if not posts and fallback_post and SHOW_LATEST_IF_NO_MATCH:
+        log.info("No keyword match; showing latest post as fallback")
+        posts = [fallback_post]
+
+    log.info("After keyword filter: %d posts", len(posts))
     return posts
 
 
@@ -224,4 +267,15 @@ async def on_ready():
 
 
 if __name__ == "__main__":
+    import sys
+    if "--test-reddit" in sys.argv:
+        log.info("Testing Reddit fetch for user: %s", REDDIT_USER)
+        posts = fetch_reddit_user_posts()
+        log.info("Got %d posts", len(posts))
+        for i, p in enumerate(posts[:3]):
+            log.info("  [%d] %s (id=%s)", i + 1, p["title"][:60], p["id"])
+        if not posts:
+            log.warning("No posts - check logs above.")
+        sys.exit(0)
+
     bot.run(TOKEN)
