@@ -4,19 +4,16 @@ from discord.ext import commands, tasks
 import requests
 import aiosqlite
 import asyncio
-import openai  # OpenAI library
+import textwrap
 
 # ------------------ CONFIG ------------------
 TOKEN = os.getenv("TOKEN")
-CHANNEL_ID = 1484113318095622315  # Replace with your Discord channel ID
+CHANNEL_ID = 1484113318095622315  # Replace with your channel ID
 REDDIT_USER = "DefNotDatenshi"
 
 DB = "drops.db"
-KEYWORDS = ["daily", "gift", "drop", "drops"]
-
-# OpenAI API key from environment variables
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-openai.api_key = OPENAI_API_KEY
+KEYWORDS = ["daily", "gift", "drop", "drops"]  # simple filter
+MAX_LINE_LENGTH = 80  # wrap text to 80 characters per line
 
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
 
@@ -40,27 +37,26 @@ async def mark_posted(post_id):
         await db.execute("INSERT INTO posted (id) VALUES (?)", (post_id,))
         await db.commit()
 
-# ------------------ GPT PARAPHRASER ------------------
-def paraphrase_text_gpt(text: str) -> str:
+# ------------------ MOCK PARAPHRASER ------------------
+def paraphrase_text(text: str) -> str:
     """
-    Uses OpenAI GPT to paraphrase text.
+    Mock paraphraser:
+    - Replaces & with 'and'
+    - Wraps text for Discord
     """
     if not text.strip():
         return "No details provided."
-
-    prompt = f"Paraphrase the following AQW daily gift/drop description naturally and concisely:\n\n{text}\n\nParaphrased:"
-    try:
-        response = openai.Completion.create(
-            model="text-davinci-003",
-            prompt=prompt,
-            temperature=0.7,
-            max_tokens=300
-        )
-        paraphrased = response.choices[0].text.strip()
-        return paraphrased if paraphrased else "No details provided."
-    except Exception as e:
-        print(f"OpenAI paraphrase error: {e}")
-        return "No details provided."
+    
+    text = text.replace("&", "and")  # replace '&' with 'and'
+    
+    # Wrap each paragraph
+    wrapped_lines = []
+    for paragraph in text.splitlines():
+        paragraph = paragraph.strip()
+        if paragraph:
+            wrapped_lines.extend(textwrap.wrap(paragraph, width=MAX_LINE_LENGTH))
+            wrapped_lines.append("")  # blank line between paragraphs
+    return "\n".join(wrapped_lines).strip()
 
 # ------------------ REDDIT FETCH ------------------
 def fetch_reddit_user_posts():
@@ -70,8 +66,7 @@ def fetch_reddit_user_posts():
         res = requests.get(url, headers=headers, timeout=10)
         res.raise_for_status()
         data = res.json()
-    except Exception as e:
-        print(f"Error fetching Reddit: {e}")
+    except:
         return []
 
     posts = []
@@ -88,13 +83,13 @@ def fetch_reddit_user_posts():
             except:
                 image = None
 
-        # Paraphrase body with GPT
+        # Paraphrase the body text and fix &
         body_text = d.get("selftext", "")
-        paraphrased_body = paraphrase_text_gpt(body_text)
+        paraphrased_body = paraphrase_text(body_text)
 
         posts.append({
             "id": d.get("id"),
-            "title": d.get("title", "Untitled"),
+            "title": d.get("title", "Untitled"),  # plain title
             "image": image,
             "body": paraphrased_body
         })
@@ -103,8 +98,8 @@ def fetch_reddit_user_posts():
 # ------------------ EMBED ------------------
 def create_embed(post):
     embed = discord.Embed(
-        title=post["title"],
-        description=post["body"],  # GPT-paraphrased text
+        title=post["title"],  # no hyperlink
+        description=post["body"],  # wrapped + & replaced
         color=0xff4500
     )
     if post["image"]:
