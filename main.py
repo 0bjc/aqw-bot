@@ -54,7 +54,8 @@ def paraphrase_text(text: str) -> str:
 
 # ------------------ REDDIT FETCH ------------------
 def fetch_reddit_user_posts():
-    url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=20"
+    # 🔥 CRITICAL FIX: raw_json=1
+    url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=20&raw_json=1"
 
     headers = {
         "User-Agent": "python:aqw.tracker:v1.0 (by /u/example)"
@@ -77,22 +78,18 @@ def fetch_reddit_user_posts():
             selftext = d.get("selftext", "")
             full_text = (title + " " + selftext).lower()
 
-            # ORIGINAL FILTER
+            # ✅ ORIGINAL FILTER (now works again)
             if not any(k in full_text for k in KEYWORDS):
                 continue
 
             # ------------------ IMAGE ------------------
             image = None
 
-            if "preview" in d:
-                images = d["preview"].get("images")
-                if images:
-                    image = images[0]["source"]["url"]
+            if "preview" in d and d["preview"].get("images"):
+                image = d["preview"]["images"][0]["source"]["url"]
 
-            if not image:
-                url_field = d.get("url", "")
-                if url_field.endswith((".jpg", ".jpeg", ".png", ".gif")):
-                    image = url_field
+            elif d.get("url", "").endswith((".jpg", ".jpeg", ".png", ".gif")):
+                image = d.get("url")
 
             if image:
                 image = image.replace("&amp;", "&")
@@ -162,6 +159,7 @@ async def latestdrops(interaction: discord.Interaction):
 # ------------------ READY ------------------
 @bot.event
 async def on_ready():
+    print(f"Logged in as {bot.user}")
     await init_db()
     check_posts.start()
     await bot.tree.sync()
