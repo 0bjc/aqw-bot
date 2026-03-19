@@ -40,14 +40,15 @@ async def mark_posted(post_id):
 # ------------------ MOCK PARAPHRASER ------------------
 def paraphrase_text(text: str) -> str:
     """
-    Mock paraphraser:
-    - Replaces & with 'and'
-    - Wraps text for Discord
+    - Replace & with 'and'
+    - Remove 'amp;'
+    - Wrap text nicely for Discord
     """
     if not text.strip():
         return "No details provided."
     
-    text = text.replace("&", "and")  # replace '&' with 'and'
+    # Replace & and remove amp;
+    text = text.replace("&", "and").replace("amp;", "")
     
     # Wrap each paragraph
     wrapped_lines = []
@@ -83,7 +84,7 @@ def fetch_reddit_user_posts():
             except:
                 image = None
 
-        # Paraphrase the body text and fix &
+        # Paraphrase the body text and fix & / amp;
         body_text = d.get("selftext", "")
         paraphrased_body = paraphrase_text(body_text)
 
@@ -99,7 +100,7 @@ def fetch_reddit_user_posts():
 def create_embed(post):
     embed = discord.Embed(
         title=post["title"],  # no hyperlink
-        description=post["body"],  # wrapped + & replaced
+        description=post["body"],  # wrapped + & replaced + amp; removed
         color=0xff4500
     )
     if post["image"]:
