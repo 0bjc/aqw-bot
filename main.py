@@ -8,11 +8,11 @@ import re
 
 # ------------------ CONFIG ------------------
 TOKEN = os.getenv("TOKEN")
-CHANNEL_ID = 1484113318095622315  # Replace with your channel ID
+CHANNEL_ID = 1484113318095622315  # Replace with your Discord channel ID
 REDDIT_USER = "DefNotDatenshi"
+KEYWORDS = ["daily", "gift", "drop", "drops"]
 
 DB = "drops.db"
-KEYWORDS = ["daily", "gift", "drop", "drops"]
 
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
 
@@ -37,18 +37,14 @@ async def mark_posted(post_id):
         await db.commit()
 
 # ------------------ PARSER ------------------
-def extract_drop_info(text):
-    """Try to extract Map, Monster, Weapons, Rarity from post text."""
-    text = text[:1500]  # Limit to first 1500 chars
+def extract_fields(text):
+    """Safely extract Map, Monster, Weapons, Rarity from post text"""
+    text = text[:1500]  # limit search
     def find(label):
         try:
-            # Match label followed by colon or dash
             pattern = rf"{label}[:\-]\s*(.+)"
             match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                # Stop at newline or first double space
-                return match.group(1).split("\n")[0].split("  ")[0].strip()
-            return "Unknown"
+            return match.group(1).split("\n")[0].split("  ")[0].strip() if match else "Unknown"
         except:
             return "Unknown"
 
@@ -79,10 +75,11 @@ def fetch_reddit_user_posts():
             continue
 
         post_id = d.get("id")
+        title = d.get("title", "Untitled")
         body = d.get("selftext", "")
-        full_text = d.get("title", "") + "\n" + body
+        full_text = title + "\n" + body
 
-        info = extract_drop_info(full_text)
+        info = extract_fields(full_text)
 
         image = None
         if "preview" in d:
@@ -93,7 +90,7 @@ def fetch_reddit_user_posts():
 
         posts.append({
             "id": post_id,
-            "title": d.get("title", "Untitled"),
+            "title": title,
             "image": image,
             "info": info
         })
@@ -118,7 +115,7 @@ def create_embed(post):
     )
     if post["image"]:
         embed.set_image(url=post["image"])
-    embed.set_footer(text="AQW Tracker")
+    embed.set_footer(text="AQW Tracker")  # No Reddit reference
     return embed
 
 # ------------------ LOOP ------------------
@@ -143,11 +140,9 @@ async def check_posts():
 async def latestdrops(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
     posts = await asyncio.to_thread(fetch_reddit_user_posts)
-
     if not posts:
         await interaction.followup.send("No relevant daily gifts/drops found.")
         return
-
     embed = create_embed(posts[0])
     await interaction.followup.send(embed=embed)
 
