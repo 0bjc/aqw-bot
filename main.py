@@ -8,7 +8,7 @@ import re
 
 # ------------------ CONFIG ------------------
 TOKEN = os.getenv("TOKEN")
-CHANNEL_ID = 1484113318095622315  # Replace with your Discord channel ID
+CHANNEL_ID = 1484113318095622315  # Replace with your channel ID
 REDDIT_USER = "DefNotDatenshi"
 
 DB = "drops.db"
@@ -67,9 +67,10 @@ def fetch_reddit_user_posts():
     posts = []
     for post in data.get("data", {}).get("children", []):
         d = post["data"]
-        title = d.get("title", "Untitled").lower()
-        if not any(word in title for word in ["daily", "gift", "drop", "drops"]):
-            continue  # Filter by keywords
+        title_lower = d.get("title", "").lower()
+        # Filter by keywords
+        if not any(k in title_lower for k in ["daily", "gift", "drop", "drops"]):
+            continue
 
         post_id = d.get("id")
         body = d.get("selftext", "")
@@ -86,7 +87,7 @@ def fetch_reddit_user_posts():
 
         posts.append({
             "id": post_id,
-            "title": d.get("title", "Untitled"),  # Keep original casing
+            "title": d.get("title", "Untitled"),  # plain title
             "image": image,
             "info": info
         })
@@ -111,8 +112,7 @@ def create_embed(post):
     )
     if post["image"]:
         embed.set_image(url=post["image"])
-    # Remove user info
-    embed.set_footer(text="AQW Tracker")
+    embed.set_footer(text="AQW Tracker")  # No username
     return embed
 
 # ------------------ LOOP ------------------
@@ -134,13 +134,13 @@ async def check_posts():
         await mark_posted(post["id"])
 
 # ------------------ SLASH COMMAND ------------------
-@bot.tree.command(name="latestdrops", description="Check latest AQW posts from Reddit user")
+@bot.tree.command(name="latestdrops", description="Check latest AQW daily gifts/drops")
 async def latestdrops(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
     posts = await asyncio.to_thread(fetch_reddit_user_posts)
 
     if not posts:
-        await interaction.followup.send(f"No relevant daily gifts/drops found.")
+        await interaction.followup.send("No relevant daily gifts/drops found.")
         return
 
     embed = create_embed(posts[0])
