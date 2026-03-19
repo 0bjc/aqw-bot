@@ -68,49 +68,47 @@ def fetch_reddit_user_posts():
     posts = []
 
     for post in data.get("data", {}).get("children", []):
-        d = post["data"]
-
-        title = d.get("title", "")
-        selftext = d.get("selftext", "")
-        full_text = (title + " " + selftext).lower()
-
-        # KEEP ORIGINAL KEYWORD FILTER ONLY
-        if not any(k in full_text for k in KEYWORDS):
-            continue
-
-        # ------------------ IMAGE HANDLING (SAFE) ------------------
-        image = None
-
         try:
-            if d.get("post_hint") == "image":
-                image = d.get("url_overridden_by_dest")
+            d = post["data"]
 
-            elif d.get("is_gallery") and d.get("media_metadata"):
-                media_metadata = d["media_metadata"]
-                first_item = next(iter(media_metadata.values()))
-                image = first_item["s"]["u"]
+            title = d.get("title", "")
+            selftext = d.get("selftext", "")
+            full_text = (title + " " + selftext).lower()
 
-            elif "preview" in d:
-                image = d["preview"]["images"][0]["source"]["url"]
+            # ✅ ORIGINAL FILTER (unchanged behavior)
+            if not any(k in full_text for k in KEYWORDS):
+                continue
 
-            elif d.get("url", "").endswith((".jpg", ".jpeg", ".png", ".gif")):
-                image = d.get("url")
-
-        except Exception:
+            # ------------------ IMAGE HANDLING (SAFE + SIMPLE) ------------------
             image = None
 
-        if image:
-            image = image.replace("&amp;", "&")
+            # Try preview first (most consistent)
+            if "preview" in d:
+                try:
+                    image = d["preview"]["images"][0]["source"]["url"]
+                except:
+                    image = None
 
-        # ------------------ TEXT ------------------
-        body = paraphrase_text(selftext)
+            # Fallback: direct URL image
+            if not image and d.get("url", "").endswith((".jpg", ".jpeg", ".png", ".gif")):
+                image = d.get("url")
 
-        posts.append({
-            "id": d.get("id"),
-            "title": title or "Untitled",
-            "image": image,
-            "body": body
-        })
+            # Fix encoding
+            if image:
+                image = image.replace("&amp;", "&")
+
+            # ------------------ TEXT ------------------
+            body = paraphrase_text(selftext)
+
+            posts.append({
+                "id": d.get("id"),
+                "title": title or "Untitled",
+                "image": image,
+                "body": body
+            })
+
+        except Exception as e:
+            print("Post parse error:", e)
 
     return posts
 
