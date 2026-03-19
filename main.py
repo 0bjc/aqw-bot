@@ -3,10 +3,11 @@ import discord
 from discord.ext import commands, tasks
 import requests
 import aiosqlite
+import re
 
 # ------------------ CONFIG ------------------
 TOKEN = os.getenv("TOKEN")
-CHANNEL_ID = 1484113318095622315  # Replace with your channel ID
+CHANNEL_ID = 1484113318095622315
 REDDIT_USER = "DefNotDatenshi"
 
 DB = "drops.db"
@@ -33,11 +34,24 @@ async def mark_posted(post_id):
         await db.execute("INSERT INTO posted (id) VALUES (?)", (post_id,))
         await db.commit()
 
-# ------------------ REDDIT FETCH ------------------
-def fetch_reddit_user_posts():
-    url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=10"
+# ------------------ TEXT PARSER ------------------
+def extract_info(text):
+    def find(label):
+        pattern = rf"{label}[:\-]\s*(.+)"
+        match = re.search(pattern, text, re.IGNORECASE)
+        return match.group(1).strip() if match else "Unknown"
 
-    headers = {"User-Agent": "aqw-discord-bot"}
+    return {
+        "map": find("map"),
+        "monster": find("monster"),
+        "weapons": find("weapon|drop|item"),
+        "rarity": find("rarity")
+    }
+
+# ------------------ REDDIT FETCH ------------------
+def fetch_posts():
+    url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=10"
+    headers = {"User-Agent": "aqw-bot"}
 
     res = requests.get(url, headers=headers)
     data = res.json()
@@ -45,43 +59,55 @@ def fetch_reddit_user_posts():
     posts = []
 
     for post in data["data"]["children"]:
-        post_data = post["data"]
+        d = post["data"]
 
-        title = post_data["title"]
-        post_id = post_data["id"]
-        link = "https://reddit.com" + post_data["permalink"]
+        title = d["title"]
+        body = d.get("selftext", "")
+        full_text = title + "\n" + body
 
-        # Filter keywords
-        if not any(word in title.lower() for word in ["gift", "drop", "daily"]):
+        if not any(word in full_text.lower() for word in ["gift", "drop", "daily"]):
             continue
 
-        image = None
+        info = extract_info(full_text)
 
-        # Get preview image if exists
-        if "preview" in post_data:
-            image = post_data["preview"]["images"][0]["source"]["url"]
+        image = None
+        if "preview" in d:
+            image = d["preview"]["images"][0]["source"]["url"]
 
         posts.append({
-            "id": post_id,
+            "id": d["id"],
             "title": title,
-            "url": link,
-            "image": image
+            "url": "https://reddit.com" + d["permalink"],
+            "image": image,
+            "info": info
         })
 
     return posts
 
 # ------------------ EMBED ------------------
 def create_embed(post):
+    info = post["info"]
+
     embed = discord.Embed(
-        title=post["title"],
-        url=post["url"],
-        color=0xff4500
+        title="🎁 Daily Gift Drop",
+        color=0x00ff88
+    )
+
+    embed.add_field(
+        name="Available for ALL Players",
+        value=(
+            f"**Map:** {info['map']}\n"
+            f"**Monster:** {info['monster']}\n"
+            f"**Weapons:** {info['weapons']}\n"
+            f"**Rarity:** {info['rarity']}"
+        ),
+        inline=False
     )
 
     if post["image"]:
         embed.set_image(url=post["image"])
 
-    embed.set_footer(text=f"AQW Reddit Tracker ({REDDIT_USER})")
+    embed.set_footer(text="AQW Drop Tracker")
     return embed
 
 # ------------------ LOOP ------------------
@@ -89,11 +115,8 @@ def create_embed(post):
 async def check_posts():
     await bot.wait_until_ready()
     channel = bot.get_channel(CHANNEL_ID)
-    if not channel:
-        print("Channel not found")
-        return
 
-    posts = fetch_reddit_user_posts()
+    posts = fetch_posts()
 
     for post in posts:
         if await is_posted(post["id"]):
@@ -104,13 +127,13 @@ async def check_posts():
         await mark_posted(post["id"])
 
 # ------------------ COMMAND ------------------
-@bot.tree.command(name="latestdrops", description="Check latest AQW posts from Reddit user")
+@bot.tree.command(name="latestdrops", description="Show latest drop")
 async def latestdrops(interaction: discord.Interaction):
     await interaction.response.defer()
-    posts = fetch_reddit_user_posts()
 
+    posts = fetch_posts()
     if not posts:
-        await interaction.followup.send(f"No relevant posts found from u/{REDDIT_USER}.")
+        await interaction.followup.send("No drops found.")
         return
 
     embed = create_embed(posts[0])
