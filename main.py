@@ -3,11 +3,11 @@ import discord
 from discord.ext import commands, tasks
 import requests
 import aiosqlite
-import re
 import asyncio
+import re
 
 # ------------------ CONFIG ------------------
-TOKEN = os.getenv("TOKEN")  # Railway environment variable
+TOKEN = os.getenv("TOKEN")
 CHANNEL_ID = 1484113318095622315  # Replace with your Discord channel ID
 REDDIT_USER = "DefNotDatenshi"
 
@@ -35,8 +35,9 @@ async def mark_posted(post_id):
         await db.execute("INSERT INTO posted (id) VALUES (?)", (post_id,))
         await db.commit()
 
-# ------------------ TEXT PARSER ------------------
-def extract_info(text):
+# ------------------ PARSER ------------------
+def extract_fields(text):
+    """Extract Map, Monster, Weapons, Rarity from Reddit post text"""
     def find(label):
         pattern = rf"{label}[:\-]\s*(.+)"
         match = re.search(pattern, text, re.IGNORECASE)
@@ -50,9 +51,9 @@ def extract_info(text):
     }
 
 # ------------------ REDDIT FETCH ------------------
-def fetch_posts():
+def fetch_reddit_user_posts():
     url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=10"
-    headers = {"User-Agent": "aqw-bot"}
+    headers = {"User-Agent": "aqw-discord-bot"}
 
     try:
         res = requests.get(url, headers=headers, timeout=10)
@@ -66,15 +67,14 @@ def fetch_posts():
 
     for post in data.get("data", {}).get("children", []):
         d = post["data"]
-        title = d.get("title", "")
+        post_id = d.get("id")
+        title = d.get("title", "Untitled")
         body = d.get("selftext", "")
         full_text = title + "\n" + body
+        link = "https://reddit.com" + d.get("permalink", "")
 
-        # Filter keywords
-        if not any(word in full_text.lower() for word in ["gift", "drop", "daily"]):
-            continue
-
-        info = extract_info(full_text)
+        # Extract structured fields
+        info = extract_fields(full_text)
 
         image = None
         if "preview" in d:
@@ -84,9 +84,9 @@ def fetch_posts():
                 image = None
 
         posts.append({
-            "id": d.get("id"),
+            "id": post_id,
             "title": title,
-            "url": "https://reddit.com" + d.get("permalink", ""),
+            "url": link,
             "image": image,
             "info": info
         })
@@ -97,13 +97,13 @@ def fetch_posts():
 def create_embed(post):
     info = post["info"]
     embed = discord.Embed(
-        title="🎁 Daily Gift Drop",
-        color=0x00ff88,
-        url=post["url"]
+        title=post["title"],
+        url=post["url"],
+        color=0xff4500
     )
 
     embed.add_field(
-        name="Available for ALL Players",
+        name="Drop Info",
         value=(
             f"**Map:** {info['map']}\n"
             f"**Monster:** {info['monster']}\n"
@@ -116,7 +116,7 @@ def create_embed(post):
     if post["image"]:
         embed.set_image(url=post["image"])
 
-    embed.set_footer(text="AQW Drop Tracker")
+    embed.set_footer(text=f"AQW Reddit Tracker ({REDDIT_USER})")
     return embed
 
 # ------------------ LOOP ------------------
@@ -128,26 +128,24 @@ async def check_posts():
         print("Channel not found")
         return
 
-    posts = await asyncio.to_thread(fetch_posts)
+    posts = await asyncio.to_thread(fetch_reddit_user_posts)
 
     for post in posts:
         if await is_posted(post["id"]):
             continue
-
         embed = create_embed(post)
         await channel.send(embed=embed)
         await mark_posted(post["id"])
 
 # ------------------ SLASH COMMAND ------------------
-@bot.tree.command(name="latestdrops", description="Show latest AQW drops from Reddit user")
+@bot.tree.command(name="latestdrops", description="Check latest AQW posts from Reddit user")
 async def latestdrops(interaction: discord.Interaction):
-    # Defer immediately (prevents "thinking" timeout)
     await interaction.response.defer(thinking=True)
 
-    posts = await asyncio.to_thread(fetch_posts)
+    posts = await asyncio.to_thread(fetch_reddit_user_posts)
 
     if not posts:
-        await interaction.followup.send("No drops found.")
+        await interaction.followup.send(f"No posts found from u/{REDDIT_USER}.")
         return
 
     embed = create_embed(posts[0])
