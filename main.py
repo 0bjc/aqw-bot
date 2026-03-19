@@ -4,6 +4,7 @@ from discord.ext import commands, tasks
 import requests
 import aiosqlite
 import asyncio
+import re
 
 # ------------------ CONFIG ------------------
 TOKEN = os.getenv("TOKEN")
@@ -11,7 +12,7 @@ CHANNEL_ID = 1484113318095622315  # Replace with your channel ID
 REDDIT_USER = "DefNotDatenshi"
 
 DB = "drops.db"
-KEYWORDS = ["daily", "gift", "drop", "drops"]  # simple filter
+KEYWORDS = ["daily", "gift", "drop", "drops"]
 
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
 
@@ -35,6 +36,29 @@ async def mark_posted(post_id):
         await db.execute("INSERT INTO posted (id) VALUES (?)", (post_id,))
         await db.commit()
 
+# ------------------ PARSER ------------------
+def extract_drop_info(text):
+    """Try to extract Map, Monster, Weapons, Rarity from post text."""
+    text = text[:1500]  # Limit to first 1500 chars
+    def find(label):
+        try:
+            # Match label followed by colon or dash
+            pattern = rf"{label}[:\-]\s*(.+)"
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                # Stop at newline or first double space
+                return match.group(1).split("\n")[0].split("  ")[0].strip()
+            return "Unknown"
+        except:
+            return "Unknown"
+
+    return {
+        "map": find("map"),
+        "monster": find("monster"),
+        "weapons": find("weapon|drop|item"),
+        "rarity": find("rarity")
+    }
+
 # ------------------ REDDIT FETCH ------------------
 def fetch_reddit_user_posts():
     url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=20"
@@ -43,7 +67,8 @@ def fetch_reddit_user_posts():
         res = requests.get(url, headers=headers, timeout=10)
         res.raise_for_status()
         data = res.json()
-    except:
+    except Exception as e:
+        print(f"Error fetching Reddit: {e}")
         return []
 
     posts = []
@@ -53,6 +78,12 @@ def fetch_reddit_user_posts():
         if not any(k in title_lower for k in KEYWORDS):
             continue
 
+        post_id = d.get("id")
+        body = d.get("selftext", "")
+        full_text = d.get("title", "") + "\n" + body
+
+        info = extract_drop_info(full_text)
+
         image = None
         if "preview" in d:
             try:
@@ -61,21 +92,33 @@ def fetch_reddit_user_posts():
                 image = None
 
         posts.append({
-            "id": d.get("id"),
-            "title": d.get("title", "Untitled"),  # plain title
-            "image": image
+            "id": post_id,
+            "title": d.get("title", "Untitled"),
+            "image": image,
+            "info": info
         })
     return posts
 
 # ------------------ EMBED ------------------
 def create_embed(post):
+    info = post["info"]
     embed = discord.Embed(
-        title=post["title"],  # no hyperlink
+        title=post["title"],  # plain title, no hyperlink
         color=0xff4500
+    )
+    embed.add_field(
+        name="Drop Info",
+        value=(
+            f"**Map:** {info['map']}\n"
+            f"**Monster:** {info['monster']}\n"
+            f"**Weapons:** {info['weapons']}\n"
+            f"**Rarity:** {info['rarity']}"
+        ),
+        inline=False
     )
     if post["image"]:
         embed.set_image(url=post["image"])
-    embed.set_footer(text="AQW Tracker")  # no username
+    embed.set_footer(text="AQW Tracker")
     return embed
 
 # ------------------ LOOP ------------------
