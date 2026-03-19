@@ -4,6 +4,7 @@ import os
 import logging
 import re
 import asyncio
+import time
 from datetime import datetime, timedelta
 from urllib.parse import urljoin, urlparse
 
@@ -23,7 +24,7 @@ RECENT_URL = f"{WIKI_BASE}/system:recent-changes"
 
 DB = "drops.db"
 CHECK_DAYS = 7
-MAX_DESC_LENGTH = 3800  # Discord embed description limit 4096, leave room
+MAX_DESC_LENGTH = 3800
 MAX_TITLE_LENGTH = 256
 
 # ---------------- DISCORD ----------------
@@ -66,7 +67,6 @@ async def mark_posted(pid: str):
 
 # ---------------- HELPERS ----------------
 def parse_wiki_time(text: str) -> datetime | None:
-    """Parse '19 Mar 2026 06:46' or '17 Feb 2026 07:53'."""
     text = text.strip()
     for fmt in ("%d %b %Y %H:%M", "%d %b %Y %H:%M:%S"):
         try:
@@ -77,7 +77,6 @@ def parse_wiki_time(text: str) -> datetime | None:
 
 
 def page_has_aegift(soup: BeautifulSoup) -> bool:
-    """Check if page has aegift tag."""
     for tag_el in soup.select(".page-tags a, a[href*='tag/aegift']"):
         if tag_el.get_text(strip=True).lower() == "aegift":
             return True
@@ -88,7 +87,6 @@ def page_has_aegift(soup: BeautifulSoup) -> bool:
 
 
 def _make_absolute(url: str, base: str | None = None) -> str:
-    """Convert relative URL to absolute."""
     if not url or url.startswith(("http://", "https://")):
         return url or ""
     base = WIKI_BASE if not base or url.startswith("/") else base
@@ -96,10 +94,6 @@ def _make_absolute(url: str, base: str | None = None) -> str:
 
 
 def extract_page_content(url: str) -> dict:
-    """
-    Fetch a wiki page and extract title, text content, and images.
-    Returns {title, content, images, url} or empty dict on failure.
-    """
     try:
         r = requests.get(url, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
         r.raise_for_status()
@@ -165,7 +159,6 @@ def extract_page_content(url: str) -> dict:
 
 
 def fetch_recent_aegifts() -> list[dict]:
-    """Fetch recent changes, filter for aegift pages, and enrich with content."""
     log.info("Scanning recent changes...")
 
     try:
@@ -232,7 +225,6 @@ def fetch_recent_aegifts() -> list[dict]:
 
 
 def create_embed(post: dict) -> discord.Embed:
-    """Build a Discord embed with title, content, image, and link."""
     desc = f"🎁 **New AE Gift**\n\n{post['content']}\n\n[View on Wiki]({post['url']})"
     if len(desc) > 4096:
         desc = desc[:4090] + "..."
@@ -302,4 +294,24 @@ async def on_ready():
 
 # ---------------- START ----------------
 if __name__ == "__main__":
-    bot.run(TOKEN)
+    max_retries = 5
+    base_delay = 60
+
+    for attempt in range(max_retries):
+        try:
+            bot.run(TOKEN)
+            break
+        except discord.HTTPException as e:
+            if e.status == 429 and attempt < max_retries - 1:
+                delay = base_delay * (2**attempt)
+                retry_after = getattr(e, "retry_after", None)
+                wait = retry_after if retry_after is not None else delay
+                log.warning(
+                    "Rate limited (429). Waiting %ds before retry (%d/%d)...",
+                    wait,
+                    attempt + 1,
+                    max_retries,
+                )
+                time.sleep(w)
+            else:
+                raise
