@@ -4,7 +4,7 @@ import os
 import logging
 import re
 import asyncio
-import time
+import textwrap
 from datetime import datetime, timedelta
 from urllib.parse import urljoin, urlparse
 
@@ -27,6 +27,7 @@ DB = "drops.db"
 CHECK_DAYS = 7
 MAX_DESC_LENGTH = 3800
 MAX_TITLE_LENGTH = 256
+WRAP_WIDTH = 55  # characters per line for Discord embed
 
 # ---------------- DISCORD ----------------
 intents = discord.Intents.default()
@@ -68,7 +69,9 @@ async def mark_posted(pid: str):
 
 # ---------------- HELPERS ----------------
 def parse_wiki_time(text: str) -> datetime | None:
+    """Parse '19 Mar 2026 06:46' or '17 Feb 2026 07:53'."""
     text = text.strip()
+    # Try with and without seconds
     for fmt in ("%d %b %Y %H:%M", "%d %b %Y %H:%M:%S"):
         try:
             return datetime.strptime(text, fmt)
@@ -78,6 +81,8 @@ def parse_wiki_time(text: str) -> datetime | None:
 
 
 def page_has_aegift(soup: BeautifulSoup) -> bool:
+    """Check if page has aegift tag."""
+    # Tags can be in .page-tags a or in footer tag links
     for tag_el in soup.select(".page-tags a, a[href*='tag/aegift']"):
         if tag_el.get_text(strip=True).lower() == "aegift":
             return True
@@ -88,13 +93,19 @@ def page_has_aegift(soup: BeautifulSoup) -> bool:
 
 
 def _make_absolute(url: str, base: str | None = None) -> str:
+    """Convert relative URL to absolute."""
     if not url or url.startswith(("http://", "https://")):
         return url or ""
+    # Paths starting with / are relative to domain root
     base = WIKI_BASE if not base or url.startswith("/") else base
     return urljoin(base, url)
 
 
 def extract_page_content(url: str) -> dict:
+    """
+    Fetch a wiki page and extract title, text content, and images.
+    Returns {title, content, images, url} or empty dict on failure.
+    """
     try:
         r = requests.get(url, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
         r.raise_for_status()
@@ -107,6 +118,7 @@ def extract_page_content(url: str) -> dict:
     if not page_has_aegift(soup):
         return {}
 
+    # Get page title from #page-title or title tag
     title_el = soup.select_one("#page-title")
     if title_el:
         title = title_el.get_text(strip=True)
@@ -116,6 +128,7 @@ def extract_page_content(url: str) -> dict:
 
     title = (title[: MAX_TITLE_LENGTH - 3] + "...") if len(title) > MAX_TITLE_LENGTH else title
 
+    # Get main content from #page-content
     content_el = soup.select_one("#page-content")
     if not content_el:
         content_el = soup.select_one("#main-content")
@@ -126,26 +139,49 @@ def extract_page_content(url: str) -> dict:
     images = []
 
     if content_el:
+        # Remove tags section before extracting text
+        for el in content_el.select(".page-tags, .page-info-bottom"):
+            el.decompose()
+        for el in content_el.find_all("a", href=re.compile(r"system:page-tags/tag")):
+            el.decompose()
         for script in content_el.select("script, style"):
             script.decompose()
+
         content_text = content_el.get_text(separator="\n", strip=True)
         content_text = re.sub(r"\n{3,}", "\n\n", content_text)
 
+        # Remove Sellback, Rarity Description, Description, Also see, and tags
+        content_text = re.sub(r"Sellback:\s*[^\n]+", "", content_text, flags=re.IGNORECASE)
+        content_text = re.sub(r"Rarity Description:\s*[^\n]+(?:\n(?![A-Z][a-z]+:)[^\n]*)*", "", content_text, flags=re.IGNORECASE)
+        content_text = re.sub(r"(?<!\w)Description:\s*[^\n]+(?:\n(?![A-Z][a-z]+:)[^\n]*)*", "", content_text, flags=re.IGNORECASE)
+        content_text = re.sub(r"Also see:[\s\S]*", "", content_text, flags=re.IGNORECASE)
+        content_text = re.sub(r"\n{3,}", "\n\n", content_text).strip()
+
+        # Extract images: prefer imgur (main item image), exclude icons/thumbnails
+        imgur_urls = []
+        other_urls = []
         for img in content_el.select("img[src]"):
             src = img.get("src")
-            if not src or "pixel" in src.lower() or "spacer" in src.lower():
+            if not src or any(x in src.lower() for x in ("pixel", "spacer", "icon", "thumb")):
                 continue
             full_url = _make_absolute(src, url)
-            if full_url and full_url not in images:
-                images.append(full_url)
+            if not full_url:
+                continue
+            if "imgur.com" in full_url:
+                if full_url not in imgur_urls:
+                    imgur_urls.append(full_url)
+            else:
+                if full_url not in other_urls:
+                    other_urls.append(full_url)
+        images = imgur_urls if imgur_urls else other_urls
 
     if not images:
-        for img in soup.select("#page-content img[src], .page-content img[src]"):
+        for img in soup.select("#page-content img[src]"):
             src = img.get("src")
-            if src:
+            if src and "imgur.com" in src:
                 full_url = _make_absolute(src, url)
                 if full_url:
-                    images.append(full_url)
+                    images = [full_url]
                     break
 
     if len(content_text) > MAX_DESC_LENGTH:
@@ -160,6 +196,7 @@ def extract_page_content(url: str) -> dict:
 
 
 def _fetch_aegift_page_urls() -> set[str]:
+    """Fetch all page URLs that have the aegift tag from the tag index page."""
     try:
         res = requests.get(
             AEGIFT_TAG_URL,
@@ -173,6 +210,7 @@ def _fetch_aegift_page_urls() -> set[str]:
 
     soup = BeautifulSoup(res.text, "html.parser")
     urls = set()
+    # Scope to main content to avoid nav/sidebar links
     content = soup.select_one("#page-content") or soup.select_one("#main-content") or soup
     for a in content.select("a[href]"):
         href = a.get("href", "")
@@ -187,13 +225,40 @@ def _fetch_aegift_page_urls() -> set[str]:
     return urls
 
 
+def _get_links_from_page(page_url: str) -> set[str]:
+    """Fetch a page and return all internal wiki links."""
+    try:
+        res = requests.get(page_url, timeout=10, headers={"User-Agent": "aqw-wiki-bot/1.0"})
+        res.raise_for_status()
+        soup = BeautifulSoup(res.text, "html.parser")
+        content = soup.select_one("#page-content") or soup.select_one("#main-content") or soup
+        urls = set()
+        for a in content.select("a[href]"):
+            href = a.get("href", "")
+            if not href or "system:" in href or "forum:" in href or "/tag/" in href:
+                continue
+            full = _make_absolute(href).rstrip("/")
+            if full and "aqwwiki.wikidot.com" in full and "system:" not in full:
+                urls.add(full)
+        return urls
+    except Exception as e:
+        log.debug("Could not fetch links from %s: %s", page_url, e)
+        return set()
+
+
 def fetch_recent_aegifts() -> list[dict]:
+    """
+    Only aegift pages from last 7 days.
+    Recent changes shows parent pages (events). We fetch each modified page,
+    extract links, and find aegift items that are linked from them.
+    """
     log.info("Fetching aegift tag page...")
     aegift_urls = _fetch_aegift_page_urls()
     if not aegift_urls:
         return []
 
-    recent_urls = set()
+    # Get recently modified pages (last 7 days)
+    recent_page_urls = []
     try:
         res = requests.get(
             f"{RECENT_URL}?rev_limit=200",
@@ -219,14 +284,26 @@ def fetch_recent_aegifts() -> list[dict]:
             if not change_time or change_time < cutoff:
                 continue
             page_url = _make_absolute(href).rstrip("/")
-            recent_urls.add(page_url)
+            recent_page_urls.append(page_url)
     except Exception as e:
         log.warning("Failed to fetch recent changes: %s", e)
+        return []
 
-    priority_urls = aegift_urls & recent_urls
-    fallback_urls = aegift_urls - recent_urls
-    urls_to_try = list(priority_urls) + list(fallback_urls)[:15]
-    log.info("Priority (recent+aegift): %d, fallback: %d", len(priority_urls), min(15, len(fallback_urls)))
+    log.info("Found %d pages modified in last %d days", len(recent_page_urls), CHECK_DAYS)
+
+    # Find aegift pages linked from recently modified pages
+    urls_to_try = set()
+    for page_url in recent_page_urls[:30]:  # limit to avoid too many fetches
+        links = _get_links_from_page(page_url)
+        urls_to_try |= (links & aegift_urls)
+
+    # Also include aegift pages that appear directly in recent changes
+    for u in recent_page_urls:
+        if u in aegift_urls:
+            urls_to_try.add(u)
+
+    urls_to_try = list(urls_to_try)
+    log.info("Found %d aegift pages linked from recent changes", len(urls_to_try))
 
     results = []
     seen_ids = set()
@@ -249,8 +326,23 @@ def fetch_recent_aegifts() -> list[dict]:
     return results
 
 
+def _wrap_text(text: str, width: int = WRAP_WIDTH) -> str:
+    """Wrap long lines for Discord embed readability."""
+    lines = []
+    for para in text.split("\n\n"):
+        para = para.strip()
+        if not para:
+            continue
+        wrapped = textwrap.wrap(para, width=width)
+        lines.extend(wrapped)
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 def create_embed(post: dict) -> discord.Embed:
-    desc = f"🎁 **New AE Gift**\n\n{post['content']}\n\n[View on Wiki]({post['url']})"
+    """Build a Discord embed with title, content, image, and link."""
+    wrapped = _wrap_text(post["content"])
+    desc = f"🎁 **New AE Gift**\n\n{wrapped}\n\n[View on Wiki]({post['url']})"
     if len(desc) > 4096:
         desc = desc[:4090] + "..."
 
@@ -319,13 +411,15 @@ async def on_ready():
 
 # ---------------- START ----------------
 if __name__ == "__main__":
+    import time
+
     max_retries = 5
-    base_delay = 60
+    base_delay = 60  # seconds
 
     for attempt in range(max_retries):
         try:
             bot.run(TOKEN)
-            break
+            break  # Bot stopped normally
         except discord.HTTPException as e:
             if e.status == 429 and attempt < max_retries - 1:
                 delay = base_delay * (2**attempt)
