@@ -4,11 +4,14 @@ from discord.ext import commands, tasks
 import requests
 from bs4 import BeautifulSoup
 import aiosqlite
+from datetime import datetime, timedelta
 
 # ------------------ CONFIG ------------------
-TOKEN = os.getenv("TOKEN")  # Discord bot token from Railway
-CHANNEL_ID = 1484113318095622315  # Replace with your Discord channel ID
+TOKEN = os.getenv("TOKEN")
+CHANNEL_ID = 1484113318095622315
 DB = "drops.db"
+
+URL = "http://aqwwiki.wikidot.com/system:page-tags/tag/aegift#pages"
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -34,72 +37,70 @@ async def mark_posted(item_id):
         await db.commit()
 
 # ------------------ SCRAPER ------------------
-def fetch_design_notes():
-    """Scrape AQW Design Notes for daily gifts/drops"""
-    url = "https://www.aq.com/gamedesignnotes/"
-    res = requests.get(url)
+def fetch_recent_items():
+    res = requests.get(URL)
     soup = BeautifulSoup(res.text, "html.parser")
 
-    posts = []
+    items = []
+    now = datetime.utcnow()
+    cutoff = now - timedelta(days=7)
 
-    # Each update is in an <article>
-    for article in soup.find_all("article"):
-        title_tag = article.find("h3") or article.find("h2")
-        if not title_tag:
+    # Wikidot table rows
+    rows = soup.select("table tr")
+
+    for row in rows:
+        cols = row.find_all("td")
+        if len(cols) < 2:
             continue
-        title = title_tag.get_text(strip=True)
 
-        # Filter using the requested words
-        if any(word in title.lower() for word in ["daily gift", "daily drop", "gift", "drop"]):
-            posts.append({
-                "id": title,
-                "title": title,
-                "location": "/join luckdragon",
-                "monster": "Guardian Luck Dragon",
-                "drop": title,
-                "rarity": "SEASONAL"
+        link_tag = cols[0].find("a")
+        if not link_tag:
+            continue
+
+        item_name = link_tag.text.strip()
+        item_url = "http://aqwwiki.wikidot.com" + link_tag["href"]
+
+        # Date column (usually second column)
+        date_text = cols[1].text.strip()
+
+        try:
+            item_date = datetime.strptime(date_text, "%d %b %Y")
+        except:
+            continue
+
+        # Filter last 7 days
+        if item_date >= cutoff:
+            items.append({
+                "id": item_name,
+                "name": item_name,
+                "url": item_url
             })
 
-    return posts
+    return items
 
 # ------------------ IMAGE FETCH ------------------
-def get_item_image(item_name):
-    """Get the real AQW item image from the wiki"""
+def get_item_image(item_url):
     try:
-        search_url = f"https://aqwwiki.wikidot.com/search:site/q/{item_name.replace(' ', '+')}"
-        res = requests.get(search_url, timeout=10)
+        res = requests.get(item_url, timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
 
-        result = soup.select_one(".title a")
-        if not result:
-            return None
-
-        item_url = result["href"]
-        item_res = requests.get(item_url, timeout=10)
-        item_soup = BeautifulSoup(item_res.text, "html.parser")
-
-        img = item_soup.select_one(".item-icon img")
+        img = soup.select_one(".item-icon img")
         if img:
             return img["src"]
-
     except:
         return None
     return None
 
 # ------------------ EMBED ------------------
-def create_embed(data, image_url):
+def create_embed(item, image_url):
     embed = discord.Embed(
-        title="🍀 AQW Daily Gifts / Drops 🍀",
+        title=item["name"],
+        url=item["url"],
         color=0x00ff88
     )
     embed.add_field(
-        name="Details",
-        value=(
-            f"**Location:** {data['location']}\n"
-            f"**Monster:** {data['monster']}\n"
-            f"**Drop Item:** {data['drop']}\n"
-            f"**Rarity:** {data['rarity']}"
-        ),
+        name="Source",
+        value="AQW Wiki (AE Gift)",
         inline=False
     )
     if image_url:
@@ -109,35 +110,37 @@ def create_embed(data, image_url):
 
 # ------------------ BOT LOOP ------------------
 @tasks.loop(minutes=10)
-async def check_drops():
+async def check_items():
     await bot.wait_until_ready()
     channel = bot.get_channel(CHANNEL_ID)
-    if not channel:
-        print(f"Channel {CHANNEL_ID} not found.")
-        return
 
-    posts = fetch_design_notes()
-    for item in posts:
+    items = fetch_recent_items()
+
+    for item in items:
         if await is_posted(item["id"]):
             continue
 
-        image_url = get_item_image(item["drop"])
+        image_url = get_item_image(item["url"])
         embed = create_embed(item, image_url)
 
         await channel.send(embed=embed)
         await mark_posted(item["id"])
 
-# ------------------ SLASH COMMAND ------------------
-@bot.tree.command(name="latestdrops", description="Check latest AQW daily gifts/drops manually")
+# ------------------ COMMAND ------------------
+@bot.tree.command(name="latestdrops", description="Show recent AE gifts (last 7 days)")
 async def latestdrops(interaction: discord.Interaction):
     await interaction.response.defer()
-    posts = fetch_design_notes()
-    if not posts:
-        await interaction.followup.send("No drops found.")
+
+    items = fetch_recent_items()
+
+    if not items:
+        await interaction.followup.send("No recent items found.")
         return
-    item = posts[0]
-    image_url = get_item_image(item["drop"])
+
+    item = items[0]
+    image_url = get_item_image(item["url"])
     embed = create_embed(item, image_url)
+
     await interaction.followup.send(embed=embed)
 
 # ------------------ READY ------------------
@@ -145,7 +148,7 @@ async def latestdrops(interaction: discord.Interaction):
 async def on_ready():
     print(f"Logged in as {bot.user}")
     await init_db()
-    check_drops.start()
+    check_items.start()
     await bot.tree.sync()
 
 # ------------------ RUN ------------------
