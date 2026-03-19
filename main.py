@@ -4,11 +4,10 @@ from discord.ext import commands, tasks
 import requests
 from bs4 import BeautifulSoup
 import aiosqlite
-from datetime import datetime, timedelta
 
 # ------------------ CONFIG ------------------
-TOKEN = os.getenv("TOKEN")
-CHANNEL_ID = 1484113318095622315  # replace with your channel ID
+TOKEN = os.getenv("TOKEN")  # Your Railway environment variable
+CHANNEL_ID = 1484113318095622315  # Replace with your Discord channel ID
 DB = "drops.db"
 
 URL = "http://aqwwiki.wikidot.com/system:page-tags/tag/aegift#pages"
@@ -37,53 +36,24 @@ async def mark_posted(item_id):
         await db.commit()
 
 # ------------------ SCRAPER ------------------
-def parse_date(date_text):
-    date_text = date_text.lower().strip()
-    now = datetime.utcnow()
-
-    if "today" in date_text:
-        return now
-    elif "yesterday" in date_text:
-        return now - timedelta(days=1)
-    else:
-        try:
-            return datetime.strptime(date_text, "%d %b %Y")
-        except:
-            return None
-
 def fetch_recent_items():
+    """Fetch the top recent AE Gift items from the tag page"""
     res = requests.get(URL)
     soup = BeautifulSoup(res.text, "html.parser")
 
     items = []
-    cutoff = datetime.utcnow() - timedelta(days=7)
+    # Get only the first 15–20 items (newest)
+    links = soup.select("table a")[:20]
 
-    rows = soup.select("table tr")
+    for link in links:
+        item_name = link.text.strip()
+        item_url = "http://aqwwiki.wikidot.com" + link["href"]
 
-    for row in rows:
-        cols = row.find_all("td")
-        if len(cols) < 2:
-            continue
-
-        link_tag = cols[0].find("a")
-        if not link_tag:
-            continue
-
-        item_name = link_tag.text.strip()
-        item_url = "http://aqwwiki.wikidot.com" + link_tag["href"]
-
-        date_text = cols[1].text.strip()
-        item_date = parse_date(date_text)
-
-        if not item_date:
-            continue
-
-        if item_date >= cutoff:
-            items.append({
-                "id": item_name,
-                "name": item_name,
-                "url": item_url
-            })
+        items.append({
+            "id": item_name,
+            "name": item_name,
+            "url": item_url
+        })
 
     return items
 
@@ -92,7 +62,6 @@ def get_item_image(item_url):
     try:
         res = requests.get(item_url, timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
-
         img = soup.select_one(".item-icon img")
         if img:
             return img["src"]
@@ -136,7 +105,7 @@ async def check_items():
         await mark_posted(item["id"])
 
 # ------------------ SLASH COMMAND ------------------
-@bot.tree.command(name="latestdrops", description="Show recent AE Gift items (last 7 days)")
+@bot.tree.command(name="latestdrops", description="Show recent AE Gift items")
 async def latestdrops(interaction: discord.Interaction):
     await interaction.response.defer()
 
