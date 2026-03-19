@@ -55,14 +55,16 @@ def paraphrase_text(text: str) -> str:
 # ------------------ REDDIT FETCH ------------------
 def fetch_reddit_user_posts():
     url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=20"
-    headers = {"User-Agent": "Mozilla/5.0"}
+
+    headers = {
+        "User-Agent": "python:aqw.tracker:v1.0 (by /u/example)"
+    }
 
     try:
         res = requests.get(url, headers=headers, timeout=10)
         res.raise_for_status()
         data = res.json()
-    except Exception as e:
-        print("Reddit fetch error:", e)
+    except:
         return []
 
     posts = []
@@ -75,25 +77,23 @@ def fetch_reddit_user_posts():
             selftext = d.get("selftext", "")
             full_text = (title + " " + selftext).lower()
 
-            # ✅ ORIGINAL FILTER (unchanged behavior)
+            # ORIGINAL FILTER
             if not any(k in full_text for k in KEYWORDS):
                 continue
 
-            # ------------------ IMAGE HANDLING (SAFE + SIMPLE) ------------------
+            # ------------------ IMAGE ------------------
             image = None
 
-            # Try preview first (most consistent)
             if "preview" in d:
-                try:
-                    image = d["preview"]["images"][0]["source"]["url"]
-                except:
-                    image = None
+                images = d["preview"].get("images")
+                if images:
+                    image = images[0]["source"]["url"]
 
-            # Fallback: direct URL image
-            if not image and d.get("url", "").endswith((".jpg", ".jpeg", ".png", ".gif")):
-                image = d.get("url")
+            if not image:
+                url_field = d.get("url", "")
+                if url_field.endswith((".jpg", ".jpeg", ".png", ".gif")):
+                    image = url_field
 
-            # Fix encoding
             if image:
                 image = image.replace("&amp;", "&")
 
@@ -107,8 +107,8 @@ def fetch_reddit_user_posts():
                 "body": body
             })
 
-        except Exception as e:
-            print("Post parse error:", e)
+        except:
+            continue
 
     return posts
 
@@ -133,7 +133,6 @@ async def check_posts():
     channel = bot.get_channel(CHANNEL_ID)
 
     if not channel:
-        print("Channel not found")
         return
 
     posts = await asyncio.to_thread(fetch_reddit_user_posts)
@@ -163,7 +162,6 @@ async def latestdrops(interaction: discord.Interaction):
 # ------------------ READY ------------------
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
     await init_db()
     check_posts.start()
     await bot.tree.sync()
