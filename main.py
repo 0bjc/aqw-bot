@@ -1,10 +1,11 @@
 import os
 import discord
 from discord.ext import commands, tasks
-import requests
+import aiohttp
 import aiosqlite
 import asyncio
 import textwrap
+import xml.etree.ElementTree as ET
 
 # ------------------ CONFIG ------------------
 TOKEN = os.getenv("TOKEN")
@@ -52,54 +53,50 @@ def paraphrase_text(text: str) -> str:
             wrapped_lines.append("")
     return "\n".join(wrapped_lines).strip()
 
-# ------------------ REDDIT FETCH ------------------
-def fetch_reddit_user_posts():
-    # 🔥 CRITICAL FIX: raw_json=1
-    url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=20&raw_json=1"
-
-    headers = {
-        "User-Agent": "python:aqw.tracker:v1.0 (by /u/example)"
-    }
+# ------------------ REDDIT FETCH (RSS) ------------------
+async def fetch_reddit_user_posts():
+    url = f"https://www.reddit.com/user/{REDDIT_USER}.rss"
+    headers = {"User-Agent": "Mozilla/5.0"}
 
     try:
-        res = requests.get(url, headers=headers, timeout=10)
-        res.raise_for_status()
-        data = res.json()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as res:
+                text = await res.text()
     except:
         return []
 
+    root = ET.fromstring(text)
+
     posts = []
 
-    for post in data.get("data", {}).get("children", []):
+    for entry in root.findall("{http://www.w3.org/2005/Atom}entry"):
         try:
-            d = post["data"]
+            title = entry.find("{http://www.w3.org/2005/Atom}title").text or ""
+            content = entry.find("{http://www.w3.org/2005/Atom}content").text or ""
+            post_id = entry.find("{http://www.w3.org/2005/Atom}id").text
 
-            title = d.get("title", "")
-            selftext = d.get("selftext", "")
-            full_text = (title + " " + selftext).lower()
+            full_text = (title + " " + content).lower()
 
-            # ✅ ORIGINAL FILTER (now works again)
+            # ✅ KEYWORD FILTER (same as before)
             if not any(k in full_text for k in KEYWORDS):
                 continue
 
-            # ------------------ IMAGE ------------------
+            # ---------------- IMAGE ----------------
             image = None
 
-            if "preview" in d and d["preview"].get("images"):
-                image = d["preview"]["images"][0]["source"]["url"]
+            # Extract image from HTML content
+            if 'img src="' in content:
+                start = content.find('img src="') + 9
+                end = content.find('"', start)
+                image = content[start:end]
 
-            elif d.get("url", "").endswith((".jpg", ".jpeg", ".png", ".gif")):
-                image = d.get("url")
-
-            if image:
-                image = image.replace("&amp;", "&")
-
-            # ------------------ TEXT ------------------
-            body = paraphrase_text(selftext)
+            # ---------------- TEXT ----------------
+            clean_text = content.replace("<br>", "\n")
+            body = paraphrase_text(clean_text)
 
             posts.append({
-                "id": d.get("id"),
-                "title": title or "Untitled",
+                "id": post_id,
+                "title": title,
                 "image": image,
                 "body": body
             })
@@ -132,7 +129,7 @@ async def check_posts():
     if not channel:
         return
 
-    posts = await asyncio.to_thread(fetch_reddit_user_posts)
+    posts = await fetch_reddit_user_posts()
 
     for post in posts:
         if await is_posted(post["id"]):
@@ -147,7 +144,7 @@ async def check_posts():
 async def latestdrops(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
 
-    posts = await asyncio.to_thread(fetch_reddit_user_posts)
+    posts = await fetch_reddit_user_posts()
 
     if not posts:
         await interaction.followup.send("No relevant daily gifts/drops found.")
