@@ -6,9 +6,8 @@ import aiosqlite
 import asyncio
 import re
 
-# ------------------ CONFIG ------------------
 TOKEN = os.getenv("TOKEN")
-CHANNEL_ID = 1484113318095622315  # Replace with your Discord channel ID
+CHANNEL_ID = 1484113318095622315
 REDDIT_USER = "DefNotDatenshi"
 KEYWORDS = ["daily", "gift", "drop", "drops"]
 
@@ -16,14 +15,10 @@ DB = "drops.db"
 
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
 
-# ------------------ DATABASE ------------------
+# Database functions...
 async def init_db():
     async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS posted (
-                id TEXT PRIMARY KEY
-            )
-        """)
+        await db.execute("CREATE TABLE IF NOT EXISTS posted (id TEXT PRIMARY KEY)")
         await db.commit()
 
 async def is_posted(post_id):
@@ -36,18 +31,12 @@ async def mark_posted(post_id):
         await db.execute("INSERT INTO posted (id) VALUES (?)", (post_id,))
         await db.commit()
 
-# ------------------ PARSER ------------------
+# Parser
 def extract_fields(text):
-    """Safely extract Map, Monster, Weapons, Rarity from post text"""
-    text = text[:1500]  # limit search
+    text = text[:1500]
     def find(label):
-        try:
-            pattern = rf"{label}[:\-]\s*(.+)"
-            match = re.search(pattern, text, re.IGNORECASE)
-            return match.group(1).split("\n")[0].split("  ")[0].strip() if match else "Unknown"
-        except:
-            return "Unknown"
-
+        m = re.search(rf"{label}[:\-]\s*(.+)", text, re.IGNORECASE)
+        return m.group(1).split("\n")[0].strip() if m else "Unknown"
     return {
         "map": find("map"),
         "monster": find("monster"),
@@ -55,54 +44,43 @@ def extract_fields(text):
         "rarity": find("rarity")
     }
 
-# ------------------ REDDIT FETCH ------------------
+# Fetch Reddit posts safely
 def fetch_reddit_user_posts():
     url = f"https://www.reddit.com/user/{REDDIT_USER}/submitted.json?limit=20"
-    headers = {"User-Agent": "aqw-discord-bot"}
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         res = requests.get(url, headers=headers, timeout=10)
         res.raise_for_status()
         data = res.json()
-    except Exception as e:
-        print(f"Error fetching Reddit: {e}")
+    except:
         return []
 
     posts = []
-    for post in data.get("data", {}).get("children", []):
-        d = post["data"]
-        title_lower = d.get("title", "").lower()
-        if not any(k in title_lower for k in KEYWORDS):
+    for child in data.get("data", {}).get("children", []):
+        d = child.get("data", {})
+        full_text = (d.get("title", "") + "\n" + d.get("selftext", "")).lower()
+        if not any(k in full_text for k in KEYWORDS):
             continue
 
-        post_id = d.get("id")
-        title = d.get("title", "Untitled")
-        body = d.get("selftext", "")
-        full_text = title + "\n" + body
-
-        info = extract_fields(full_text)
-
+        info = extract_fields(d.get("title", "") + "\n" + d.get("selftext", ""))
         image = None
         if "preview" in d:
             try:
                 image = d["preview"]["images"][0]["source"]["url"]
-            except:
-                image = None
+            except: pass
 
         posts.append({
-            "id": post_id,
-            "title": title,
+            "id": d.get("id"),
+            "title": d.get("title", "Untitled"),
             "image": image,
             "info": info
         })
     return posts
 
-# ------------------ EMBED ------------------
+# Embed
 def create_embed(post):
     info = post["info"]
-    embed = discord.Embed(
-        title=post["title"],  # plain title, no hyperlink
-        color=0xff4500
-    )
+    embed = discord.Embed(title=post["title"], color=0xff4500)
     embed.add_field(
         name="Drop Info",
         value=(
@@ -110,32 +88,25 @@ def create_embed(post):
             f"**Monster:** {info['monster']}\n"
             f"**Weapons:** {info['weapons']}\n"
             f"**Rarity:** {info['rarity']}"
-        ),
-        inline=False
+        )
     )
-    if post["image"]:
-        embed.set_image(url=post["image"])
-    embed.set_footer(text="AQW Tracker")  # No Reddit reference
+    if post["image"]: embed.set_image(url=post["image"])
+    embed.set_footer(text="AQW Tracker")
     return embed
 
-# ------------------ LOOP ------------------
+# Loop
 @tasks.loop(minutes=10)
 async def check_posts():
     await bot.wait_until_ready()
     channel = bot.get_channel(CHANNEL_ID)
-    if not channel:
-        print("Channel not found")
-        return
-
+    if not channel: return
     posts = await asyncio.to_thread(fetch_reddit_user_posts)
     for post in posts:
-        if await is_posted(post["id"]):
-            continue
-        embed = create_embed(post)
-        await channel.send(embed=embed)
+        if await is_posted(post["id"]): continue
+        await channel.send(embed=create_embed(post))
         await mark_posted(post["id"])
 
-# ------------------ SLASH COMMAND ------------------
+# Slash command
 @bot.tree.command(name="latestdrops", description="Check latest AQW daily gifts/drops")
 async def latestdrops(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
@@ -143,10 +114,8 @@ async def latestdrops(interaction: discord.Interaction):
     if not posts:
         await interaction.followup.send("No relevant daily gifts/drops found.")
         return
-    embed = create_embed(posts[0])
-    await interaction.followup.send(embed=embed)
+    await interaction.followup.send(embed=create_embed(posts[0]))
 
-# ------------------ READY ------------------
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
