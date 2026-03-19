@@ -4,14 +4,19 @@ from discord.ext import commands, tasks
 import requests
 import aiosqlite
 import asyncio
+import openai  # OpenAI library
 
 # ------------------ CONFIG ------------------
 TOKEN = os.getenv("TOKEN")
-CHANNEL_ID = 1484113318095622315  # Replace with your channel ID
+CHANNEL_ID = 1484113318095622315  # Replace with your Discord channel ID
 REDDIT_USER = "DefNotDatenshi"
 
 DB = "drops.db"
-KEYWORDS = ["daily", "gift", "drop", "drops"]  # simple filter
+KEYWORDS = ["daily", "gift", "drop", "drops"]
+
+# OpenAI API key from environment variables
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai.api_key = OPENAI_API_KEY
 
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.default())
 
@@ -35,16 +40,27 @@ async def mark_posted(post_id):
         await db.execute("INSERT INTO posted (id) VALUES (?)", (post_id,))
         await db.commit()
 
-# ------------------ MOCK PARAPHRASER ------------------
-def paraphrase_text(text: str) -> str:
+# ------------------ GPT PARAPHRASER ------------------
+def paraphrase_text_gpt(text: str) -> str:
     """
-    Replace this with a real paraphrasing API (like OpenAI GPT or others).
-    For now, just returns the text with minor formatting for demo.
+    Uses OpenAI GPT to paraphrase text.
     """
-    # Simple mock: split lines and prepend "[Paraphrased]" to each line
-    lines = text.splitlines()
-    paraphrased = "\n".join(f"{line}" for line in lines if line.strip())
-    return paraphrased if paraphrased else "No details provided."
+    if not text.strip():
+        return "No details provided."
+
+    prompt = f"Paraphrase the following AQW daily gift/drop description naturally and concisely:\n\n{text}\n\nParaphrased:"
+    try:
+        response = openai.Completion.create(
+            model="text-davinci-003",
+            prompt=prompt,
+            temperature=0.7,
+            max_tokens=300
+        )
+        paraphrased = response.choices[0].text.strip()
+        return paraphrased if paraphrased else "No details provided."
+    except Exception as e:
+        print(f"OpenAI paraphrase error: {e}")
+        return "No details provided."
 
 # ------------------ REDDIT FETCH ------------------
 def fetch_reddit_user_posts():
@@ -54,7 +70,8 @@ def fetch_reddit_user_posts():
         res = requests.get(url, headers=headers, timeout=10)
         res.raise_for_status()
         data = res.json()
-    except:
+    except Exception as e:
+        print(f"Error fetching Reddit: {e}")
         return []
 
     posts = []
@@ -71,13 +88,13 @@ def fetch_reddit_user_posts():
             except:
                 image = None
 
-        # Paraphrase the body text
+        # Paraphrase body with GPT
         body_text = d.get("selftext", "")
-        paraphrased_body = paraphrase_text(body_text)
+        paraphrased_body = paraphrase_text_gpt(body_text)
 
         posts.append({
             "id": d.get("id"),
-            "title": d.get("title", "Untitled"),  # plain title
+            "title": d.get("title", "Untitled"),
             "image": image,
             "body": paraphrased_body
         })
@@ -86,8 +103,8 @@ def fetch_reddit_user_posts():
 # ------------------ EMBED ------------------
 def create_embed(post):
     embed = discord.Embed(
-        title=post["title"],  # no hyperlink
-        description=post["body"],  # show paraphrased body
+        title=post["title"],
+        description=post["body"],  # GPT-paraphrased text
         color=0xff4500
     )
     if post["image"]:
