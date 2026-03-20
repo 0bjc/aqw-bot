@@ -185,8 +185,34 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     def _norm(val: str) -> str:
         val = re.sub(r"system:page-tags/tag/[^ \n]+", "", val, flags=re.IGNORECASE)
-        val = re.sub(r"\s+", " ", val).strip()
+        # Keep newlines so multi-value fields (like multiple locations) can be listed.
+        val = re.sub(r"[ \t]+", " ", val)
+        val = re.sub(r"\n{3,}", "\n\n", val)
+        val = val.strip()
         return val
+
+    def _format_list(val: str) -> str:
+        """
+        Convert a multi-value field into Discord-friendly line items.
+        - If the value already contains newlines, keep one entry per non-empty line.
+        - Otherwise, split on commas as a fallback.
+        """
+        v = (val or "").strip()
+        if not v or v.upper() == "N/A":
+            return "N/A"
+
+        # Normalize whitespace but preserve line breaks.
+        v = re.sub(r"[ \t]+", " ", v).strip()
+        lines = [ln.strip() for ln in v.split("\n") if ln.strip()]
+        if len(lines) > 1:
+            return "\n".join(lines)
+
+        # Fallback: comma-separated values.
+        if "," in v:
+            parts = [p.strip() for p in v.split(",") if p.strip()]
+            return "\n".join(parts) if parts else v
+
+        return v
 
     # Capture fields between wikidot label markers.
     # These patterns are based on the AQW wiki item pages format.
@@ -198,7 +224,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
     note = None
 
     m_loc = re.search(
-        r"Location:\s*(?P<val>.+?)\s*Price:\s*",
+        r"Location:\s*(?P<val>.+?)\s*(?=(?:Price:\s*)|(?:Dropped by\s*:)|(?:Rarity:\s*)|(?:Notes:\s*)|(?:Also see:\s*)|(?:Thanks to\s*)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -206,7 +232,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         loc = _norm(m_loc.group("val"))
 
     m_price = re.search(
-        r"Price:\s*(?P<val>.+?)\s*Rarity:\s*",
+        r"Price:\s*(?P<val>.+?)\s*(?=(?:Rarity:\s*)|(?:Dropped by\s*:)|(?:Notes:\s*)|(?:Also see:\s*)|(?:Thanks to\s*)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -258,25 +284,25 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Assemble structured Discord description.
     parts: list[str] = [
-        f"**Location:** {loc}",
+        f"**Locations:**\n{_format_list(loc)}",
     ]
 
     if _price_is_na(price):
         # User preference: when Price is N/A, replace it with Dropped by / Merge the following (if present).
         if dropped_by:
-            parts.append(f"**Dropped by:** {dropped_by}")
+            parts.append(f"**Dropped by:**\n{_format_list(dropped_by)}")
         if merge_following:
-            parts.append(f"**Merge the following:** {merge_following}")
+            parts.append(f"**Merge the following:**\n{_format_list(merge_following)}")
         # Fallback in case the page doesn't actually include either label.
         if not dropped_by and not merge_following:
-            parts.append(f"**Price:** {price}")
+            parts.append(f"**Price:**\n{_format_list(price)}")
     else:
-        parts.append(f"**Price:** {price}")
+        parts.append(f"**Price:**\n{_format_list(price)}")
 
-    parts.append(f"**Rarity:** {rarity}")
+    parts.append(f"**Rarity:**\n{_format_list(rarity)}")
 
     if note:
-        parts.append(f"**Note:** {note}")
+        parts.append(f"**Note:**\n{_format_list(note)}")
 
     structured = "\n\n".join(parts).strip()
     return structured, price
