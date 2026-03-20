@@ -160,6 +160,40 @@ def _extract_imgur_image(content_el: BeautifulSoup) -> str | None:
     return None
 
 
+def _extract_title_icons(soup: BeautifulSoup) -> str | None:
+    """
+    Extract the small "icon" tags displayed under the page title.
+
+    AQW Wiki uses a `.page-tags` block with many `<a>` tag links (sometimes
+    with `javascript:;` href). We render them as a space-separated list
+    right under the embed title.
+    """
+    tag_els = soup.select(".page-tags a")
+    if not tag_els:
+        return None
+
+    parts: list[str] = []
+    for a in tag_els:
+        txt = a.get_text(strip=True)
+        if not txt:
+            continue
+        href = a.get("href") or ""
+        href = href.strip()
+        if href.startswith("javascript:"):
+            parts.append(txt)
+            continue
+        full = _make_absolute(href, None)
+        # Only hyperlink for normal urls; otherwise keep plain text.
+        if full and full.lower().startswith(("http://", "https://")):
+            parts.append(f"[{txt}]({full})")
+        else:
+            parts.append(txt)
+
+    if not parts:
+        return None
+    return " ".join(parts)
+
+
 def _clean_item_text(raw_text: str) -> tuple[str, str]:
     """
     Parse the item page text into a clean structured description.
@@ -340,6 +374,8 @@ def extract_item_details(page_url: str) -> dict | None:
     if not content_el:
         return None
 
+    title_icons = _extract_title_icons(soup)
+
     # Remove tag UI (page-tags) but KEEP the info blocks because they contain:
     # Location/Price/Rarity/Notes/Drop/merge info used in the final structured output.
     for el in content_el.select(".page-tags"):
@@ -376,6 +412,7 @@ def extract_item_details(page_url: str) -> dict | None:
         "price": price,
         "image": img_url,
         "url": page_url,
+        "title_icons": title_icons,
     }
 
 
@@ -513,7 +550,11 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
 
 def create_embed(post: dict) -> discord.Embed:
     wrapped_content = _wrap_lines(post["content"])
-    desc = f"{wrapped_content}\n\n[View on Wiki]({post['url']})"
+    icons_line = post.get("title_icons")
+    if icons_line:
+        desc = f"{icons_line}\n\n{wrapped_content}\n\n[View on Wiki]({post['url']})"
+    else:
+        desc = f"{wrapped_content}\n\n[View on Wiki]({post['url']})"
     if len(desc) > 4096:
         desc = desc[:4090] + "..."
 
