@@ -215,9 +215,6 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         # Sometimes tag list text leaks as many tag tokens; drop obvious tag list line.
         if "system:page-tags/tag/" in ln.lower():
             continue
-        if re.fullmatch(r"([a-z0-9_-]+\s*)+", ln.lower()) and "aegift" in raw_text.lower():
-            # very defensive; reduces chances of tag token spam
-            pass
 
         keep.append(ln)
 
@@ -355,16 +352,18 @@ def _extract_recent_changes_entries(max_pages: int = 6) -> dict[str, datetime]:
     return page_times
 
 
-def fetch_recent_aegifts() -> list[dict]:
+def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False) -> list[dict]:
     """
-    Fetch all aegift pages modified in the last CHECK_DAYS.
-    Sorted oldest -> newest.
+    Fetch aegift pages modified in the last CHECK_DAYS.
+    Sorted oldest -> newest by default.
     """
     page_times = _extract_recent_changes_entries(max_pages=8)
     if not page_times:
         return []
 
     sorted_pages = sorted(page_times.items(), key=lambda kv: kv[1])
+    if newest_first:
+        sorted_pages = list(reversed(sorted_pages))
 
     results: list[dict] = []
     seen_ids: set[str] = set()
@@ -381,7 +380,7 @@ def fetch_recent_aegifts() -> list[dict]:
         results.append({"id": pid, **details})
         seen_ids.add(pid)
 
-        if len(results) >= MAX_POSTS_PER_RUN:
+        if len(results) >= limit:
             break
 
     return results
@@ -432,15 +431,18 @@ async def check_posts():
 # ---------------- COMMAND ----------------
 @bot.tree.command(name="latestdrops", description="Check latest AE gift pages")
 async def latestdrops(interaction: discord.Interaction):
-    await interaction.response.defer()
+    await interaction.response.defer(thinking=True)
+    try:
+        # Only fetch the newest single item to keep response time low.
+        posts = await asyncio.to_thread(fetch_recent_aegifts, 1, True)
+        if not posts:
+            await interaction.followup.send("No recent AE gifts found in the last 7 days.")
+            return
 
-    posts = await asyncio.to_thread(fetch_recent_aegifts)
-    if not posts:
-        await interaction.followup.send("No recent AE gifts found in the last 7 days.")
-        return
-
-    # posts are oldest->newest; newest is the last one
-    await interaction.followup.send(embed=create_embed(posts[-1]))
+        await interaction.followup.send(embed=create_embed(posts[0]))
+    except Exception as e:
+        log.exception("latestdrops failed: %s", e)
+        await interaction.followup.send("Something went wrong while fetching recent AE gifts.")
 
 
 # ---------------- READY ----------------
