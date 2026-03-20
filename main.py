@@ -164,53 +164,94 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
     """
     Returns: (cleaned_description_text, price)
 
-    Removes:
-    - Sellback lines
-    - Thanks to line
-    - Also see section
-    - Tag UI (already removed from HTML, but this keeps it safe)
-
-    Keeps the item flavor by removing label prefixes (Description:, Rarity Description:)
-    and leaving the text after the prefix.
+    Goal:
+    - Remove `Sellback:`, `Description:`, `Rarity Description:`, `Also see:`, and `Thanks to ...`
+    - Keep item info + `Notes:` and other fields
+    - Extract `Price:` and insert it as its own line right after the first `Location:` block
     """
-    lines = [ln.strip() for ln in raw_text.splitlines()]
-    lines = [ln for ln in lines if ln]
+    # Normalize whitespace for reliable regex section stripping.
+    text = raw_text.replace("\r\n", "\n").replace("\xa0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
+    # Extract price (keep the value, but remove it from the main text first).
     price = "N/A"
-    keep: list[str] = []
-    skip_also = False
+    price_match = re.search(
+        r"Price:\s*(?P<val>.+?)(?=(?:Sellback:|Rarity:|Rarity Description:|Description:|Notes:|Also see:|Thanks to|$))",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if price_match:
+        price = price_match.group("val").strip()
+        text = re.sub(
+            r"Price:\s*(.+?)(?=(?:Sellback:|Rarity:|Rarity Description:|Description:|Notes:|Also see:|Thanks to|$))",
+            "",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
 
-    for ln in lines:
-        low = ln.lower()
+    # Remove unwanted labeled sections/lines.
+    text = re.sub(
+        r"Sellback:\s*.+?(?=(?:Rarity:|Rarity Description:|Description:|Notes:|Also see:|Thanks to|$))",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(
+        r"Rarity Description:\s*.+?(?=(?:Description:|Notes:|Also see:|Thanks to|$))",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Remove the entire Description: section (both label + content)
+    text = re.sub(
+        r"Description:\s*.+?(?=(?:Notes:|Also see:|Thanks to|$))",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Remove Also see: and the list beneath it
+    text = re.sub(
+        r"Also see:\s*.+?(?=(?:Thanks to|$))",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Remove thanks to line
+    text = re.sub(
+        r"Thanks to\s*.+?$",
+        "",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
 
-        if skip_also:
-            if low.startswith("notes") or low.startswith("thanks to") or low.startswith("location:") or low.startswith("price:"):
-                skip_also = False
-            else:
-                continue
+    # Drop tag-token spam if any leaks through.
+    text = re.sub(r"system:page-tags/tag/[^ \n]+", "", text, flags=re.IGNORECASE)
 
-        if low.startswith("sellback:"):
-            continue
-        if low.startswith("thanks to"):
-            continue
-        if low.startswith("also see"):
-            skip_also = True
-            continue
+    # Add line breaks before common labels for readability.
+    for label in ("Location:", "Rarity:", "Notes:"):
+        text = re.sub(rf"\s*{re.escape(label)}\s*", f"\n{label} ", text, flags=re.IGNORECASE)
 
-        if low.startswith("price:"):
-            price = ln.split(":", 1)[1].strip()
-            continue
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
-        ln = re.sub(r"^(description:)\s*", "", ln, flags=re.IGNORECASE)
-        ln = re.sub(r"^(rarity description:)\s*", "", ln, flags=re.IGNORECASE)
+    # Insert price after first Location line if possible.
+    if price and price != "N/A" and re.search(r"Location:", text, flags=re.IGNORECASE):
+        def _insert_after_location(m: re.Match[str]) -> str:
+            block = m.group(0).strip()
+            return f"{block}\nPrice: {price}"
 
-        if "system:page-tags/tag/" in ln.lower():
-            continue
+        # Capture the first Location line/block up to the next blank line.
+        text = re.sub(
+            r"(Location:[^\n]*)(?:\n(?!\s*Price:).*)?",
+            lambda m: f"{m.group(1)}\nPrice: {price}",
+            text,
+            flags=re.IGNORECASE,
+            count=1,
+        )
+    elif price and price != "N/A":
+        text = f"Price: {price}\n\n{text}".strip()
 
-        keep.append(ln)
-
-    cleaned = "\n".join(keep).strip()
-    return cleaned, price
+    return text.strip(), price
 
 
 def extract_item_details(page_url: str) -> dict | None:
@@ -286,6 +327,7 @@ def _extract_recent_changes_entries(max_pages: int = 6) -> dict[str, datetime]:
         if u.lower().startswith("javascript:"):
             return False
         parsed = urlparse(u)
+        # allow absolute http(s) and relative paths (handled by _make_absolute)
         return parsed.scheme in ("http", "https") or u.startswith("/")
 
     for _ in range(max_pages):
@@ -347,12 +389,13 @@ def _extract_recent_changes_entries(max_pages: int = 6) -> dict[str, datetime]:
 
         if not next_href:
             break
-
+        # Wikidot sometimes uses href="javascript:;" for the "next" button.
         if not _is_safe_url(next_href):
             log.warning("Skipping unsafe pagination href: %r", next_href)
             break
 
         url = _make_absolute(next_href).rstrip("/")
+
         if not _is_safe_url(url):
             log.warning("Skipping unsafe pagination url: %r", url)
             break
@@ -364,6 +407,10 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
     """
     Fetch aegift pages modified in the last CHECK_DAYS.
     Sorted oldest -> newest by default.
+
+    Args:
+        limit: maximum items to return (saves time for slash commands).
+        newest_first: when True, returns newest -> oldest (useful for /latestdrops).
     """
     page_times = _extract_recent_changes_entries(max_pages=8)
     if not page_times:
@@ -396,9 +443,7 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
 
 def create_embed(post: dict) -> discord.Embed:
     wrapped_content = _wrap_lines(post["content"])
-    price_line = f"Price: {post.get('price', 'N/A')}"
-
-    desc = f"{wrapped_content}\n\n{price_line}\n\n[View on Wiki]({post['url']})"
+    desc = f"{wrapped_content}\n\n[View on Wiki]({post['url']})"
     if len(desc) > 4096:
         desc = desc[:4090] + "..."
 
@@ -439,8 +484,14 @@ async def check_posts():
 # ---------------- COMMAND ----------------
 @bot.tree.command(name="latestdrops", description="Check latest AE gift pages")
 async def latestdrops(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=True)
     try:
+        await interaction.response.defer(thinking=True)
+    except discord.NotFound:
+        # Interaction token expired / no longer valid (common right after redeploy)
+        return
+
+    try:
+        # Only fetch the newest single item to keep response time low.
         posts = await asyncio.to_thread(fetch_recent_aegifts, 1, True)
         if not posts:
             await interaction.followup.send("No recent AE gifts found in the last 7 days.")
