@@ -223,8 +223,10 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
     merge_following = None
     note = None
 
+    # Label matching on Wikidot can vary slightly (e.g. "Location" vs "Locations",
+    # whitespace before ":" etc.), so we keep the patterns tolerant.
     m_loc = re.search(
-        r"Location:\s*(?P<val>.+?)\s*(?=(?:Price:\s*)|(?:Dropped by\s*:)|(?:Rarity:\s*)|(?:Notes:\s*)|(?:Also see:\s*)|(?:Thanks to\s*)|$)",
+        r"Locations?\s*:?\s*(?P<val>.+?)\s*(?=(?:Price\s*:?)|(?:Dropped by\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -232,7 +234,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         loc = _norm(m_loc.group("val"))
 
     m_price = re.search(
-        r"Price:\s*(?P<val>.+?)\s*(?=(?:Rarity:\s*)|(?:Dropped by\s*:)|(?:Notes:\s*)|(?:Also see:\s*)|(?:Thanks to\s*)|$)",
+        r"Price\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Dropped by\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -241,7 +243,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # These labels appear on some item pages when Price is "N/A".
     m_dropped = re.search(
-        r"Dropped by\s*:?\s*(?P<val>.+?)\s*(?=(?:Merge the following\s*:?)|(?:Rarity:\s*)|(?:Notes:\s*)|(?:Also see:\s*)|(?:Thanks to\s*)|$)",
+        r"Dropped by\s*:?\s*(?P<val>.+?)\s*(?=(?:Merge the following\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -251,7 +253,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
             dropped_by = candidate
 
     m_merge = re.search(
-        r"Merge the following\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity:\s*)|(?:Notes:\s*)|(?:Also see:\s*)|(?:Thanks to\s*)|$)",
+        r"Merge the following\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -261,7 +263,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
             merge_following = candidate
 
     m_rarity = re.search(
-        r"Rarity:\s*(?P<val>.+?)\s*(?:Rarity Description:|Description:|Notes:|Also see:|Thanks to|$)",
+        r"Rarity\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity Description\s*:?)|(?:Description\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -269,7 +271,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         rarity = _norm(m_rarity.group("val"))
 
     m_note = re.search(
-        r"Notes:\s*(?P<val>.+?)(?:Also see:|Thanks to|$)",
+        r"Notes\s*:?\s*(?P<val>.+?)(?=(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -349,6 +351,19 @@ def extract_item_details(page_url: str) -> dict | None:
 
     raw_text = content_el.get_text(separator="\n", strip=True)
     cleaned, price = _clean_item_text(raw_text)
+
+    # Debug: if the page actually has a Location label but our parser failed,
+    # log a small snippet so we can tune the regex to the real wording.
+    try:
+        if "**Locations:**" in (cleaned or "") and "\nN/A" in (cleaned or ""):
+            lower = (raw_text or "").lower()
+            idx = lower.find("location")
+            if idx != -1:
+                snippet = raw_text[max(0, idx - 120) : idx + 280]
+                log.warning("Location parse failed for %s. Snippet:\n%s", page_url, snippet)
+    except Exception:
+        # Never break scraping due to debug-only logging.
+        pass
 
     img_url = _extract_imgur_image(content_el)
 
