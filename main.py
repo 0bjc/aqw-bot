@@ -174,6 +174,15 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
+    # Remove unwanted Sellback section entirely.
+    # Some pages use "Sellback:" while others may include spacing like "Sell back:".
+    text = re.sub(
+        r"Sell\s*back\s*:\s*.+?(?=(?:Rarity:\s*)|(?:Description:\s*)|(?:Notes:\s*)|(?:Also see:\s*)|(?:Thanks to\s*)|$)",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
     def _norm(val: str) -> str:
         val = re.sub(r"system:page-tags/tag/[^ \n]+", "", val, flags=re.IGNORECASE)
         val = re.sub(r"\s+", " ", val).strip()
