@@ -184,13 +184,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         low = ln.lower()
 
         if skip_also:
-            # end also-see when hitting section headers or end
-            if (
-                low.startswith("notes")
-                or low.startswith("thanks to")
-                or low.startswith("location:")
-                or low.startswith("price:")
-            ):
+            if low.startswith("notes") or low.startswith("thanks to") or low.startswith("location:") or low.startswith("price:"):
                 skip_also = False
             else:
                 continue
@@ -203,16 +197,13 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
             skip_also = True
             continue
 
-        # Extract price and remove it from the main text.
         if low.startswith("price:"):
             price = ln.split(":", 1)[1].strip()
             continue
 
-        # Remove label prefixes but keep the content
         ln = re.sub(r"^(description:)\s*", "", ln, flags=re.IGNORECASE)
         ln = re.sub(r"^(rarity description:)\s*", "", ln, flags=re.IGNORECASE)
 
-        # Sometimes tag list text leaks as many tag tokens; drop obvious tag list line.
         if "system:page-tags/tag/" in ln.lower():
             continue
 
@@ -288,6 +279,15 @@ def _extract_recent_changes_entries(max_pages: int = 6) -> dict[str, datetime]:
     url: str | None = RECENT_URL_HTTP
     visited: set[str] = set()
 
+    def _is_safe_url(u: str) -> bool:
+        u = (u or "").strip()
+        if not u:
+            return False
+        if u.lower().startswith("javascript:"):
+            return False
+        parsed = urlparse(u)
+        return parsed.scheme in ("http", "https") or u.startswith("/")
+
     for _ in range(max_pages):
         if not url or url in visited:
             break
@@ -347,7 +347,15 @@ def _extract_recent_changes_entries(max_pages: int = 6) -> dict[str, datetime]:
 
         if not next_href:
             break
+
+        if not _is_safe_url(next_href):
+            log.warning("Skipping unsafe pagination href: %r", next_href)
+            break
+
         url = _make_absolute(next_href).rstrip("/")
+        if not _is_safe_url(url):
+            log.warning("Skipping unsafe pagination url: %r", url)
+            break
 
     return page_times
 
@@ -433,7 +441,6 @@ async def check_posts():
 async def latestdrops(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
     try:
-        # Only fetch the newest single item to keep response time low.
         posts = await asyncio.to_thread(fetch_recent_aegifts, 1, True)
         if not posts:
             await interaction.followup.send("No recent AE gifts found in the last 7 days.")
