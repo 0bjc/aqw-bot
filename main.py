@@ -338,9 +338,9 @@ def extract_item_details(page_url: str) -> dict | None:
     if not content_el:
         return None
 
-    # Remove tag UI (page-tags) but KEEP page-info because it contains:
+    # Remove tag UI (page-tags) but KEEP the info blocks because they contain:
     # Location/Price/Rarity/Notes/Drop/merge info used in the final structured output.
-    for el in content_el.select(".page-tags, .page-info-bottom"):
+    for el in content_el.select(".page-tags"):
         el.decompose()
     for a in content_el.select("a[href*='/system:page-tags/tag/']"):
         a.decompose()
