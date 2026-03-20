@@ -166,7 +166,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     Output format (exact labels, all label parts in bold):
     - Location:
-    - Price:
+    - Price OR Dropped by / Merge the following (when Price is N/A)
     - Rarity:
     - Note: (only if note exists)
     """
@@ -184,6 +184,8 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
     loc = "N/A"
     price = "N/A"
     rarity = "N/A"
+    dropped_by = None
+    merge_following = None
     note = None
 
     m_loc = re.search(
@@ -201,6 +203,27 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
     )
     if m_price:
         price = _norm(m_price.group("val"))
+
+    # These labels appear on some item pages when Price is "N/A".
+    m_dropped = re.search(
+        r"Dropped by\s*:?\s*(?P<val>.+?)\s*(?=(?:Merge the following\s*:?)|(?:Rarity:\s*)|(?:Notes:\s*)|(?:Also see:\s*)|(?:Thanks to\s*)|$)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m_dropped:
+        candidate = _norm(m_dropped.group("val"))
+        if candidate and candidate.lower() not in {"n/a", "na"}:
+            dropped_by = candidate
+
+    m_merge = re.search(
+        r"Merge the following\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity:\s*)|(?:Notes:\s*)|(?:Also see:\s*)|(?:Thanks to\s*)|$)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m_merge:
+        candidate = _norm(m_merge.group("val"))
+        if candidate and candidate.lower() not in {"n/a", "na"}:
+            merge_following = candidate
 
     m_rarity = re.search(
         r"Rarity:\s*(?P<val>.+?)\s*(?:Rarity Description:|Description:|Notes:|Also see:|Thanks to|$)",
@@ -220,12 +243,29 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         if candidate and candidate.lower() not in {"n/a", "na"}:
             note = candidate
 
+    def _price_is_na(p: str) -> bool:
+        p_norm = (p or "").strip()
+        return p_norm.upper() == "N/A" or p_norm.upper().startswith("N/A")
+
     # Assemble structured Discord description.
     parts: list[str] = [
         f"**Location:** {loc}",
-        f"**Price:** {price}",
-        f"**Rarity:** {rarity}",
     ]
+
+    if _price_is_na(price):
+        # User preference: when Price is N/A, replace it with Dropped by / Merge the following (if present).
+        if dropped_by:
+            parts.append(f"**Dropped by:** {dropped_by}")
+        if merge_following:
+            parts.append(f"**Merge the following:** {merge_following}")
+        # Fallback in case the page doesn't actually include either label.
+        if not dropped_by and not merge_following:
+            parts.append(f"**Price:** {price}")
+    else:
+        parts.append(f"**Price:** {price}")
+
+    parts.append(f"**Rarity:** {rarity}")
+
     if note:
         parts.append(f"**Note:** {note}")
 
@@ -263,8 +303,9 @@ def extract_item_details(page_url: str) -> dict | None:
     if not content_el:
         return None
 
-    # Remove tag UI and page-info blocks
-    for el in content_el.select(".page-tags, .page-info-bottom, .page-info"):
+    # Remove tag UI (page-tags) but KEEP page-info because it contains:
+    # Location/Price/Rarity/Notes/Drop/merge info used in the final structured output.
+    for el in content_el.select(".page-tags, .page-info-bottom"):
         el.decompose()
     for a in content_el.select("a[href*='/system:page-tags/tag/']"):
         a.decompose()
