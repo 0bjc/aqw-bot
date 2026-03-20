@@ -162,96 +162,75 @@ def _extract_imgur_image(content_el: BeautifulSoup) -> str | None:
 
 def _clean_item_text(raw_text: str) -> tuple[str, str]:
     """
-    Returns: (cleaned_description_text, price)
+    Parse the item page text into a clean structured description.
 
-    Goal:
-    - Remove `Sellback:`, `Description:`, `Rarity Description:`, `Also see:`, and `Thanks to ...`
-    - Keep item info + `Notes:` and other fields
-    - Extract `Price:` and insert it as its own line right after the first `Location:` block
+    Output format (exact labels, all label parts in bold):
+    - Location:
+    - Price:
+    - Rarity:
+    - Note: (only if note exists)
     """
-    # Normalize whitespace for reliable regex section stripping.
     text = raw_text.replace("\r\n", "\n").replace("\xa0", " ")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
-    # Extract price (keep the value, but remove it from the main text first).
+    def _norm(val: str) -> str:
+        val = re.sub(r"system:page-tags/tag/[^ \n]+", "", val, flags=re.IGNORECASE)
+        val = re.sub(r"\s+", " ", val).strip()
+        return val
+
+    # Capture fields between wikidot label markers.
+    # These patterns are based on the AQW wiki item pages format.
+    loc = "N/A"
     price = "N/A"
-    price_match = re.search(
-        r"Price:\s*(?P<val>.+?)(?=(?:Sellback:|Rarity:|Rarity Description:|Description:|Notes:|Also see:|Thanks to|$))",
+    rarity = "N/A"
+    note = None
+
+    m_loc = re.search(
+        r"Location:\s*(?P<val>.+?)\s*Price:\s*",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    if price_match:
-        price = price_match.group("val").strip()
-        text = re.sub(
-            r"Price:\s*(.+?)(?=(?:Sellback:|Rarity:|Rarity Description:|Description:|Notes:|Also see:|Thanks to|$))",
-            "",
-            text,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
+    if m_loc:
+        loc = _norm(m_loc.group("val"))
 
-    # Remove unwanted labeled sections/lines.
-    text = re.sub(
-        r"Sellback:\s*.+?(?=(?:Rarity:|Rarity Description:|Description:|Notes:|Also see:|Thanks to|$))",
-        "",
+    m_price = re.search(
+        r"Price:\s*(?P<val>.+?)\s*Rarity:\s*",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    text = re.sub(
-        r"Rarity Description:\s*.+?(?=(?:Description:|Notes:|Also see:|Thanks to|$))",
-        "",
+    if m_price:
+        price = _norm(m_price.group("val"))
+
+    m_rarity = re.search(
+        r"Rarity:\s*(?P<val>.+?)\s*(?:Rarity Description:|Description:|Notes:|Also see:|Thanks to|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    # Remove the entire Description: section (both label + content)
-    text = re.sub(
-        r"Description:\s*.+?(?=(?:Notes:|Also see:|Thanks to|$))",
-        "",
+    if m_rarity:
+        rarity = _norm(m_rarity.group("val"))
+
+    m_note = re.search(
+        r"Notes:\s*(?P<val>.+?)(?:Also see:|Thanks to|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    # Remove Also see: and the list beneath it
-    text = re.sub(
-        r"Also see:\s*.+?(?=(?:Thanks to|$))",
-        "",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    # Remove thanks to line
-    text = re.sub(
-        r"Thanks to\s*.+?$",
-        "",
-        text,
-        flags=re.IGNORECASE | re.MULTILINE,
-    )
+    if m_note:
+        candidate = _norm(m_note.group("val"))
+        if candidate and candidate.lower() not in {"n/a", "na"}:
+            note = candidate
 
-    # Drop tag-token spam if any leaks through.
-    text = re.sub(r"system:page-tags/tag/[^ \n]+", "", text, flags=re.IGNORECASE)
+    # Assemble structured Discord description.
+    parts: list[str] = [
+        f"**Location:** {loc}",
+        f"**Price:** {price}",
+        f"**Rarity:** {rarity}",
+    ]
+    if note:
+        parts.append(f"**Note:** {note}")
 
-    # Add line breaks before common labels for readability.
-    for label in ("Location:", "Rarity:", "Notes:"):
-        text = re.sub(rf"\s*{re.escape(label)}\s*", f"\n{label} ", text, flags=re.IGNORECASE)
-
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-
-    # Insert price after first Location line if possible.
-    if price and price != "N/A" and re.search(r"Location:", text, flags=re.IGNORECASE):
-        def _insert_after_location(m: re.Match[str]) -> str:
-            block = m.group(0).strip()
-            return f"{block}\nPrice: {price}"
-
-        # Capture the first Location line/block up to the next blank line.
-        text = re.sub(
-            r"(Location:[^\n]*)(?:\n(?!\s*Price:).*)?",
-            lambda m: f"{m.group(1)}\nPrice: {price}",
-            text,
-            flags=re.IGNORECASE,
-            count=1,
-        )
-    elif price and price != "N/A":
-        text = f"Price: {price}\n\n{text}".strip()
-
-    return text.strip(), price
+    structured = "\n\n".join(parts).strip()
+    return structured, price
 
 
 def extract_item_details(page_url: str) -> dict | None:
