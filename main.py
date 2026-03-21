@@ -131,7 +131,9 @@ def page_has_aegift(soup: BeautifulSoup) -> bool:
     tags = soup.select(".page-tags a")
     if tags:
         tag_texts = [tag.get_text(strip=True) for tag in tags]
-        log.debug("Found tags: %s", ", ".join(tag_texts))
+        log.info("Found tags: %s", ", ".join(tag_texts))
+    else:
+        log.info("No page tags found on page")
     
     return False
 
@@ -660,6 +662,7 @@ def fetch_aegift_pages(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fals
         
         seen_ids.add(pid)
         
+        log.info("Checking page %d: %s", i + 1, page_url)
         details = extract_item_details(page_url)
         if details:
             results.append({"id": pid, **details})
@@ -772,6 +775,32 @@ async def checkpage(interaction: discord.Interaction, page_name: str):
         await interaction.followup.send("Timed out checking page.")
     except Exception as e:
         log.exception("checkpage failed: %s", e)
+        await interaction.followup.send(f"Error checking page: {e}")
+
+
+@bot.tree.command(name="testaegift", description="Test a known aegift page")
+async def testaegift(interaction: discord.Interaction):
+    try:
+        await interaction.response.defer(thinking=True)
+    except discord.NotFound:
+        return
+
+    try:
+        # Test with a known aegift page from the listing
+        page_url = f"{WIKI_BASE}/alteon-plushie"
+        details = await asyncio.wait_for(
+            asyncio.to_thread(extract_item_details, page_url),
+            timeout=15
+        )
+        
+        if details:
+            await interaction.followup.send(f"✅ Found aegift: {details['title']}", embed=create_embed(details))
+        else:
+            await interaction.followup.send(f"❌ No aegift tag found on {page_url}")
+    except asyncio.TimeoutError:
+        await interaction.followup.send("Timed out checking page.")
+    except Exception as e:
+        log.exception("testaegift failed: %s", e)
         await interaction.followup.send(f"Error checking page: {e}")
 
 
