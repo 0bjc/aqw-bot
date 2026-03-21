@@ -576,19 +576,19 @@ def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
                 "Referer": "http://aqwwiki.wikidot.com/system:recent-changes",
                 "Connection": "keep-alive"
             }
-            log.debug("AJAX request data: %s", ajax_data)
+            log.info("AJAX request data: %s", ajax_data)
             res = requests.post(ajax_url, data=ajax_data, timeout=15, headers=headers)
             res.raise_for_status()
             
-            log.debug("AJAX response status: %s", res.status_code)
+            log.info("AJAX response status: %s", res.status_code)
             response_json = res.json()
             html_body = response_json.get("body", "")
             
-            log.debug("AJAX response keys: %s", list(response_json.keys()))
+            log.info("AJAX response keys: %s", list(response_json.keys()))
             if "body" in response_json:
-                log.debug("Body length: %d chars", len(html_body))
+                log.info("Body length: %d chars", len(html_body))
                 if len(html_body) > 0:
-                    log.debug("Body preview: %s", html_body[:200])
+                    log.info("Body preview: %s", html_body[:200])
             
             if not html_body.strip():
                 log.info("Empty response body at page %d, stopping", page_num)
