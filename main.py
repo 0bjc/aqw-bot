@@ -510,7 +510,16 @@ def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
                 'module': 'recent_changes'
             }
             
-            res = requests.post(ajax_url, data=ajax_data, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
+            headers = {
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "X-Requested-With": "XMLHttpRequest",
+                "Origin": "http://aqwwiki.wikidot.com",
+                "Referer": "http://aqwwiki.wikidot.com/system:recent-changes",
+                "Connection": "keep-alive"
+            }
+            res = requests.post(ajax_url, data=ajax_data, timeout=15, headers=headers)
             res.raise_for_status()
             
             response_json = res.json()
