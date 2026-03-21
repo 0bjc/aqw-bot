@@ -131,9 +131,7 @@ def page_has_aegift(soup: BeautifulSoup) -> bool:
     tags = soup.select(".page-tags a")
     if tags:
         tag_texts = [tag.get_text(strip=True) for tag in tags]
-        log.info("Found tags: %s", ", ".join(tag_texts))
-    else:
-        log.info("No page tags found on page")
+        log.debug("Found tags: %s", ", ".join(tag_texts))
     
     return False
 
@@ -609,77 +607,57 @@ def _extract_related_item_links(page_url: str, max_links: int = 25) -> list[str]
     return list(dict.fromkeys(links))  # dedupe while preserving order
 
 
-def fetch_aegift_pages(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False) -> list[dict]:
+def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False) -> list[dict]:
     """
-    Fetch pages with the aegift tag directly from the tag listing.
-    This is more reliable than recent changes since aegift pages are rarely updated.
+    Fetch aegift pages from recent changes in the last CHECK_DAYS.
+    Only looks at recently modified pages to avoid checking old content.
     """
-    log.info("Fetching aegift pages from tag listing...")
-    
-    try:
-        # Get the aegift tag listing page
-        r = requests.get(
-            f"{WIKI_BASE}/system:page-tags/tag/aegift",
-            timeout=15,
-            headers={"User-Agent": "aqw-wiki-bot/1.0"},
-        )
-        r.raise_for_status()
-    except Exception as e:
-        log.error("Failed to fetch aegift tag listing: %s", e)
+    page_times = _extract_recent_changes_entries(max_pages=8)
+    if not page_times:
+        log.info("No recent changes found in time window")
         return []
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    
-    # Extract all page links from the tag listing
-    page_links = []
-    for a in soup.select("a[href]"):
-        href = a.get("href", "")
-        if href and not href.startswith("#") and not href.startswith("http"):
-            # Skip system/search pages
-            if any(x in href.lower() for x in ("system:", "search:", "forum:", "admin:")):
-                continue
-            page_links.append(_make_absolute(href))
-    
-    log.info("Found %d pages in aegift tag listing", len(page_links))
-    
+    sorted_pages = sorted(page_times.items(), key=lambda kv: kv[1])
     if newest_first:
-        # For newest first, we'll just reverse the list since the tag listing
-        # doesn't provide dates. This gives us a different order at least.
-        page_links = list(reversed(page_links))
-    
+        sorted_pages = list(reversed(sorted_pages))
+
     results: list[dict] = []
     seen_ids: set[str] = set()
-    pages_to_check = min(limit * 3, len(page_links))  # Check fewer pages to avoid rate limiting
-    
-    for i, page_url in enumerate(page_links[:pages_to_check]):
+
+    for page_url, _t in sorted_pages:
         pid = urlparse(page_url).path.strip("/").replace("/", "-") or page_url
         if pid in seen_ids:
             continue
-        
-        # Add delay to avoid rate limiting
-        if i > 0:
-            time.sleep(0.5)  # 500ms delay between requests
-        
-        seen_ids.add(pid)
-        
-        log.info("Checking page %d: %s", i + 1, page_url)
+
+        log.info("Checking page: %s", page_url)
+
+        # Try the page itself first
         details = extract_item_details(page_url)
         if details:
             results.append({"id": pid, **details})
+            seen_ids.add(pid)
             log.info("✓ Found aegift: %s", details["title"])
-            if len(results) >= limit:
-                break
-    
+        else:
+            # If not a direct item page, try its child links
+            child_links = _extract_related_item_links(page_url, max_links=3)
+            log.debug("Found %d child links for %s", len(child_links), page_url)
+            for child_url in child_links:
+                child_pid = urlparse(child_url).path.strip("/").replace("/", "-") or child_url
+                if child_pid in seen_ids:
+                    continue
+                child_details = extract_item_details(child_url)
+                if child_details:
+                    results.append({"id": child_pid, **child_details})
+                    seen_ids.add(child_pid)
+                    log.info("✓ Found aegift child: %s", child_details["title"])
+                    if len(results) >= limit:
+                        break
+
+        if len(results) >= limit:
+            break
+
     log.info("Checked %d pages, found %d aegift items", len(seen_ids), len(results))
     return results
-
-
-def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False, max_pages_to_check: int = 5) -> list[dict]:
-    """
-    Fetch aegift pages - now uses tag listing instead of recent changes
-    since aegift pages are rarely updated.
-    """
-    return fetch_aegift_pages(limit, newest_first)
 
 
 def create_embed(post: dict) -> discord.Embed:
@@ -714,7 +692,7 @@ async def check_posts():
         log.warning("Channel %s not found", CHANNEL_ID)
         return
 
-    posts = await asyncio.to_thread(fetch_aegift_pages, limit=5)  # Check fewer pages for background
+    posts = await asyncio.to_thread(fetch_recent_aegifts, limit=5)  # Use recent changes for background
     for post in posts:
         if await is_posted(post["id"]):
             continue
@@ -738,22 +716,21 @@ async def latestdrops(interaction: discord.Interaction):
     try:
         # Only fetch the newest single item to keep response time low.
         posts = await asyncio.wait_for(
-            asyncio.to_thread(fetch_aegift_pages, 1, True),  # Use new function
-            timeout=30  # Longer timeout due to delays between requests
+            asyncio.to_thread(fetch_recent_aegifts, 1, True),
+            timeout=15
         )
         if not posts:
-            await interaction.followup.send("No AE gifts found.")
+            await interaction.followup.send("No recent AE gifts found in the last 7 days.")
             return
 
         await interaction.followup.send(embed=create_embed(posts[0]))
     except asyncio.TimeoutError:
-        await interaction.followup.send("Timed out fetching latest drops. The AQW wiki may be rate limiting. Please try again in a minute.")
+        await interaction.followup.send("Timed out fetching latest drops. Please try again in a few seconds.")
     except Exception as e:
         log.exception("latestdrops failed: %s", e)
         await interaction.followup.send("Something went wrong while fetching recent AE gifts.")
 
-
-@bot.tree.command(name="checkpage", description="Debug: Check if a specific page has aegift tag")
+# ... (rest of the code remains the same)
 async def checkpage(interaction: discord.Interaction, page_name: str):
     try:
         await interaction.response.defer(thinking=True)
