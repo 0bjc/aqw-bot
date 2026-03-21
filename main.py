@@ -455,10 +455,11 @@ def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
         log.info("Fetching page: %s", RECENT_URL_HTTP)
 
         # Extract moduleId from the page
+        module_id = None
         for div in soup.select("div[id^='wikidot-module-']"):
             module_id = div.get("id")
             if module_id and module_id.startswith("wikidot-module-"):
-                log.debug("Found moduleId: %s", module_id)
+                log.info("Found moduleId: %s", module_id)
                 break
         
         if not module_id:
@@ -466,12 +467,16 @@ def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
             for script in soup.select("script"):
                 script_text = script.get_text()
                 if "wikidot-module-" in script_text:
-                    import re
                     match = re.search(r'wikidot-module-(\w+)', script_text)
                     if match:
                         module_id = f"wikidot-module-{match.group(1)}"
-                        log.debug("Found moduleId in script: %s", module_id)
+                        log.info("Found moduleId in script: %s", module_id)
                         break
+        
+        if not module_id:
+            log.warning("No moduleId found, AJAX requests may fail")
+        else:
+            log.info("Using moduleId: %s", module_id)
 
         any_in_window = False
         rows_found = 0
@@ -544,6 +549,10 @@ def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
             
             response_json = res.json()
             html_body = response_json.get("body", "")
+            
+            log.debug("AJAX response keys: %s", list(response_json.keys()))
+            if "body" in response_json:
+                log.debug("Body length: %d chars", len(html_body))
             
             if not html_body.strip():
                 log.info("Empty response body at page %d, stopping", page_num)
