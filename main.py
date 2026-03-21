@@ -436,43 +436,93 @@ def extract_item_details(page_url: str) -> dict | None:
     }
 
 
-def _extract_recent_changes_entries(max_pages: int = 6) -> dict[str, datetime]:
+def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
     """
     Get mapping: page_url -> earliest change_time within CHECK_DAYS.
-    Follows the 'next' pagination in recent-changes to avoid missing older entries.
-    Uses AJAX pagination for better compatibility.
+    Uses Wikidot AJAX pagination to fetch the previous 30 pages.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=CHECK_DAYS)
     page_times: dict[str, datetime] = {}
 
-    url: str | None = RECENT_URL_HTTP
-    visited: set[str] = set()
-    page_num = 0
-
-    def _is_safe_url(u: str) -> bool:
-        u = (u or "").strip()
-        if not u:
-            return False
-        if u.lower().startswith("javascript:"):
-            return False
-        parsed = urlparse(u)
-        # allow absolute http(s) and relative paths (handled by _make_absolute)
-        return parsed.scheme in ("http", "https") or u.startswith("/")
-
     log.info("Starting recent changes extraction, cutoff: %s", cutoff)
 
-    for _ in range(max_pages):
-        if not url or url in visited:
-            break
-        visited.add(url)
+    # Fetch first page normally
+    try:
+        res = requests.get(RECENT_URL_HTTP, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
+        res.raise_for_status()
+        soup = BeautifulSoup(res.text, "html.parser")
+        log.info("Fetching page: %s", RECENT_URL_HTTP)
 
-        log.info("Fetching page: %s", url)
+        any_in_window = False
+        rows_found = 0
+        for row in soup.select("table tr"):
+            cols = row.find_all("td")
+            if len(cols) < 3:
+                continue
 
+            rows_found += 1
+            link = cols[0].find("a")
+            if not link:
+                continue
+
+            href = link.get("href", "")
+            if not href or href.startswith("#"):
+                continue
+
+            time_text = cols[2].get_text(strip=True)
+            change_time = parse_wiki_time(time_text)
+            if not change_time:
+                log.debug("Failed to parse time: %s", time_text)
+                continue
+
+            if change_time < cutoff:
+                log.debug("Skipping old entry: %s (changed %s)", href, change_time)
+                continue
+
+            any_in_window = True
+            page_url = _make_absolute(href).rstrip("/")
+            prev = page_times.get(page_url)
+            if prev is None or change_time < prev:
+                page_times[page_url] = change_time
+                log.debug("Found recent page: %s (changed %s)", page_url, change_time)
+
+        log.info("Page 1 (offset 0): %d rows found, %d in window, %d total pages", rows_found, any_in_window, len(page_times))
+
+    except Exception as e:
+        log.warning("Failed to fetch first page: %s", e)
+        return page_times
+
+    # Fetch remaining pages using AJAX pagination
+    for page_num in range(2, max_pages + 1):
+        offset = (page_num - 1) * 20  # Each page has 20 rows
+        
+        # Add 1 second delay between requests
+        if page_num > 2:
+            time.sleep(1)
+        
+        log.info("Fetching page %d (offset %d)", page_num, offset)
+        
         try:
-            res = requests.get(url, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
+            ajax_url = f"{WIKI_BASE}/ajax-module-connector.php"
+            ajax_data = {
+                'page': 'system:recent-changes',
+                'offset': str(offset),
+                'module': 'recent_changes'
+            }
+            
+            res = requests.post(ajax_url, data=ajax_data, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
             res.raise_for_status()
-            soup = BeautifulSoup(res.text, "html.parser")
-
+            
+            response_json = res.json()
+            html_body = response_json.get("body", "")
+            
+            if not html_body.strip():
+                log.info("Empty response body at page %d, stopping", page_num)
+                break
+            
+            # Parse the HTML fragment using the same parser
+            soup = BeautifulSoup(html_body, "html.parser")
+            
             any_in_window = False
             rows_found = 0
             for row in soup.select("table tr"):
@@ -506,63 +556,13 @@ def _extract_recent_changes_entries(max_pages: int = 6) -> dict[str, datetime]:
                     page_times[page_url] = change_time
                     log.debug("Found recent page: %s (changed %s)", page_url, change_time)
 
-            log.info("Page %s: %d rows found, %d in window, %d total pages", url, rows_found, any_in_window, len(page_times))
+            log.info("Page %d (offset %d): %d rows found, %d in window, %d total pages", page_num, offset, rows_found, any_in_window, len(page_times))
 
             if not any_in_window:
                 break
 
-            # Try AJAX pagination first
-            ajax_next = None
-            for script in soup.select("script"):
-                script_text = script.get_text()
-                if "ajax-module-connector.php" in script_text and "page" in script_text:
-                    # Extract page number for next page
-                    page_match = re.search(r'page["\']?\s*:\s*(\d+)', script_text)
-                    if page_match:
-                        current_page = int(page_match.group(1))
-                        next_page = current_page + 1
-                        ajax_next = f"{RECENT_URL_HTTP}/../common--javascript/compatible/mediawiki/ajax-module-connector.php?page={next_page}"
-                        log.debug("Found AJAX pagination: page %d -> %d", current_page, next_page)
-                        break
-
-            if ajax_next:
-                url = ajax_next
-                page_num += 1
-                continue
-
-            # Fallback to regular pagination
-            next_href = None
-            next_link = (
-                soup.select_one("a[rel='next']")
-                or soup.select_one(".wiki-pagination a.next")
-                or soup.select_one("li.next a")
-                or soup.select_one("a[aria-label*='next']")
-            )
-            if next_link and next_link.get("href"):
-                next_href = next_link.get("href")
-            else:
-                for a in soup.select("a[href]"):
-                    label = a.get_text(" ", strip=True).lower()
-                    if label.startswith("next") and a.get("href"):
-                        next_href = a.get("href")
-                        break
-
-            if not next_href:
-                log.info("No more pagination found")
-                break
-            # Wikidot sometimes uses href="javascript:;" for the "next" button.
-            if not _is_safe_url(next_href):
-                log.warning("Skipping unsafe pagination href: %r", next_href)
-                break
-
-            url = _make_absolute(next_href).rstrip("/")
-
-            if not _is_safe_url(url):
-                log.warning("Skipping unsafe pagination url: %r", url)
-                break
-
         except Exception as e:
-            log.error("Error fetching recent changes page %s: %s", url, e)
+            log.warning("Failed to fetch page %d: %s", page_num, e)
             break
 
     log.info("Recent changes extraction complete: %d pages found", len(page_times))
