@@ -530,7 +530,8 @@ def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
                 'module_id': module_id.replace('wikidot-module-', ''),  # Remove prefix for Wikidot
                 'offset': str(offset),
                 'wikidot_token': 'recent_changes',  # Add token for authentication
-                'options': '{"pagination": true}'  # Try adding pagination option
+                'action': 'changes/list',  # Try specific action
+                'page_id': module_id.replace('wikidot-module-', '')  # Page-specific module ID
             }
             
             headers = {
