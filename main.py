@@ -20,8 +20,8 @@ from discord.ext import commands, tasks
 TOKEN = os.getenv("TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1484113318095622315"))
 
-WIKI_BASE = "https://aqwwiki.wikidot.com"
-RECENT_URL_HTTP = "http://aqwwiki.wikidot.com/system:recent-changes"
+WIKI_BASE = "https://silveraqworld.wikidot.com"
+RECENT_URL_HTTP = "http://silveraqworld.wikidot.com/system:recent-changes"
 DB = "drops.db"
 
 CHECK_DAYS = 7
