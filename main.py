@@ -206,21 +206,21 @@ def _extract_title_icons(soup: BeautifulSoup) -> str | None:
 def _clean_item_text(raw_text: str) -> tuple[str, str]:
     """
     Parse the item page text into a clean structured description.
-
-    Output format (exact labels, all label parts in bold):
-    - Location:
-    - Price OR Dropped by / Merge the following (when Price is N/A)
-    - Rarity:
-    - Note: (only if note exists)
+    Only shows important fields: Location, Price/Dropped by, Rarity.
     """
     text = raw_text.replace("\r\n", "\n").replace("\xa0", " ")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
-    # Remove unwanted Sellback section entirely.
-    # Some pages use "Sellback:" while others may include spacing like "Sell back:".
+    # Remove unwanted sections entirely
     text = re.sub(
-        r"Sell\s*back\s*:\s*.+?(?=(?:Rarity:\s*)|(?:Description:\s*)|(?:Notes:\s*)|(?:Also see:\s*)|(?:Thanks to\s*)|$)",
+        r"Sell\s*back\s*:\s*.+?(?=(?:Rarity:\s*)|(?:Description:\s*)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*)|$)",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(
+        r"Description\s*:?\s*.+?(?=(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*)|$)",
         "",
         text,
         flags=re.IGNORECASE | re.DOTALL,
@@ -237,28 +237,51 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
     def _format_list(val: str) -> str:
         """
         Convert a multi-value field into Discord-friendly line items.
-        - If the value already contains newlines, keep one entry per non-empty line.
-        - Otherwise, split on commas as a fallback.
+        Preserves original formatting including dashes and line connections.
         """
         v = (val or "").strip()
         if not v or v.upper() == "N/A":
             return "N/A"
 
-        # Normalize whitespace but preserve line breaks.
+        # Normalize multiple spaces but preserve single spaces and original structure
         v = re.sub(r"[ \t]+", " ", v).strip()
+        
+        # Split by newlines first to preserve original line structure
         lines = [ln.strip() for ln in v.split("\n") if ln.strip()]
+        
         if len(lines) > 1:
-            return "\n".join(lines)
+            # Join lines with spaces to preserve connections like "Phlegethon Arena Trophies - Phlegethon Arena"
+            # but keep different location groups on separate lines
+            formatted_lines = []
+            current_line = ""
+            
+            for line in lines:
+                if line == "-":
+                    # Dash separator, join with previous line
+                    if current_line:
+                        current_line += " -"
+                    continue
+                elif current_line and not current_line.endswith(" -"):
+                    # Previous line was complete, start new line
+                    formatted_lines.append(current_line)
+                    current_line = line
+                else:
+                    # Continue current line (after dash or first line)
+                    current_line += line if current_line.endswith(" -") else f" {line}"
+            
+            if current_line:
+                formatted_lines.append(current_line)
+            
+            return "\n".join(formatted_lines)
 
-        # Fallback: comma-separated values.
+        # Fallback: comma-separated values
         if "," in v:
             parts = [p.strip() for p in v.split(",") if p.strip()]
             return "\n".join(parts) if parts else v
 
         return v
 
-    # Capture fields between wikidot label markers.
-    # These patterns are based on the AQW wiki item pages format.
+    # Capture only the important fields
     loc = "N/A"
     price = "N/A"
     rarity = "N/A"
@@ -266,8 +289,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
     merge_following = None
     note = None
 
-    # Label matching on Wikidot can vary slightly (e.g. "Location" vs "Locations",
-    # whitespace before ":" etc.), so we keep the patterns tolerant.
+    # Location field
     m_loc = re.search(
         r"Locations?\s*:?\s*(?P<val>.+?)\s*(?=(?:Price\s*:?)|(?:Dropped by\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
@@ -276,6 +298,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
     if m_loc:
         loc = _norm(m_loc.group("val"))
 
+    # Price field
     m_price = re.search(
         r"Price\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Dropped by\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
@@ -284,7 +307,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
     if m_price:
         price = _norm(m_price.group("val"))
 
-    # These labels appear on some item pages when Price is "N/A".
+    # Dropped by field (when Price is N/A)
     m_dropped = re.search(
         r"Dropped by\s*:?\s*(?P<val>.+?)\s*(?=(?:Merge the following\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
@@ -295,6 +318,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         if candidate and candidate.lower() not in {"n/a", "na"}:
             dropped_by = candidate
 
+    # Merge the following field
     m_merge = re.search(
         r"Merge the following\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
@@ -305,6 +329,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         if candidate and candidate.lower() not in {"n/a", "na"}:
             merge_following = candidate
 
+    # Rarity field
     m_rarity = re.search(
         r"Rarity\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity Description\s*:?)|(?:Description\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
@@ -313,6 +338,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
     if m_rarity:
         rarity = _norm(m_rarity.group("val"))
 
+    # Note field
     m_note = re.search(
         r"Notes?\s*:?\s*(?P<val>.+?)(?=(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
@@ -327,18 +353,18 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         p_norm = (p or "").strip()
         return p_norm.upper() == "N/A" or p_norm.upper().startswith("N/A")
 
-    # Assemble structured Discord description.
+    # Assemble only the important fields
     parts: list[str] = [
-        f"**Locations:**\n{_format_list(loc)}",
+        f"**Location:**\n{_format_list(loc)}",
     ]
 
     if _price_is_na(price):
-        # User preference: when Price is N/A, replace it with Dropped by / Merge the following (if present).
+        # When Price is N/A, show Dropped by / Merge the following
         if dropped_by:
             parts.append(f"**Dropped by:**\n{_format_list(dropped_by)}")
         if merge_following:
             parts.append(f"**Merge the following:**\n{_format_list(merge_following)}")
-        # Fallback in case the page doesn't actually include either label.
+        # Fallback if neither exists
         if not dropped_by and not merge_following:
             parts.append(f"**Price:**\n{_format_list(price)}")
     else:
@@ -629,11 +655,8 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
 
 def create_embed(post: dict) -> discord.Embed:
     wrapped_content = _wrap_lines(post["content"])
-    icons_line = post.get("title_icons")
-    if icons_line:
-        desc = f"{icons_line}\n\n{wrapped_content}\n\n[View on Wiki]({post['url']})"
-    else:
-        desc = f"{wrapped_content}\n\n[View on Wiki]({post['url']})"
+    # Remove title_icons to eliminate aegift hyperlink below item name
+    desc = f"{wrapped_content}\n\n[View on Wiki]({post['url']})"
     if len(desc) > 4096:
         desc = desc[:4090] + "..."
 
