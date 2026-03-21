@@ -551,13 +551,13 @@ def fetch_recent_aegifts_fast(limit: int = MAX_POSTS_PER_RUN, newest_first: bool
     seen_ids: set[str] = set()
     pages_checked = 0
 
-    for page_url, _t in sorted_pages[:max_pages]:  # Limit to max_pages
+    for page_url, _t in sorted_pages:  # Process all pages
         pid = urlparse(page_url).path.strip("/").replace("/", "-") or page_url
         if pid in seen_ids:
             continue
 
         pages_checked += 1
-        log.info("Checking page %d/%d: %s", pages_checked, max_pages, page_url)
+        log.info("Checking page %d: %s", pages_checked, page_url)
 
         # Try the page itself first
         details = extract_item_details(page_url)
