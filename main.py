@@ -350,6 +350,13 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
+    if not m_note:
+        # Try singular "Note:" pattern
+        m_note = re.search(
+            r"Note\s*:?\s*(?P<val>.+?)(?=(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
     if m_note:
         candidate = _norm(m_note.group("val"))
         if candidate and candidate.lower() not in {"n/a", "na"}:
