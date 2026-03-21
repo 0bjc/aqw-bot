@@ -436,43 +436,21 @@ def extract_item_details(page_url: str) -> dict | None:
     }
 
 
-def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
+def _extract_recent_changes_entries() -> dict[str, datetime]:
     """
     Get mapping: page_url -> earliest change_time within CHECK_DAYS.
-    Uses Wikidot AJAX pagination to fetch the previous 30 pages.
+    Simply fetches the recent changes page in real-time.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=CHECK_DAYS)
     page_times: dict[str, datetime] = {}
 
     log.info("Starting recent changes extraction, cutoff: %s", cutoff)
 
-    # Fetch first page normally
-    module_id = None
     try:
         res = requests.get(RECENT_URL_HTTP, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
         res.raise_for_status()
         soup = BeautifulSoup(res.text, "html.parser")
         log.info("Fetching page: %s", RECENT_URL_HTTP)
-
-        # Extract moduleId from the first page
-        module_id = None
-        
-        # First try: Look for the page-specific module ID from JavaScript
-        for script in soup.select("script"):
-            script_text = script.get_text()
-            # Look for the specific page module ID pattern
-            page_id_match = re.search(r'WIKIREQUEST\.info\.pageId\s*=\s*(\d+)', script_text)
-            if page_id_match:
-                module_id = f"wikidot-module-{page_id_match.group(1)}"
-                log.info("Found page module ID: %s", module_id)
-                break
-        
-        # Fallback to site-wide module ID if page-specific not found
-        if not module_id:
-            module_id = "wikidot-module-97251"  # Site-wide module ID
-            log.info("Using site-wide module ID: %s", module_id)
-        
-        log.info("Using moduleId: %s", module_id)
 
         any_in_window = False
         rows_found = 0
@@ -510,105 +488,8 @@ def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
         log.info("Page 1 (offset 0): %d rows found, %d in window, %d total pages", rows_found, any_in_window, len(page_times))
 
     except Exception as e:
-        log.warning("Failed to fetch first page: %s", e)
+        log.warning("Failed to fetch recent changes: %s", e)
         return page_times
-
-    # Fetch remaining pages using AJAX pagination
-    for page_num in range(2, max_pages + 1):
-        offset = (page_num - 1) * 20  # Each page has 20 rows
-        
-        # Add 1 second delay between requests
-        if page_num > 2:
-            time.sleep(1)
-        
-        log.info("Fetching page %d (offset %d)", page_num, offset)
-        
-        try:
-            ajax_url = f"{WIKI_BASE}/ajax-module-connector.php"
-            ajax_data = {
-                'moduleName': 'changes/SiteChangesModule',  # Try exact module name from page source
-                'page': 'system:recent-changes',
-                'moduleId': module_id.replace('wikidot-module-', ''),  # Remove prefix for Wikidot
-                'offset': str(offset),
-                'wikidot_token': 'recent_changes'  # Add token for authentication
-            }
-            
-            headers = {
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "X-Requested-With": "XMLHttpRequest",
-                "Origin": "http://aqwwiki.wikidot.com",
-                "Referer": "http://aqwwiki.wikidot.com/system:recent-changes",
-                "Connection": "keep-alive"
-            }
-            log.info("AJAX request data: %s", ajax_data)
-            res = requests.post(ajax_url, data=ajax_data, timeout=15, headers=headers)
-            res.raise_for_status()
-            
-            log.info("AJAX response status: %s", res.status_code)
-            response_json = res.json()
-            
-            # Try different possible keys for the HTML content
-            html_body = ""
-            for key in ["body", "content", "data", "html", "result"]:
-                if key in response_json:
-                    html_body = response_json.get(key, "")
-                    break
-            
-            log.info("AJAX response keys: %s", list(response_json.keys()))
-            log.info("Body length: %d chars", len(html_body))
-            if len(html_body) > 0:
-                log.info("Body preview: %s", html_body[:200])
-            
-            if not html_body.strip():
-                log.info("Empty response body at page %d, stopping", page_num)
-                break
-            
-            # Parse the HTML fragment using the same parser
-            soup = BeautifulSoup(html_body, "html.parser")
-            
-            any_in_window = False
-            rows_found = 0
-            for row in soup.select("table tr"):
-                cols = row.find_all("td")
-                if len(cols) < 3:
-                    continue
-
-                rows_found += 1
-                link = cols[0].find("a")
-                if not link:
-                    continue
-
-                href = link.get("href", "")
-                if not href or href.startswith("#"):
-                    continue
-
-                time_text = cols[2].get_text(strip=True)
-                change_time = parse_wiki_time(time_text)
-                if not change_time:
-                    log.debug("Failed to parse time: %s", time_text)
-                    continue
-
-                if change_time < cutoff:
-                    log.debug("Skipping old entry: %s (changed %s)", href, change_time)
-                    continue
-
-                any_in_window = True
-                page_url = _make_absolute(href).rstrip("/")
-                prev = page_times.get(page_url)
-                if prev is None or change_time < prev:
-                    page_times[page_url] = change_time
-                    log.debug("Found recent page: %s (changed %s)", page_url, change_time)
-
-            log.info("Page %d (offset %d): %d rows found, %d in window, %d total pages", page_num, offset, rows_found, any_in_window, len(page_times))
-
-            if not any_in_window:
-                break
-
-        except Exception as e:
-            log.warning("Failed to fetch page %d: %s", page_num, e)
-            break
 
     log.info("Recent changes extraction complete: %d pages found", len(page_times))
     return page_times
@@ -656,7 +537,7 @@ def fetch_recent_aegifts_fast(limit: int = MAX_POSTS_PER_RUN, newest_first: bool
     """
     Fast version for slash commands - checks fewer pages to avoid timeouts.
     """
-    page_times = _extract_recent_changes_entries(max_pages=5)  # Check more pages
+    page_times = _extract_recent_changes_entries()  # Fetch recent changes
     if not page_times:
         log.info("No recent changes found")
         return []
@@ -697,7 +578,7 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
     """
     Fetch aegift pages from the previous 30 pages of recent changes.
     """
-    page_times = _extract_recent_changes_entries(max_pages=30)  # Check 30 pages
+    page_times = _extract_recent_changes_entries()  # Fetch recent changes
     if not page_times:
         log.info("No recent changes found")
         return []
