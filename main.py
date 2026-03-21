@@ -35,7 +35,7 @@ WRAP_WIDTH = 55
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
 
 
@@ -605,65 +605,68 @@ def _extract_related_item_links(page_url: str, max_links: int = 25) -> list[str]
     return list(dict.fromkeys(links))  # dedupe while preserving order
 
 
-def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False, max_pages_to_check: int = 5) -> list[dict]:
+def fetch_aegift_pages(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False) -> list[dict]:
     """
-    Fetch aegift pages modified in the last CHECK_DAYS.
-    Sorted oldest -> newest by default.
-
-    Args:
-        limit: maximum items to return (saves time for slash commands).
-        newest_first: when True, returns newest -> oldest (useful for /latestdrops).
-        max_pages_to_check: limit how many pages to check for faster response.
+    Fetch pages with the aegift tag directly from the tag listing.
+    This is more reliable than recent changes since aegift pages are rarely updated.
     """
-    page_times = _extract_recent_changes_entries(max_pages=8)
-    if not page_times:
-        log.info("No recent changes found in time window")
+    log.info("Fetching aegift pages from tag listing...")
+    
+    try:
+        # Get the aegift tag listing page
+        r = requests.get(
+            f"{WIKI_BASE}/system:page-tags/tag/aegift",
+            timeout=15,
+            headers={"User-Agent": "aqw-wiki-bot/1.0"},
+        )
+        r.raise_for_status()
+    except Exception as e:
+        log.error("Failed to fetch aegift tag listing: %s", e)
         return []
 
-    sorted_pages = sorted(page_times.items(), key=lambda kv: kv[1])
+    soup = BeautifulSoup(r.text, "html.parser")
+    
+    # Extract all page links from the tag listing
+    page_links = []
+    for a in soup.select("a[href]"):
+        href = a.get("href", "")
+        if href and not href.startswith("#") and not href.startswith("http"):
+            page_links.append(_make_absolute(href))
+    
+    log.info("Found %d pages in aegift tag listing", len(page_links))
+    
     if newest_first:
-        sorted_pages = list(reversed(sorted_pages))
-
+        # For newest first, we'll just reverse the list since the tag listing
+        # doesn't provide dates. This gives us a different order at least.
+        page_links = list(reversed(page_links))
+    
     results: list[dict] = []
     seen_ids: set[str] = set()
-    pages_checked = 0
-    max_check = min(max_pages_to_check, len(sorted_pages))
-
-    for page_url, _t in sorted_pages[:max_check]:
+    
+    for page_url in page_links[:limit * 2]:  # Check more pages to find good ones
         pid = urlparse(page_url).path.strip("/").replace("/", "-") or page_url
         if pid in seen_ids:
             continue
-
-        pages_checked += 1
-        log.info("Checking page %d/%d: %s", pages_checked, max_check, page_url)
-
-        # Try the page itself first
+        
+        seen_ids.add(pid)
+        
         details = extract_item_details(page_url)
         if details:
             results.append({"id": pid, **details})
-            seen_ids.add(pid)
             log.info("✓ Found aegift: %s", details["title"])
-        else:
-            # If not a direct item page, try its child links
-            child_links = _extract_related_item_links(page_url, max_links=5)  # Reduced child links
-            log.debug("Found %d child links for %s", len(child_links), page_url)
-            for child_url in child_links:
-                child_pid = urlparse(child_url).path.strip("/").replace("/", "-") or child_url
-                if child_pid in seen_ids:
-                    continue
-                child_details = extract_item_details(child_url)
-                if child_details:
-                    results.append({"id": child_pid, **child_details})
-                    seen_ids.add(child_pid)
-                    log.info("✓ Found aegift child: %s", child_details["title"])
-                    if len(results) >= limit:
-                        break
-
-        if len(results) >= limit:
-            break
-
-    log.info("Checked %d pages, found %d aegift items", pages_checked, len(results))
+            if len(results) >= limit:
+                break
+    
+    log.info("Checked %d pages, found %d aegift items", len(seen_ids), len(results))
     return results
+
+
+def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False, max_pages_to_check: int = 5) -> list[dict]:
+    """
+    Fetch aegift pages - now uses tag listing instead of recent changes
+    since aegift pages are rarely updated.
+    """
+    return fetch_aegift_pages(limit, newest_first)
 
 
 def create_embed(post: dict) -> discord.Embed:
@@ -698,7 +701,7 @@ async def check_posts():
         log.warning("Channel %s not found", CHANNEL_ID)
         return
 
-    posts = await asyncio.to_thread(fetch_recent_aegifts)
+    posts = await asyncio.to_thread(fetch_aegift_pages, limit=5)  # Check fewer pages for background
     for post in posts:
         if await is_posted(post["id"]):
             continue
@@ -722,11 +725,11 @@ async def latestdrops(interaction: discord.Interaction):
     try:
         # Only fetch the newest single item to keep response time low.
         posts = await asyncio.wait_for(
-            asyncio.to_thread(fetch_recent_aegifts, 1, True, 3),  # Only check 3 pages
-            timeout=10  # Further reduced timeout
+            asyncio.to_thread(fetch_aegift_pages, 1, True),  # Use new function
+            timeout=15  # Slightly longer timeout for tag listing
         )
         if not posts:
-            await interaction.followup.send("No recent AE gifts found in the last 7 days.")
+            await interaction.followup.send("No AE gifts found.")
             return
 
         await interaction.followup.send(embed=create_embed(posts[0]))
