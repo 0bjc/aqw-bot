@@ -225,6 +225,12 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
+    text = re.sub(
+        r"Base\s*Damage\s*:?\s*.+?(?=(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*)|$)",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
 
     def _norm(val: str) -> str:
         val = re.sub(r"system:page-tags/tag/[^ \n]+", "", val, flags=re.IGNORECASE)
@@ -259,15 +265,15 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
                 if line == "-":
                     # Dash separator, join with previous line
                     if current_line:
-                        current_line += " -"
+                        current_line += " - "
                     continue
-                elif current_line and not current_line.endswith(" -"):
+                elif current_line and not current_line.endswith(" - "):
                     # Previous line was complete, start new line
                     formatted_lines.append(current_line)
                     current_line = line
                 else:
                     # Continue current line (after dash or first line)
-                    current_line += line if current_line.endswith(" -") else f" {line}"
+                    current_line += line if current_line.endswith(" - ") else f" {line}"
             
             if current_line:
                 formatted_lines.append(current_line)
