@@ -454,58 +454,23 @@ def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
         soup = BeautifulSoup(res.text, "html.parser")
         log.info("Fetching page: %s", RECENT_URL_HTTP)
 
-        # Extract moduleId from the page
+        # Extract moduleId from the first page
         module_id = None
         
-        # Debug: Log all div IDs to see what's available
-        all_divs = soup.select("div[id]")
-        div_ids = [div.get("id") for div in all_divs if div.get("id")]
-        log.debug("Found div IDs: %s", div_ids[:10])  # First 10 to avoid spam
-        
-        # First try: Look for div with id containing "module"
-        for div in soup.select("div[id*='module']"):
-            module_id = div.get("id")
-            log.info("Found module-related div: %s", module_id)
-            if module_id and "module" in module_id.lower():
+        # First try: Look for the page-specific module ID from JavaScript
+        for script in soup.select("script"):
+            script_text = script.get_text()
+            # Look for the specific page module ID pattern
+            page_id_match = re.search(r'WIKIREQUEST\.info\.pageId\s*=\s*(\d+)', script_text)
+            if page_id_match:
+                module_id = f"wikidot-module-{page_id_match.group(1)}"
+                log.info("Found page module ID: %s", module_id)
                 break
         
-        # Second try: Look for any element with data attributes
+        # Fallback to site-wide module ID if page-specific not found
         if not module_id:
-            for element in soup.select("[data-module], [data-module-id], [class*='module']"):
-                module_id = element.get("data-module") or element.get("data-module-id") or element.get("class")
-                if module_id:
-                    if isinstance(module_id, list):
-                        module_id = " ".join(module_id)
-                    log.info("Found module via attribute: %s", module_id)
-                    break
-        
-        # Third try: Parse from JavaScript - look for recent changes specific patterns
-        if not module_id:
-            for script in soup.select("script"):
-                script_text = script.get_text()
-                # Look for recent changes module patterns
-                patterns = [
-                    r'recent.*changes.*module.*?(\w+)',
-                    r'changes.*module.*?(\w+)',
-                    r'wikidot.*module.*?(\w+)',
-                    r'module.*?id.*?(\w+)',
-                    r'id["\']?\s*[:=]\s*["\']?(\w+)',
-                ]
-                for pattern in patterns:
-                    match = re.search(pattern, script_text, re.IGNORECASE)
-                    if match:
-                        potential_id = match.group(1)
-                        if len(potential_id) > 3:  # Avoid short matches
-                            module_id = f"wikidot-module-{potential_id}"
-                            log.info("Found moduleId in script: %s", module_id)
-                            break
-                if module_id:
-                    break
-        
-        # Last resort: Generate a common moduleId for recent changes
-        if not module_id:
-            module_id = "wikidot-module-2788766"  # Common recent changes module ID
-            log.info("Using fallback moduleId: %s", module_id)
+            module_id = "wikidot-module-97251"  # Site-wide module ID
+            log.info("Using site-wide module ID: %s", module_id)
         
         log.info("Using moduleId: %s", module_id)
 
@@ -564,7 +529,8 @@ def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
                 'page': 'system:recent-changes',
                 'module_id': module_id.replace('wikidot-module-', ''),  # Remove prefix for Wikidot
                 'offset': str(offset),
-                'wikidot_token': 'recent_changes'  # Add token for authentication
+                'wikidot_token': 'recent_changes',  # Add token for authentication
+                'options': '{"pagination": true}'  # Try adding pagination option
             }
             
             headers = {
