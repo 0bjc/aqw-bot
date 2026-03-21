@@ -344,16 +344,16 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
     if m_rarity:
         rarity = _norm(m_rarity.group("val"))
 
-    # Note field
+    # Note field - capture only the first Note: occurrence
     m_note = re.search(
-        r"Notes?\s*:?\s*(?P<val>.+?)(?=(?:Also see\s*:?)|(?:Thanks to\s*:?)|\Z)",
+        r"Notes?\s*:?\s*(?P<val>.+?)(?=(?:\n\s*Notes?\s*:)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|\Z)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
     if not m_note:
         # Try singular "Note:" pattern
         m_note = re.search(
-            r"Note\s*:?\s*(?P<val>.+?)(?=(?:Also see\s*:?)|(?:Thanks to\s*:?)|\Z)",
+            r"Note\s*:?\s*(?P<val>.+?)(?=(?:\n\s*Note\s*:)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|\Z)",
             text,
             flags=re.IGNORECASE | re.DOTALL,
         )
