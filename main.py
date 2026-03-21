@@ -819,6 +819,11 @@ async def testaegift(interaction: discord.Interaction):
         await interaction.followup.send(f"Error checking page: {e}")
 
 
+@bot.tree.command(name="ping", description="Test if bot is responding")
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message("Pong! Bot is working!")
+
+
 # ---------------- READY ----------------
 @bot.event
 async def on_ready():
@@ -826,8 +831,20 @@ async def on_ready():
     await init_db()
     if not check_posts.is_running():
         check_posts.start()
+    
+    # Debug: Log all registered commands
+    commands = [cmd.name for cmd in bot.tree.get_commands()]
+    log.info("Registered commands: %s", ", ".join(commands))
+    
     await bot.tree.sync()
     log.info("Commands synced.")
+    
+    # Force global sync to ensure commands appear
+    try:
+        synced = await bot.tree.sync()
+        log.info("Globally synced %d commands", len(synced))
+    except Exception as e:
+        log.error("Failed to sync commands globally: %s", e)
 
 
 if __name__ == "__main__":
