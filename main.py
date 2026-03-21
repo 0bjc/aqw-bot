@@ -335,9 +335,9 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         if candidate and candidate.lower() not in {"n/a", "na"}:
             merge_following = candidate
 
-    # Rarity field
+    # Rarity field - more specific to stop at Note field
     m_rarity = re.search(
-        r"Rarity\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity Description\s*:?)|(?:Description\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|\Z)",
+        r"Rarity\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity Description\s*:?)|(?:Notes?\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|\Z)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -387,8 +387,10 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     if note:
         parts.append(f"**Note:**\n{_format_list(note)}")
+        log.info("Found note field: %s", note)
 
     structured = "\n\n".join(parts).strip()
+    log.info("Final structured content: %s", structured)
     return structured, price
 
 
