@@ -363,6 +363,8 @@ def extract_item_details(page_url: str) -> dict | None:
     except requests.HTTPError as e:
         if e.response.status_code == 404:
             log.debug("Page not found: %s", page_url)
+        elif e.response.status_code in (503, 429):
+            log.debug("Rate limited/blocked for %s: %s", page_url, e.response.status_code)
         else:
             log.warning("HTTP error %s for %s: %s", e.response.status_code, page_url, e)
         return None
@@ -631,6 +633,9 @@ def fetch_aegift_pages(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fals
     for a in soup.select("a[href]"):
         href = a.get("href", "")
         if href and not href.startswith("#") and not href.startswith("http"):
+            # Skip system/search pages
+            if any(x in href.lower() for x in ("system:", "search:", "forum:", "admin:")):
+                continue
             page_links.append(_make_absolute(href))
     
     log.info("Found %d pages in aegift tag listing", len(page_links))
@@ -642,11 +647,16 @@ def fetch_aegift_pages(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fals
     
     results: list[dict] = []
     seen_ids: set[str] = set()
+    pages_to_check = min(limit * 3, len(page_links))  # Check fewer pages to avoid rate limiting
     
-    for page_url in page_links[:limit * 2]:  # Check more pages to find good ones
+    for i, page_url in enumerate(page_links[:pages_to_check]):
         pid = urlparse(page_url).path.strip("/").replace("/", "-") or page_url
         if pid in seen_ids:
             continue
+        
+        # Add delay to avoid rate limiting
+        if i > 0:
+            time.sleep(0.5)  # 500ms delay between requests
         
         seen_ids.add(pid)
         
@@ -726,7 +736,7 @@ async def latestdrops(interaction: discord.Interaction):
         # Only fetch the newest single item to keep response time low.
         posts = await asyncio.wait_for(
             asyncio.to_thread(fetch_aegift_pages, 1, True),  # Use new function
-            timeout=15  # Slightly longer timeout for tag listing
+            timeout=30  # Longer timeout due to delays between requests
         )
         if not posts:
             await interaction.followup.send("No AE gifts found.")
@@ -734,7 +744,7 @@ async def latestdrops(interaction: discord.Interaction):
 
         await interaction.followup.send(embed=create_embed(posts[0]))
     except asyncio.TimeoutError:
-        await interaction.followup.send("Timed out fetching latest drops. Please try again in a few seconds.")
+        await interaction.followup.send("Timed out fetching latest drops. The AQW wiki may be rate limiting. Please try again in a minute.")
     except Exception as e:
         log.exception("latestdrops failed: %s", e)
         await interaction.followup.send("Something went wrong while fetching recent AE gifts.")
