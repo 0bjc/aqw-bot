@@ -611,9 +611,9 @@ def fetch_recent_aegifts_fast(limit: int = MAX_POSTS_PER_RUN, newest_first: bool
     """
     Fast version for slash commands - checks fewer pages to avoid timeouts.
     """
-    page_times = _extract_recent_changes_entries(max_pages=3)  # Limit pages for speed
+    page_times = _extract_recent_changes_entries(max_pages=5)  # Check more pages
     if not page_times:
-        log.info("No recent changes found in time window")
+        log.info("No recent changes found")
         return []
 
     sorted_pages = sorted(page_times.items(), key=lambda kv: kv[1])
@@ -650,12 +650,11 @@ def fetch_recent_aegifts_fast(limit: int = MAX_POSTS_PER_RUN, newest_first: bool
 
 def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False) -> list[dict]:
     """
-    Fetch aegift pages from recent changes in the last CHECK_DAYS.
-    Only looks at recently modified pages to avoid checking old content.
+    Fetch aegift pages from the previous 30 pages of recent changes.
     """
-    page_times = _extract_recent_changes_entries(max_pages=8)
+    page_times = _extract_recent_changes_entries(max_pages=30)  # Check 30 pages
     if not page_times:
-        log.info("No recent changes found in time window")
+        log.info("No recent changes found")
         return []
 
     sorted_pages = sorted(page_times.items(), key=lambda kv: kv[1])
@@ -733,7 +732,7 @@ async def check_posts():
         log.warning("Channel %s not found", CHANNEL_ID)
         return
 
-    posts = await asyncio.to_thread(fetch_recent_aegifts, limit=5)  # Use recent changes for background
+    posts = await asyncio.to_thread(fetch_recent_aegifts, limit=10)  # Check more pages for background
     for post in posts:
         if await is_posted(post["id"]):
             continue
@@ -755,13 +754,13 @@ async def latestdrops(interaction: discord.Interaction):
         return
 
     try:
-        # Only check the first 3 most recent pages for speed
+        # Check the first 5 most recent pages for speed
         posts = await asyncio.wait_for(
-            asyncio.to_thread(fetch_recent_aegifts_fast, 1, True, max_pages=3),
-            timeout=12
+            asyncio.to_thread(fetch_recent_aegifts_fast, 1, True, max_pages=5),
+            timeout=20  # Longer timeout for more pages
         )
         if not posts:
-            await interaction.followup.send("No recent AE gifts found in the last 7 days.")
+            await interaction.followup.send("No recent AE gifts found in the last 30 pages.")
             return
 
         await interaction.followup.send(embed=create_embed(posts[0]))
