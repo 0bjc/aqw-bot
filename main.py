@@ -349,7 +349,7 @@ def extract_item_details(page_url: str) -> dict | None:
     try:
         r = requests.get(
             page_url,
-            timeout=15,
+            timeout=8,  # Reduced timeout
             headers={"User-Agent": "aqw-wiki-bot/1.0"},
         )
         r.raise_for_status()
@@ -358,6 +358,9 @@ def extract_item_details(page_url: str) -> dict | None:
             log.debug("Page not found: %s", page_url)
         else:
             log.warning("HTTP error %s for %s: %s", e.response.status_code, page_url, e)
+        return None
+    except requests.Timeout:
+        log.debug("Timeout fetching %s", page_url)
         return None
     except Exception as e:
         log.warning("Failed to fetch %s: %s", page_url, e)
@@ -595,7 +598,7 @@ def _extract_related_item_links(page_url: str, max_links: int = 25) -> list[str]
     return list(dict.fromkeys(links))  # dedupe while preserving order
 
 
-def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False) -> list[dict]:
+def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False, max_pages_to_check: int = 5) -> list[dict]:
     """
     Fetch aegift pages modified in the last CHECK_DAYS.
     Sorted oldest -> newest by default.
@@ -603,6 +606,7 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
     Args:
         limit: maximum items to return (saves time for slash commands).
         newest_first: when True, returns newest -> oldest (useful for /latestdrops).
+        max_pages_to_check: limit how many pages to check for faster response.
     """
     page_times = _extract_recent_changes_entries(max_pages=8)
     if not page_times:
@@ -616,14 +620,15 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
     results: list[dict] = []
     seen_ids: set[str] = set()
     pages_checked = 0
+    max_check = min(max_pages_to_check, len(sorted_pages))
 
-    for page_url, _t in sorted_pages:
+    for page_url, _t in sorted_pages[:max_check]:
         pid = urlparse(page_url).path.strip("/").replace("/", "-") or page_url
         if pid in seen_ids:
             continue
 
         pages_checked += 1
-        log.info("Checking page %d/%d: %s", pages_checked, len(sorted_pages), page_url)
+        log.info("Checking page %d/%d: %s", pages_checked, max_check, page_url)
 
         # Try the page itself first
         details = extract_item_details(page_url)
@@ -633,7 +638,7 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
             log.info("✓ Found aegift: %s", details["title"])
         else:
             # If not a direct item page, try its child links
-            child_links = _extract_related_item_links(page_url, max_links=15)
+            child_links = _extract_related_item_links(page_url, max_links=5)  # Reduced child links
             log.debug("Found %d child links for %s", len(child_links), page_url)
             for child_url in child_links:
                 child_pid = urlparse(child_url).path.strip("/").replace("/", "-") or child_url
@@ -710,8 +715,8 @@ async def latestdrops(interaction: discord.Interaction):
     try:
         # Only fetch the newest single item to keep response time low.
         posts = await asyncio.wait_for(
-            asyncio.to_thread(fetch_recent_aegifts, 1, True),
-            timeout=15  # Reduced timeout
+            asyncio.to_thread(fetch_recent_aegifts, 1, True, 3),  # Only check 3 pages
+            timeout=10  # Further reduced timeout
         )
         if not posts:
             await interaction.followup.send("No recent AE gifts found in the last 7 days.")
