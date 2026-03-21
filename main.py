@@ -337,7 +337,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Rarity field
     m_rarity = re.search(
-        r"Rarity\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity Description\s*:?)|(?:Description\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
+        r"Rarity\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity Description\s*:?)|(?:Description\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|\Z)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -346,14 +346,14 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Note field
     m_note = re.search(
-        r"Notes?\s*:?\s*(?P<val>.+?)(?=(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
+        r"Notes?\s*:?\s*(?P<val>.+?)(?=(?:Also see\s*:?)|(?:Thanks to\s*:?)|\Z)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
     if not m_note:
         # Try singular "Note:" pattern
         m_note = re.search(
-            r"Note\s*:?\s*(?P<val>.+?)(?=(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
+            r"Note\s*:?\s*(?P<val>.+?)(?=(?:Also see\s*:?)|(?:Thanks to\s*:?)|\Z)",
             text,
             flags=re.IGNORECASE | re.DOTALL,
         )
