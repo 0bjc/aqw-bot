@@ -457,46 +457,57 @@ def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
         # Extract moduleId from the page
         module_id = None
         
-        # First try: Look for div with id starting with "wikidot-module-"
-        for div in soup.select("div[id*='wikidot-module']"):
+        # Debug: Log all div IDs to see what's available
+        all_divs = soup.select("div[id]")
+        div_ids = [div.get("id") for div in all_divs if div.get("id")]
+        log.debug("Found div IDs: %s", div_ids[:10])  # First 10 to avoid spam
+        
+        # First try: Look for div with id containing "module"
+        for div in soup.select("div[id*='module']"):
             module_id = div.get("id")
-            if module_id and "wikidot-module" in module_id:
-                log.info("Found moduleId: %s", module_id)
+            log.info("Found module-related div: %s", module_id)
+            if module_id and "module" in module_id.lower():
                 break
         
-        # Second try: Look for any element with data-module-id or similar attributes
+        # Second try: Look for any element with data attributes
         if not module_id:
-            for element in soup.select("[data-module-id], [id*='module']"):
-                module_id = element.get("data-module-id") or element.get("id")
+            for element in soup.select("[data-module], [data-module-id], [class*='module']"):
+                module_id = element.get("data-module") or element.get("data-module-id") or element.get("class")
                 if module_id:
-                    log.info("Found moduleId via attribute: %s", module_id)
+                    if isinstance(module_id, list):
+                        module_id = " ".join(module_id)
+                    log.info("Found module via attribute: %s", module_id)
                     break
         
-        # Third try: Parse from JavaScript
+        # Third try: Parse from JavaScript - look for recent changes specific patterns
         if not module_id:
             for script in soup.select("script"):
                 script_text = script.get_text()
-                # Look for various patterns
+                # Look for recent changes module patterns
                 patterns = [
-                    r'wikidot-module-(\w+)',
-                    r'moduleId["\']?\s*[:=]\s*["\']?(\w+)',
-                    r'module["\']?\s*[:=]\s*["\']?(\w+)'
+                    r'recent.*changes.*module.*?(\w+)',
+                    r'changes.*module.*?(\w+)',
+                    r'wikidot.*module.*?(\w+)',
+                    r'module.*?id.*?(\w+)',
+                    r'id["\']?\s*[:=]\s*["\']?(\w+)',
                 ]
                 for pattern in patterns:
-                    match = re.search(pattern, script_text)
+                    match = re.search(pattern, script_text, re.IGNORECASE)
                     if match:
-                        module_id = match.group(1) if not match.group(1).startswith("wikidot-module") else match.group(1)
-                        if not module_id.startswith("wikidot-module"):
-                            module_id = f"wikidot-module-{module_id}"
-                        log.info("Found moduleId in script: %s", module_id)
-                        break
+                        potential_id = match.group(1)
+                        if len(potential_id) > 3:  # Avoid short matches
+                            module_id = f"wikidot-module-{potential_id}"
+                            log.info("Found moduleId in script: %s", module_id)
+                            break
                 if module_id:
                     break
         
+        # Last resort: Generate a common moduleId for recent changes
         if not module_id:
-            log.warning("No moduleId found, AJAX requests may fail")
-        else:
-            log.info("Using moduleId: %s", module_id)
+            module_id = "wikidot-module-2788766"  # Common recent changes module ID
+            log.info("Using fallback moduleId: %s", module_id)
+        
+        log.info("Using moduleId: %s", module_id)
 
         any_in_window = False
         rows_found = 0
