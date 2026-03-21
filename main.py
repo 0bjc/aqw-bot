@@ -35,7 +35,7 @@ WRAP_WIDTH = 55
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
 
 
@@ -126,6 +126,13 @@ def page_has_aegift(soup: BeautifulSoup) -> bool:
         href = tag_el.get("href", "")
         if "aegift" in href.lower():
             return True
+    
+    # Debug: log what tags we actually find
+    tags = soup.select(".page-tags a")
+    if tags:
+        tag_texts = [tag.get_text(strip=True) for tag in tags]
+        log.debug("Found tags: %s", ", ".join(tag_texts))
+    
     return False
 
 
@@ -728,6 +735,31 @@ async def latestdrops(interaction: discord.Interaction):
     except Exception as e:
         log.exception("latestdrops failed: %s", e)
         await interaction.followup.send("Something went wrong while fetching recent AE gifts.")
+
+
+@bot.tree.command(name="checkpage", description="Debug: Check if a specific page has aegift tag")
+async def checkpage(interaction: discord.Interaction, page_name: str):
+    try:
+        await interaction.response.defer(thinking=True)
+    except discord.NotFound:
+        return
+
+    try:
+        page_url = f"{WIKI_BASE}/{page_name}"
+        details = await asyncio.wait_for(
+            asyncio.to_thread(extract_item_details, page_url),
+            timeout=10
+        )
+        
+        if details:
+            await interaction.followup.send(f"✅ Found aegift: {details['title']}", embed=create_embed(details))
+        else:
+            await interaction.followup.send(f"❌ No aegift tag found on {page_url}")
+    except asyncio.TimeoutError:
+        await interaction.followup.send("Timed out checking page.")
+    except Exception as e:
+        log.exception("checkpage failed: %s", e)
+        await interaction.followup.send(f"Error checking page: {e}")
 
 
 # ---------------- READY ----------------
