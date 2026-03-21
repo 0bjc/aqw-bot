@@ -353,12 +353,19 @@ def extract_item_details(page_url: str) -> dict | None:
             headers={"User-Agent": "aqw-wiki-bot/1.0"},
         )
         r.raise_for_status()
+    except requests.HTTPError as e:
+        if e.response.status_code == 404:
+            log.debug("Page not found: %s", page_url)
+        else:
+            log.warning("HTTP error %s for %s: %s", e.response.status_code, page_url, e)
+        return None
     except Exception as e:
         log.warning("Failed to fetch %s: %s", page_url, e)
         return None
 
     soup = BeautifulSoup(r.text, "html.parser")
     if not page_has_aegift(soup):
+        log.debug("No aegift tag found on %s", page_url)
         return None
 
     title_el = soup.select_one("#page-title")
@@ -570,7 +577,7 @@ def _extract_related_item_links(page_url: str, max_links: int = 25) -> list[str]
     links: list[str] = []
     for a in content.select("a[href]"):
         href = a.get("href", "").strip()
-        if not href or href.startswith("#"):
+        if not href or href.startswith("#") or href.startswith("javascript:"):
             continue
         if href.startswith(("http://", "https://")):
             full = href
@@ -599,6 +606,7 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
     """
     page_times = _extract_recent_changes_entries(max_pages=8)
     if not page_times:
+        log.info("No recent changes found in time window")
         return []
 
     sorted_pages = sorted(page_times.items(), key=lambda kv: kv[1])
@@ -607,20 +615,26 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
 
     results: list[dict] = []
     seen_ids: set[str] = set()
+    pages_checked = 0
 
     for page_url, _t in sorted_pages:
         pid = urlparse(page_url).path.strip("/").replace("/", "-") or page_url
         if pid in seen_ids:
             continue
 
+        pages_checked += 1
+        log.info("Checking page %d/%d: %s", pages_checked, len(sorted_pages), page_url)
+
         # Try the page itself first
         details = extract_item_details(page_url)
         if details:
             results.append({"id": pid, **details})
             seen_ids.add(pid)
+            log.info("✓ Found aegift: %s", details["title"])
         else:
             # If not a direct item page, try its child links
             child_links = _extract_related_item_links(page_url, max_links=15)
+            log.debug("Found %d child links for %s", len(child_links), page_url)
             for child_url in child_links:
                 child_pid = urlparse(child_url).path.strip("/").replace("/", "-") or child_url
                 if child_pid in seen_ids:
@@ -629,12 +643,14 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
                 if child_details:
                     results.append({"id": child_pid, **child_details})
                     seen_ids.add(child_pid)
+                    log.info("✓ Found aegift child: %s", child_details["title"])
                     if len(results) >= limit:
                         break
 
         if len(results) >= limit:
             break
 
+    log.info("Checked %d pages, found %d aegift items", pages_checked, len(results))
     return results
 
 
@@ -695,7 +711,7 @@ async def latestdrops(interaction: discord.Interaction):
         # Only fetch the newest single item to keep response time low.
         posts = await asyncio.wait_for(
             asyncio.to_thread(fetch_recent_aegifts, 1, True),
-            timeout=25
+            timeout=15  # Reduced timeout
         )
         if not posts:
             await interaction.followup.send("No recent AE gifts found in the last 7 days.")
