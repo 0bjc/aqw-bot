@@ -521,6 +521,52 @@ def _extract_recent_changes_entries(max_pages: int = 6) -> dict[str, datetime]:
     return page_times
 
 
+def _extract_related_item_links(page_url: str, max_links: int = 25) -> list[str]:
+    """
+    From a recent-changes parent/event page, pull likely item-page links.
+    This helps when recent changes lists a hub page instead of the aegift item itself.
+    """
+    try:
+        r = requests.get(page_url, timeout=12, headers={"User-Agent": "aqw-wiki-bot/1.0"})
+        r.raise_for_status()
+    except Exception:
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    root = soup.select_one("#page-content") or soup.select_one("#main-content") or soup
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for a in root.select("a[href]"):
+        href = (a.get("href") or "").strip()
+        if not href or href.startswith("#"):
+            continue
+        full = _make_absolute(href).rstrip("/")
+        if not full.startswith(WIKI_BASE):
+            continue
+        path = urlparse(full).path.lower()
+        # Skip wikidot/system/meta/search/forum style pages.
+        if any(
+            x in path
+            for x in (
+                "/system:",
+                "/forum:",
+                "/search:",
+                "/account:",
+                "/nav:",
+                "/admin:",
+            )
+        ):
+            continue
+        if full in seen:
+            continue
+        seen.add(full)
+        out.append(full)
+        if len(out) >= max_links:
+            break
+    return out
+
+
 def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False) -> list[dict]:
     """
     Fetch aegift pages modified in the last CHECK_DAYS.
@@ -540,19 +586,31 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
 
     results: list[dict] = []
     seen_ids: set[str] = set()
+    seen_urls: set[str] = set()
 
     for page_url, _t in sorted_pages:
-        pid = urlparse(page_url).path.strip("/").replace("/", "-") or page_url
-        if pid in seen_ids:
-            continue
+        candidates = [page_url]
+        # Fallback: crawl links from parent page if direct page isn't an aegift item.
+        candidates.extend(_extract_related_item_links(page_url, max_links=25))
 
-        details = extract_item_details(page_url)
-        if not details:
-            continue
+        for candidate_url in candidates:
+            if candidate_url in seen_urls:
+                continue
+            seen_urls.add(candidate_url)
 
-        results.append({"id": pid, **details})
-        seen_ids.add(pid)
+            pid = urlparse(candidate_url).path.strip("/").replace("/", "-") or candidate_url
+            if pid in seen_ids:
+                continue
 
+            details = extract_item_details(candidate_url)
+            if not details:
+                continue
+
+            results.append({"id": pid, **details})
+            seen_ids.add(pid)
+
+            if len(results) >= limit:
+                break
         if len(results) >= limit:
             break
 
