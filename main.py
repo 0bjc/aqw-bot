@@ -766,7 +766,7 @@ async def latestdrops7days(interaction: discord.Interaction):
         log.exception("latestdrops7days failed: %s", e)
         await interaction.followup.send("Something went wrong while fetching 7-day AE gifts.")
 
-# ... (rest of the code remains the same)
+
 async def checkpage(interaction: discord.Interaction, page_name: str):
     try:
         await interaction.response.defer(thinking=True)
