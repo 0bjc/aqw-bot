@@ -12,7 +12,6 @@ from urllib.parse import urljoin, urlparse, parse_qs
 import aiosqlite
 import requests
 from bs4 import BeautifulSoup
-import xml.etree.ElementTree as ET
 
 import discord
 from discord.ext import commands, tasks
@@ -23,7 +22,7 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1484113318095622315"))
 
 WIKI_BASE = "https://silveraqworld.wikidot.com"
 RECENT_URL_HTTP = "http://silveraqworld.wikidot.com/system:recent-changes"
-RSS_URL = "http://silveraqworld.wikidot.com/feed/site-changes.xml"
+RSS_URL = "http://aqwwiki.wikidot.com/feed/site-changes.xml"
 DB = "drops.db"
 
 CHECK_DAYS = 7
@@ -438,78 +437,181 @@ def extract_item_details(page_url: str) -> dict | None:
     }
 
 
-def _extract_recent_changes_entries() -> dict[str, datetime]:
+def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
     """
     Get mapping: page_url -> earliest change_time within CHECK_DAYS.
-    Uses RSS feed for complete real-time tracking.
+    Uses Wikidot AJAX pagination to fetch the previous 30 pages.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=CHECK_DAYS)
     page_times: dict[str, datetime] = {}
 
-    log.info("Starting RSS feed extraction, cutoff: %s", cutoff)
+    log.info("Starting recent changes extraction, cutoff: %s", cutoff)
 
+    # Fetch first page normally
+    module_id = None
     try:
-        res = requests.get(RSS_URL, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
+        res = requests.get(RECENT_URL_HTTP, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
         res.raise_for_status()
-        
-        # Parse XML RSS feed
-        root = ET.fromstring(res.text)
-        log.info("Fetching RSS feed: %s", RSS_URL)
+        soup = BeautifulSoup(res.text, "html.parser")
+        log.info("Fetching page: %s", RECENT_URL_HTTP)
 
-        # Find all items in the RSS feed
-        items = root.findall(".//item")
-        log.info("Found %d total entries in RSS feed", len(items))
+        # Extract moduleId from the first page
+        module_id = None
+        
+        # First try: Look for the page-specific module ID from JavaScript
+        for script in soup.select("script"):
+            script_text = script.get_text()
+            # Look for the specific page module ID pattern
+            page_id_match = re.search(r'WIKIREQUEST\.info\.pageId\s*=\s*(\d+)', script_text)
+            if page_id_match:
+                module_id = f"wikidot-module-{page_id_match.group(1)}"
+                log.info("Found page module ID: %s", module_id)
+                break
+        
+        # Fallback to site-wide module ID if page-specific not found
+        if not module_id:
+            module_id = "wikidot-module-97251"  # Site-wide module ID
+            log.info("Using site-wide module ID: %s", module_id)
+        
+        log.info("Using moduleId: %s", module_id)
 
         any_in_window = False
-        for item in items:
-            # Extract page URL
-            link_elem = item.find("link")
-            if link_elem is None or not link_elem.text:
-                continue
-            
-            page_url = link_elem.text.strip()
-            if not page_url:
+        rows_found = 0
+        for row in soup.select("table tr"):
+            cols = row.find_all("td")
+            if len(cols) < 3:
                 continue
 
-            # Extract publication date
-            pub_date_elem = item.find("pubDate")
-            if pub_date_elem is None or not pub_date_elem.text:
-                continue
-            
-            # Parse RSS date format (RFC 2822)
-            try:
-                # RSS format: "Thu, 24 Dec 2020 08:27:34 +0000"
-                change_time = datetime.strptime(pub_date_elem.text.strip(), "%a, %d %b %Y %H:%M:%S %z")
-            except ValueError as e:
-                log.debug("Failed to parse RSS date %s: %s", pub_date_elem.text, e)
+            rows_found += 1
+            link = cols[0].find("a")
+            if not link:
                 continue
 
-            # Skip if older than cutoff
+            href = link.get("href", "")
+            if not href or href.startswith("#"):
+                continue
+
+            time_text = cols[2].get_text(strip=True)
+            change_time = parse_wiki_time(time_text)
+            if not change_time:
+                log.debug("Failed to parse time: %s", time_text)
+                continue
+
             if change_time < cutoff:
-                log.debug("Skipping old entry: %s (changed %s)", page_url, change_time)
+                log.debug("Skipping old entry: %s (changed %s)", href, change_time)
                 continue
 
             any_in_window = True
-            page_url = page_url.rstrip("/")
+            page_url = _make_absolute(href).rstrip("/")
             prev = page_times.get(page_url)
             if prev is None or change_time < prev:
                 page_times[page_url] = change_time
                 log.debug("Found recent page: %s (changed %s)", page_url, change_time)
 
-        log.info("RSS extraction: %d entries found, %d in window, %d total pages", 
-                len(items), any_in_window, len(page_times))
+        log.info("Page 1 (offset 0): %d rows found, %d in window, %d total pages", rows_found, any_in_window, len(page_times))
 
-    except requests.RequestException as e:
-        log.warning("Failed to fetch RSS feed: %s", e)
-        return page_times
-    except ET.ParseError as e:
-        log.warning("Failed to parse RSS XML: %s", e)
-        return page_times
     except Exception as e:
-        log.warning("Error processing RSS feed: %s", e)
+        log.warning("Failed to fetch recent changes: %s", e)
         return page_times
 
-    log.info("RSS feed extraction complete: %d pages found", len(page_times))
+    # Fetch remaining pages using AJAX pagination
+    for page_num in range(2, max_pages + 1):
+        offset = (page_num - 1) * 20  # Each page has 20 rows
+        
+        # Add 1 second delay between requests
+        if page_num > 2:
+            time.sleep(1)
+        
+        log.info("Fetching page %d (offset %d)", page_num, offset)
+        
+        try:
+            ajax_url = f"{WIKI_BASE}/ajax-module-connector.php"
+            ajax_data = {
+                'moduleName': 'changes/SiteChangesModule',  # Try exact module name from page source
+                'page': 'system:recent-changes',
+                'moduleId': module_id.replace('wikidot-module-', ''),  # Remove prefix for Wikidot
+                'offset': str(offset),
+                'wikidot_token': 'recent_changes'  # Add token for authentication
+            }
+            
+            headers = {
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "X-Requested-With": "XMLHttpRequest",
+                "Origin": "http://silveraqworld.wikidot.com",
+                "Referer": "http://silveraqworld.wikidot.com/system:recent-changes",
+                "Connection": "keep-alive"
+            }
+            log.info("AJAX request data: %s", ajax_data)
+            res = requests.post(ajax_url, data=ajax_data, timeout=15, headers=headers)
+            res.raise_for_status()
+            
+            log.info("AJAX response status: %s", res.status_code)
+            response_json = res.json()
+            
+            # Try different possible keys for the HTML content
+            html_body = ""
+            for key in ["body", "content", "data", "html", "result"]:
+                if key in response_json:
+                    html_body = response_json.get(key, "")
+                    break
+            
+            log.info("AJAX response keys: %s", list(response_json.keys()))
+            log.info("Body length: %d chars", len(html_body))
+            if len(html_body) > 0:
+                log.info("Body preview: %s", html_body[:200])
+            
+            if not html_body.strip():
+                log.info("Empty response body at page %d, stopping", page_num)
+                break
+            
+            # Parse the HTML fragment using the same parser
+            soup = BeautifulSoup(html_body, "html.parser")
+            
+            any_in_window = False
+            rows_found = 0
+            for row in soup.select("table tr"):
+                cols = row.find_all("td")
+                if len(cols) < 3:
+                    continue
+
+                rows_found += 1
+                link = cols[0].find("a")
+                if not link:
+                    continue
+
+                href = link.get("href", "")
+                if not href or href.startswith("#"):
+                    continue
+
+                time_text = cols[2].get_text(strip=True)
+                change_time = parse_wiki_time(time_text)
+                if not change_time:
+                    log.debug("Failed to parse time: %s", time_text)
+                    continue
+
+                if change_time < cutoff:
+                    log.debug("Skipping old entry: %s (changed %s)", href, change_time)
+                    continue
+
+                any_in_window = True
+                page_url = _make_absolute(href).rstrip("/")
+                prev = page_times.get(page_url)
+                if prev is None or change_time < prev:
+                    page_times[page_url] = change_time
+                    log.debug("Found recent page: %s (changed %s)", page_url, change_time)
+
+            log.info("Page %d (offset %d): %d rows found, %d in window, %d total pages", page_num, offset, rows_found, any_in_window, len(page_times))
+
+            if not any_in_window:
+                break
+
+        except Exception as e:
+            log.warning("Failed to fetch page %d: %s", page_num, e)
+            break
+
+    log.info("Recent changes extraction complete: %d pages found", len(page_times))
     return page_times
 
 
@@ -553,9 +655,9 @@ def _extract_related_item_links(page_url: str, max_links: int = 25) -> list[str]
 
 def fetch_recent_aegifts_fast(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False, max_pages: int = 5) -> list[dict]:
     """
-    Fast version for slash commands - uses RSS feed for quick access.
+    Fast version for slash commands - checks fewer pages to avoid timeouts.
     """
-    page_times = _extract_recent_changes_entries()  # Fetch RSS feed
+    page_times = _extract_recent_changes_entries(max_pages=max_pages)  # Check fewer pages
     if not page_times:
         log.info("No recent changes found")
         return []
@@ -594,9 +696,9 @@ def fetch_recent_aegifts_fast(limit: int = MAX_POSTS_PER_RUN, newest_first: bool
 
 def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False) -> list[dict]:
     """
-    Fetch aegift pages from RSS feed changes.
+    Fetch aegift pages from the previous 30 pages of recent changes.
     """
-    page_times = _extract_recent_changes_entries()  # Fetch RSS feed
+    page_times = _extract_recent_changes_entries(max_pages=30)  # Check 30 pages
     if not page_times:
         log.info("No recent changes found")
         return []
@@ -715,56 +817,6 @@ async def latestdrops(interaction: discord.Interaction):
         await interaction.followup.send("Something went wrong while fetching recent AE gifts.")
 
 
-@bot.tree.command(name="latestdrops7days", description="Check all AE gift pages from the past 7 days")
-async def latestdrops7days(interaction: discord.Interaction):
-    try:
-        await interaction.response.defer(thinking=True)
-    except discord.NotFound:
-        # Interaction token expired / no longer valid (common right after redeploy)
-        return
-
-    try:
-        # Get all aegift items from the past 7 days
-        posts = await asyncio.wait_for(
-            asyncio.to_thread(fetch_recent_aegifts, limit=50),  # Higher limit for 7 days
-            timeout=30  # Longer timeout for comprehensive search
-        )
-        
-        if not posts:
-            await interaction.followup.send("No AE gifts found in the past 7 days.")
-            return
-
-        # Create summary message
-        if len(posts) == 1:
-            await interaction.followup.send(f"Found 1 AE gift in the past 7 days:", embed=create_embed(posts[0]))
-        else:
-            # Send summary with first item, then list others
-            first_embed = create_embed(posts[0])
-            first_embed.title = f"🎁 Latest AE Gift (1 of {len(posts)} found in past 7 days)"
-            
-            # Create list of other items
-            other_items = []
-            for i, post in enumerate(posts[1:11], 2):  # Show up to 10 more
-                other_items.append(f"{i}. {post['title']}")
-            
-            if len(posts) > 11:
-                other_items.append(f"... and {len(posts) - 11} more")
-            
-            summary = "\n".join(other_items) if other_items else "No other items"
-            
-            await interaction.followup.send(
-                f"Found {len(posts)} AE gifts in the past 7 days:", 
-                embed=first_embed
-            )
-            
-            if other_items:
-                await interaction.followup.send(f"**Other items:**\n{summary}")
-                
-    except asyncio.TimeoutError:
-        await interaction.followup.send("Timed out fetching 7-day drops. Please try again in a few seconds.")
-    except Exception as e:
-        log.exception("latestdrops7days failed: %s", e)
-        await interaction.followup.send("Something went wrong while fetching 7-day AE gifts.")
 
 
 
