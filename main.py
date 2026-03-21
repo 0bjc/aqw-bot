@@ -6,7 +6,7 @@ import os
 import re
 import textwrap
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlparse
 
 import aiosqlite
@@ -386,7 +386,18 @@ def extract_item_details(page_url: str) -> dict | None:
         el.decompose()
 
     raw_text = content_el.get_text(separator="\n", strip=True)
-    cleaned, price = _clean_item_text(raw_text)
+
+    # Prefer the dedicated item info block when available; it is much cleaner
+    # than the full page text and avoids sidebar/navigation noise.
+    info_parts: list[str] = []
+    for sel in (".page-info", ".page-info-bottom"):
+        for block in content_el.select(sel):
+            txt = block.get_text(separator="\n", strip=True)
+            if txt:
+                info_parts.append(txt)
+    info_text = "\n".join(info_parts).strip()
+
+    cleaned, price = _clean_item_text(info_text or raw_text)
 
     # Debug: if the page actually has a Location label but our parser failed,
     # log a small snippet so we can tune the regex to the real wording.
@@ -421,7 +432,7 @@ def _extract_recent_changes_entries(max_pages: int = 6) -> dict[str, datetime]:
     Get mapping: page_url -> earliest change_time within CHECK_DAYS.
     Follows the 'next' pagination in recent-changes to avoid missing older entries.
     """
-    cutoff = datetime.utcnow() - timedelta(days=CHECK_DAYS)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=CHECK_DAYS)
     page_times: dict[str, datetime] = {}
 
     url: str | None = RECENT_URL_HTTP
@@ -603,12 +614,19 @@ async def latestdrops(interaction: discord.Interaction):
 
     try:
         # Only fetch the newest single item to keep response time low.
-        posts = await asyncio.to_thread(fetch_recent_aegifts, 1, True)
+        posts = await asyncio.wait_for(
+            asyncio.to_thread(fetch_recent_aegifts, 1, True),
+            timeout=25,
+        )
         if not posts:
             await interaction.followup.send("No recent AE gifts found in the last 7 days.")
             return
 
         await interaction.followup.send(embed=create_embed(posts[0]))
+    except asyncio.TimeoutError:
+        await interaction.followup.send(
+            "Timed out fetching latest drops. Please try again in a few seconds."
+        )
     except Exception as e:
         log.exception("latestdrops failed: %s", e)
         await interaction.followup.send("Something went wrong while fetching recent AE gifts.")
