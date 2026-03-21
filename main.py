@@ -8,6 +8,8 @@ import textwrap
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlparse, parse_qs
+from PIL import Image
+import io
 
 import aiosqlite
 import requests
@@ -42,20 +44,74 @@ log = logging.getLogger(__name__)
 
 # ---------------- DATABASE ----------------
 async def init_db():
+    """Initialize the SQLite database for tracking posted items with grouping."""
     async with aiosqlite.connect(DB) as db:
-        await db.execute("CREATE TABLE IF NOT EXISTS posted (id TEXT PRIMARY KEY)")
+        # Create items table for individual items
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS items (
+                id TEXT PRIMARY KEY,
+                url TEXT UNIQUE,
+                title TEXT,
+                content TEXT,
+                price TEXT,
+                rarity TEXT,
+                image TEXT,
+                group_key TEXT,
+                created_at TIMESTAMP
+            )
+        """)
+        
+        # Create groups table for message tracking
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS groups (
+                group_key TEXT PRIMARY KEY,
+                message_id TEXT,
+                channel_id TEXT,
+                last_updated TIMESTAMP
+            )
+        """)
+        
         await db.commit()
 
 
+def make_group_key(item: dict) -> str:
+    """Generate group key from item fields for grouping."""
+    # Get normalized fields
+    loc = (item.get("content", "") or "").lower()
+    price = (item.get("price", "") or "").lower()
+    rarity = (item.get("rarity", "") or "").lower()
+    
+    # Extract locations and normalize
+    loc_match = re.search(r"locations?\s*:?\s*(.+)", loc, re.IGNORECASE)
+    if loc_match:
+        locations = loc_match.group(1).strip()
+    else:
+        locations = ""
+    
+    # Build group key from normalized fields
+    key_parts = []
+    if locations and locations != "n/a":
+        key_parts.append(f"loc:{locations}")
+    if price and price != "n/a":
+        key_parts.append(f"price:{price}")
+    if rarity and rarity != "n/a":
+        key_parts.append(f"rarity:{rarity}")
+    
+    return "|".join(sorted(key_parts))
+
 async def is_posted(pid: str) -> bool:
+    """Check if item is already posted."""
     async with aiosqlite.connect(DB) as db:
-        async with db.execute("SELECT 1 FROM posted WHERE id=?", (pid,)) as cur:
+        async with db.execute("SELECT 1 FROM items WHERE id=?", (pid,)) as cur:
             return await cur.fetchone() is not None
 
-
-async def mark_posted(pid: str):
+async def mark_posted(pid: str, item: dict):
+    """Mark an item as posted to avoid duplicates."""
     async with aiosqlite.connect(DB) as db:
-        await db.execute("INSERT OR IGNORE INTO posted VALUES (?)", (pid,))
+        await db.execute("INSERT OR IGNORE INTO items (id, url, title, content, price, rarity, image, group_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))", 
+                          (pid, item.get("url"), item.get("title"), item.get("content"), 
+                           item.get("price"), item.get("rarity"), item.get("image"), 
+                           make_group_key(item)))
         await db.commit()
 
 
@@ -137,21 +193,72 @@ def page_has_aegift(soup: BeautifulSoup) -> bool:
     return False
 
 
-def _wrap_lines(text: str, width: int = WRAP_WIDTH) -> str:
-    out: list[str] = []
-    for line in text.splitlines():
-        line = line.rstrip()
-        if not line.strip():
-            out.append("")
+def _wrap_lines(text: str) -> str:
+    """Wrap lines to Discord's 4096 character limit with word boundaries."""
+    if not text:
+        return ""
+    wrapped = textwrap.fill(text, width=WRAP_WIDTH, replace_whitespace=False, break_long_words=False)
+    return wrapped
+
+
+def generate_collage(image_urls: list[str]) -> bytes:
+    """Generate a collage from multiple item images."""
+    if not image_urls:
+        return None
+    
+    # Download images temporarily
+    images = []
+    for url in image_urls:
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                img_data = io.BytesIO(response.content)
+                img = Image.open(img_data)
+                images.append(img)
+        except Exception as e:
+            log.warning(f"Failed to download image {url}: {e}")
             continue
-        wrapped = textwrap.wrap(
-            line,
-            width=width,
-            replace_whitespace=False,
-            break_long_words=False,
-        )
-        out.extend(wrapped if wrapped else [line])
-    return "\n".join(out).strip()
+    
+    if not images:
+        return None
+    
+    # Determine layout based on number of images
+    n = len(images)
+    if n == 1:
+        # Single image - use original
+        return io.BytesIO(response.content)
+    elif n == 2:
+        # Two images - side by side
+        width, height = max(img.width for img in images), max(img.height for img in images)
+        collage = Image.new('RGBA', (width * 2, height), (255, 255, 255, 0))
+        collage.paste(images[0], (0, 0))
+        collage.paste(images[1], (width, 0))
+    elif n <= 4:
+        # 3-4 images - 2x2 grid
+        width, height = max(img.width for img in images), max(img.height for img in images)
+        collage = Image.new('RGBA', (width * 2, height * 2), (255, 255, 255, 0))
+        for i, img in enumerate(images):
+            x = (i % 2) * width
+            y = (i // 2) * height
+            collage.paste(img, (x, y))
+    else:
+        # 5-9 images - square grid
+        size = int((300 * 300) ** 0.5)  # Approximate square layout
+        grid_size = int(size ** 0.5)
+        collage = Image.new('RGBA', (grid_size, grid_size), (255, 255, 255, 0))
+        img_size = size // len(images)
+        for i, img in enumerate(images):
+            x = (i % grid_size) * img_size
+            y = (i // grid_size) * img_size
+            # Resize images to uniform size
+            resized_img = img.resize((img_size, img_size), Image.Resampling.LANCZOS)
+            collage.paste(resized_img, (x, y))
+    
+    # Convert to bytes
+    img_bytes = io.BytesIO()
+    collage.save(img_bytes, format='PNG')
+    img_bytes.seek(0)
+    return img_bytes.getvalue()
 
 
 def _extract_imgur_image(content_el: BeautifulSoup) -> str | None:
@@ -698,16 +805,140 @@ async def check_posts():
         return
 
     posts = await asyncio.to_thread(fetch_recent_aegifts, limit=10)  # Check more pages for background
+    if not posts:
+        return
+    
+    # Group items by their origin fields
+    groups = {}
     for post in posts:
-        if await is_posted(post["id"]):
+        group_key = make_group_key(post)
+        if group_key not in groups:
+            groups[group_key] = []
+        groups[group_key].append(post)
+    
+    # Process each group
+    for group_key, group_posts in groups.items():
+        if not group_posts:
             continue
-        try:
-            await channel.send(embed=create_embed(post))
-            await mark_posted(post["id"])
-            log.info("Posted %s", post["title"])
-        except discord.DiscordException as e:
-            log.error("Failed to post %s: %s", post["id"], e)
+            
+        # Check if this group was already posted
+        existing_message = None
+        async with aiosqlite.connect(DB) as db:
+            async with db.execute("""
+                SELECT message_id, channel_id FROM groups 
+                WHERE group_key = ? 
+                ORDER BY last_updated DESC 
+                LIMIT 1
+            """, (group_key,)) as cur:
+                result = await cur.fetchone()
+                if result:
+                    existing_message = await channel.fetch_message(result[0])
+        
+        if existing_message:
+            # Update existing message
+            await update_group_message(channel, existing_message, group_posts)
+        else:
+            # Create new message
+            await create_new_group_message(channel, group_key, group_posts)
 
+
+# ---------------- MESSAGE HELPERS ----------------
+async def update_group_message(channel: discord.TextChannel, message: discord.Message, posts: list[dict]):
+    """Update an existing group message with new items."""
+    if not posts:
+        return
+    
+    # Generate collage if multiple items
+    collage_bytes = None
+    if len(posts) > 1:
+        image_urls = [post.get("image") for post in posts if post.get("image")]
+        collage_bytes = await asyncio.to_thread(generate_collage, image_urls)
+    
+    # Build updated embed
+    titles = [post["title"] for post in posts]
+    title = f"{titles[0]} ({len(titles)} Variants Found)" if len(titles) > 1 else titles[0]
+    
+    content_parts = []
+    for i, post in enumerate(posts):
+        content_parts = post.get("content", "").split("\n\n")
+        content_parts = [f"**{i+1}.** {part}" for part in content_parts]
+        content_parts.append(f"**Location:**\n{post.get('content', '').split('\\n\\n')[0]}")
+        content_parts.append(f"**Price:**\n{post.get('price', 'N/A')}")
+        content_parts.append(f"**Rarity:**\n{post.get('rarity', 'N/A')}")
+        if post.get('note'):
+            content_parts.append(f"**Note:**\n{post.get('note')}")
+    
+    updated_content = "\n\n".join(content_parts)
+    
+    embed = discord.Embed(
+        title=title,
+        description=updated_content,
+        color=0xFF4500,
+        url=posts[0]["url"]
+    )
+    
+    # Add collage as attachment if generated
+    files = []
+    if collage_bytes:
+        files.append(discord.File(io.BytesIO(collage_bytes), "collage.png"))
+    
+    await message.edit(embed=embed, attachments=files)
+    
+    # Update database
+    group_key = make_group_key(posts[0])
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("""
+            UPDATE groups SET last_updated = datetime('now') 
+            WHERE group_key = ?
+        """, (group_key,))
+        await db.commit()
+
+async def create_new_group_message(channel: discord.TextChannel, group_key: str, posts: list[dict]):
+    """Create a new group message with collage."""
+    if not posts:
+        return
+    
+    # Generate collage
+    image_urls = [post.get("image") for post in posts if post.get("image")]
+    collage_bytes = await asyncio.to_thread(generate_collage, image_urls)
+    
+    # Build embed
+    titles = [post["title"] for post in posts]
+    title = f"{titles[0]} ({len(titles)} Variants Found)" if len(titles) > 1 else titles[0]
+    
+    content_parts = []
+    for i, post in enumerate(posts):
+        content_parts = post.get("content", "").split("\n\n")
+        content_parts = [f"**{i+1}.** {part}" for part in content_parts]
+        content_parts.append(f"**Location:**\n{post.get('content', '').split('\\n\\n')[0]}")
+        content_parts.append(f"**Price:**\n{post.get('price', 'N/A')}")
+        content_parts.append(f"**Rarity:**\n{post.get('rarity', 'N/A')}")
+        if post.get('note'):
+            content_parts.append(f"**Note:**\n{post.get('note')}")
+    
+    updated_content = "\n\n".join(content_parts)
+    
+    embed = discord.Embed(
+        title=title,
+        description=updated_content,
+        color=0xFF4500,
+        url=posts[0]["url"]
+    )
+    
+    # Add collage as attachment
+    files = []
+    if collage_bytes:
+        files.append(discord.File(io.BytesIO(collage_bytes), "collage.png"))
+    
+    message = await channel.send(embed=embed, attachments=files)
+    
+    # Save to database
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("""
+            INSERT INTO groups (group_key, message_id, channel_id, last_updated) 
+            VALUES (?, ?, ?, datetime('now'))
+        """, (group_key, message.id, channel.id))
+        await db.commit()
 
 # ---------------- COMMAND ----------------
 @bot.tree.command(name="latestdrops", description="Check latest AE gift pages")
