@@ -683,7 +683,7 @@ def create_embed(post: dict) -> discord.Embed:
     )
     if post.get("image"):
         embed.set_image(url=post["image"])
-    embed.set_footer(text="AQW AE Gift Tracker")
+    embed.set_footer(text="AQW Daily Gift")
     return embed
 
 
