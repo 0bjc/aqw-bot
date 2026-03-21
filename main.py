@@ -714,6 +714,58 @@ async def latestdrops(interaction: discord.Interaction):
         log.exception("latestdrops failed: %s", e)
         await interaction.followup.send("Something went wrong while fetching recent AE gifts.")
 
+
+@bot.tree.command(name="latestdrops7days", description="Check all AE gift pages from the past 7 days")
+async def latestdrops7days(interaction: discord.Interaction):
+    try:
+        await interaction.response.defer(thinking=True)
+    except discord.NotFound:
+        # Interaction token expired / no longer valid (common right after redeploy)
+        return
+
+    try:
+        # Get all aegift items from the past 7 days
+        posts = await asyncio.wait_for(
+            asyncio.to_thread(fetch_recent_aegifts, limit=50),  # Higher limit for 7 days
+            timeout=30  # Longer timeout for comprehensive search
+        )
+        
+        if not posts:
+            await interaction.followup.send("No AE gifts found in the past 7 days.")
+            return
+
+        # Create summary message
+        if len(posts) == 1:
+            await interaction.followup.send(f"Found 1 AE gift in the past 7 days:", embed=create_embed(posts[0]))
+        else:
+            # Send summary with first item, then list others
+            first_embed = create_embed(posts[0])
+            first_embed.title = f"🎁 Latest AE Gift (1 of {len(posts)} found in past 7 days)"
+            
+            # Create list of other items
+            other_items = []
+            for i, post in enumerate(posts[1:11], 2):  # Show up to 10 more
+                other_items.append(f"{i}. {post['title']}")
+            
+            if len(posts) > 11:
+                other_items.append(f"... and {len(posts) - 11} more")
+            
+            summary = "\n".join(other_items) if other_items else "No other items"
+            
+            await interaction.followup.send(
+                f"Found {len(posts)} AE gifts in the past 7 days:", 
+                embed=first_embed
+            )
+            
+            if other_items:
+                await interaction.followup.send(f"**Other items:**\n{summary}")
+                
+    except asyncio.TimeoutError:
+        await interaction.followup.send("Timed out fetching 7-day drops. Please try again in a few seconds.")
+    except Exception as e:
+        log.exception("latestdrops7days failed: %s", e)
+        await interaction.followup.send("Something went wrong while fetching 7-day AE gifts.")
+
 # ... (rest of the code remains the same)
 async def checkpage(interaction: discord.Interaction, page_name: str):
     try:
