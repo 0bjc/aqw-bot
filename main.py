@@ -456,22 +456,42 @@ def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
 
         # Extract moduleId from the page
         module_id = None
-        for div in soup.select("div[id^='wikidot-module-']"):
+        
+        # First try: Look for div with id starting with "wikidot-module-"
+        for div in soup.select("div[id*='wikidot-module']"):
             module_id = div.get("id")
-            if module_id and module_id.startswith("wikidot-module-"):
+            if module_id and "wikidot-module" in module_id:
                 log.info("Found moduleId: %s", module_id)
                 break
         
+        # Second try: Look for any element with data-module-id or similar attributes
         if not module_id:
-            # Try to find in script tags
+            for element in soup.select("[data-module-id], [id*='module']"):
+                module_id = element.get("data-module-id") or element.get("id")
+                if module_id:
+                    log.info("Found moduleId via attribute: %s", module_id)
+                    break
+        
+        # Third try: Parse from JavaScript
+        if not module_id:
             for script in soup.select("script"):
                 script_text = script.get_text()
-                if "wikidot-module-" in script_text:
-                    match = re.search(r'wikidot-module-(\w+)', script_text)
+                # Look for various patterns
+                patterns = [
+                    r'wikidot-module-(\w+)',
+                    r'moduleId["\']?\s*[:=]\s*["\']?(\w+)',
+                    r'module["\']?\s*[:=]\s*["\']?(\w+)'
+                ]
+                for pattern in patterns:
+                    match = re.search(pattern, script_text)
                     if match:
-                        module_id = f"wikidot-module-{match.group(1)}"
+                        module_id = match.group(1) if not match.group(1).startswith("wikidot-module") else match.group(1)
+                        if not module_id.startswith("wikidot-module"):
+                            module_id = f"wikidot-module-{module_id}"
                         log.info("Found moduleId in script: %s", module_id)
                         break
+                if module_id:
+                    break
         
         if not module_id:
             log.warning("No moduleId found, AJAX requests may fail")
