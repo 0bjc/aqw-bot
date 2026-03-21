@@ -526,12 +526,11 @@ def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
         try:
             ajax_url = f"{WIKI_BASE}/ajax-module-connector.php"
             ajax_data = {
+                'moduleName': 'changes/SiteChangesModule',  # Try exact module name from page source
                 'page': 'system:recent-changes',
-                'module_id': module_id.replace('wikidot-module-', ''),  # Remove prefix for Wikidot
+                'moduleId': module_id.replace('wikidot-module-', ''),  # Remove prefix for Wikidot
                 'offset': str(offset),
-                'wikidot_token': 'recent_changes',  # Add token for authentication
-                'action': 'changes/list',  # Try specific action
-                'page_id': module_id.replace('wikidot-module-', '')  # Page-specific module ID
+                'wikidot_token': 'recent_changes'  # Add token for authentication
             }
             
             headers = {
