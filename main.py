@@ -447,11 +447,31 @@ def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
     log.info("Starting recent changes extraction, cutoff: %s", cutoff)
 
     # Fetch first page normally
+    module_id = None
     try:
         res = requests.get(RECENT_URL_HTTP, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
         res.raise_for_status()
         soup = BeautifulSoup(res.text, "html.parser")
         log.info("Fetching page: %s", RECENT_URL_HTTP)
+
+        # Extract moduleId from the page
+        for div in soup.select("div[id^='wikidot-module-']"):
+            module_id = div.get("id")
+            if module_id and module_id.startswith("wikidot-module-"):
+                log.debug("Found moduleId: %s", module_id)
+                break
+        
+        if not module_id:
+            # Try to find in script tags
+            for script in soup.select("script"):
+                script_text = script.get_text()
+                if "wikidot-module-" in script_text:
+                    import re
+                    match = re.search(r'wikidot-module-(\w+)', script_text)
+                    if match:
+                        module_id = f"wikidot-module-{match.group(1)}"
+                        log.debug("Found moduleId in script: %s", module_id)
+                        break
 
         any_in_window = False
         rows_found = 0
@@ -505,9 +525,9 @@ def _extract_recent_changes_entries(max_pages: int = 30) -> dict[str, datetime]:
         try:
             ajax_url = f"{WIKI_BASE}/ajax-module-connector.php"
             ajax_data = {
-                'page': 'system:recent-changes',
-                'offset': str(offset),
-                'module': 'recent_changes'
+                'moduleName': 'changes/ChangesModule',
+                'moduleId': module_id,
+                'offset': str(offset)
             }
             
             headers = {
