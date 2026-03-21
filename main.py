@@ -212,21 +212,21 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
-    # Remove unwanted sections entirely
+    # Remove unwanted sections entirely (be more specific to avoid removing Notes)
     text = re.sub(
-        r"Sell\s*back\s*:\s*.+?(?=(?:Rarity:\s*)|(?:Description:\s*)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*)|$)",
+        r"Sell\s*back\s*:\s*.+?(?=(?:Rarity:\s*)|(?:Description:\s*)|(?:Notes?\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*)|$)",
         "",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
     text = re.sub(
-        r"Description\s*:?\s*.+?(?=(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*)|$)",
+        r"Description\s*:?\s*.+?(?=(?:Notes?\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*)|$)",
         "",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
     text = re.sub(
-        r"Base\s*Damage\s*:?\s*.+?(?=(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*)|$)",
+        r"Base\s*Damage\s*:?\s*.+?(?=(?:Notes?\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*)|$)",
         "",
         text,
         flags=re.IGNORECASE | re.DOTALL,
