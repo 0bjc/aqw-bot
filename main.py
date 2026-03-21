@@ -12,6 +12,7 @@ from urllib.parse import urljoin, urlparse, parse_qs
 import aiosqlite
 import requests
 from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
 
 import discord
 from discord.ext import commands, tasks
@@ -22,6 +23,7 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1484113318095622315"))
 
 WIKI_BASE = "https://silveraqworld.wikidot.com"
 RECENT_URL_HTTP = "http://silveraqworld.wikidot.com/system:recent-changes"
+RSS_URL = "http://silveraqworld.wikidot.com/feed/site-changes.xml"
 DB = "drops.db"
 
 CHECK_DAYS = 7
@@ -439,59 +441,75 @@ def extract_item_details(page_url: str) -> dict | None:
 def _extract_recent_changes_entries() -> dict[str, datetime]:
     """
     Get mapping: page_url -> earliest change_time within CHECK_DAYS.
-    Simply fetches the recent changes page in real-time.
+    Uses RSS feed for complete real-time tracking.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=CHECK_DAYS)
     page_times: dict[str, datetime] = {}
 
-    log.info("Starting recent changes extraction, cutoff: %s", cutoff)
+    log.info("Starting RSS feed extraction, cutoff: %s", cutoff)
 
     try:
-        res = requests.get(RECENT_URL_HTTP, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
+        res = requests.get(RSS_URL, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
         res.raise_for_status()
-        soup = BeautifulSoup(res.text, "html.parser")
-        log.info("Fetching page: %s", RECENT_URL_HTTP)
+        
+        # Parse XML RSS feed
+        root = ET.fromstring(res.text)
+        log.info("Fetching RSS feed: %s", RSS_URL)
+
+        # Find all items in the RSS feed
+        items = root.findall(".//item")
+        log.info("Found %d total entries in RSS feed", len(items))
 
         any_in_window = False
-        rows_found = 0
-        for row in soup.select("table tr"):
-            cols = row.find_all("td")
-            if len(cols) < 3:
+        for item in items:
+            # Extract page URL
+            link_elem = item.find("link")
+            if link_elem is None or not link_elem.text:
+                continue
+            
+            page_url = link_elem.text.strip()
+            if not page_url:
                 continue
 
-            rows_found += 1
-            link = cols[0].find("a")
-            if not link:
+            # Extract publication date
+            pub_date_elem = item.find("pubDate")
+            if pub_date_elem is None or not pub_date_elem.text:
+                continue
+            
+            # Parse RSS date format (RFC 2822)
+            try:
+                # RSS format: "Thu, 24 Dec 2020 08:27:34 +0000"
+                change_time = datetime.strptime(pub_date_elem.text.strip(), "%a, %d %b %Y %H:%M:%S %z")
+            except ValueError as e:
+                log.debug("Failed to parse RSS date %s: %s", pub_date_elem.text, e)
                 continue
 
-            href = link.get("href", "")
-            if not href or href.startswith("#"):
-                continue
-
-            time_text = cols[2].get_text(strip=True)
-            change_time = parse_wiki_time(time_text)
-            if not change_time:
-                log.debug("Failed to parse time: %s", time_text)
-                continue
-
+            # Skip if older than cutoff
             if change_time < cutoff:
-                log.debug("Skipping old entry: %s (changed %s)", href, change_time)
+                log.debug("Skipping old entry: %s (changed %s)", page_url, change_time)
                 continue
 
             any_in_window = True
-            page_url = _make_absolute(href).rstrip("/")
+            page_url = page_url.rstrip("/")
             prev = page_times.get(page_url)
             if prev is None or change_time < prev:
                 page_times[page_url] = change_time
                 log.debug("Found recent page: %s (changed %s)", page_url, change_time)
 
-        log.info("Page 1 (offset 0): %d rows found, %d in window, %d total pages", rows_found, any_in_window, len(page_times))
+        log.info("RSS extraction: %d entries found, %d in window, %d total pages", 
+                len(items), any_in_window, len(page_times))
 
+    except requests.RequestException as e:
+        log.warning("Failed to fetch RSS feed: %s", e)
+        return page_times
+    except ET.ParseError as e:
+        log.warning("Failed to parse RSS XML: %s", e)
+        return page_times
     except Exception as e:
-        log.warning("Failed to fetch recent changes: %s", e)
+        log.warning("Error processing RSS feed: %s", e)
         return page_times
 
-    log.info("Recent changes extraction complete: %d pages found", len(page_times))
+    log.info("RSS feed extraction complete: %d pages found", len(page_times))
     return page_times
 
 
@@ -535,9 +553,9 @@ def _extract_related_item_links(page_url: str, max_links: int = 25) -> list[str]
 
 def fetch_recent_aegifts_fast(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False, max_pages: int = 5) -> list[dict]:
     """
-    Fast version for slash commands - checks fewer pages to avoid timeouts.
+    Fast version for slash commands - uses RSS feed for quick access.
     """
-    page_times = _extract_recent_changes_entries()  # Fetch recent changes
+    page_times = _extract_recent_changes_entries()  # Fetch RSS feed
     if not page_times:
         log.info("No recent changes found")
         return []
@@ -576,9 +594,9 @@ def fetch_recent_aegifts_fast(limit: int = MAX_POSTS_PER_RUN, newest_first: bool
 
 def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False) -> list[dict]:
     """
-    Fetch aegift pages from the previous 30 pages of recent changes.
+    Fetch aegift pages from RSS feed changes.
     """
-    page_times = _extract_recent_changes_entries()  # Fetch recent changes
+    page_times = _extract_recent_changes_entries()  # Fetch RSS feed
     if not page_times:
         log.info("No recent changes found")
         return []
