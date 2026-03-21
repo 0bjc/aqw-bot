@@ -74,30 +74,48 @@ async def init_db():
         await db.commit()
 
 
-def make_group_key(item: dict) -> str:
-    """Generate group key from item fields for grouping."""
-    # Get normalized fields
-    loc = (item.get("content", "") or "").lower()
-    price = (item.get("price", "") or "").lower()
-    rarity = (item.get("rarity", "") or "").lower()
+def normalize_location(location_text: str) -> str:
+    """Normalize location text for grouping."""
+    # Remove markdown/wiki links formatting
+    text = re.sub(r'\[\[.*?\|', '', location_text)  # Remove [[[page|display
+    text = re.sub(r'\]\]', '', text)  # Remove ]]]
+    text = re.sub(r'\[.*?\]', '', text)  # Remove [link]
+    text = re.sub(r'\*\*', '', text)  # Remove **bold**
+    text = re.sub(r'\*', '', text)  # Remove *italic*
+    text = re.sub(r'`', '', text)  # Remove `code`
     
-    # Extract locations and normalize
-    loc_match = re.search(r"locations?\s*:?\s*(.+)", loc, re.IGNORECASE)
+    # Normalize whitespace
+    text = re.sub(r'\s+', ' ', text)  # Collapse whitespace
+    text = text.strip().lower()
+    
+    return text
+
+def make_group_key(item: dict) -> str:
+    """Generate group key from item Locations or Dropped by field."""
+    content = (item.get("content", "") or "")
+    
+    # Extract Locations field first
+    loc_match = re.search(r"locations?\s*:?\s*(.+?)(?=\n\n|\n\*\*|$)", content, re.IGNORECASE | re.DOTALL)
     if loc_match:
         locations = loc_match.group(1).strip()
-    else:
-        locations = ""
+        normalized = normalize_location(locations)
+        return f"loc:{normalized}" if normalized else "loc:unknown"
     
-    # Build group key from normalized fields
-    key_parts = []
-    if locations and locations != "n/a":
-        key_parts.append(f"loc:{locations}")
-    if price and price != "n/a":
-        key_parts.append(f"price:{price}")
-    if rarity and rarity != "n/a":
-        key_parts.append(f"rarity:{rarity}")
+    # If no Locations, try Dropped by field
+    drop_match = re.search(r"dropped by\s*:?\s*(.+?)(?=\n\n|\n\*\*|$)", content, re.IGNORECASE | re.DOTALL)
+    if drop_match:
+        dropped_by = drop_match.group(1).strip()
+        normalized = normalize_location(dropped_by)
+        return f"drop:{normalized}" if normalized else "drop:unknown"
     
-    return "|".join(sorted(key_parts))
+    # If neither found, try Price field (for items with Price but no Location/Dropped by)
+    price_match = re.search(r"price\s*:?\s*(.+?)(?=\n\n|\n\*\*|$)", content, re.IGNORECASE | re.DOTALL)
+    if price_match:
+        price = price_match.group(1).strip()
+        normalized = normalize_location(price)
+        return f"price:{normalized}" if normalized else "price:unknown"
+    
+    return "unknown"
 
 async def is_posted(pid: str) -> bool:
     """Check if item is already posted."""
@@ -261,19 +279,38 @@ def generate_collage(image_urls: list[str]) -> bytes:
     return img_bytes.getvalue()
 
 
-def _extract_imgur_image(content_el: BeautifulSoup) -> str | None:
-    # Prefer actual item image (usually i.imgur.com / imgur.com) but skip thumbnails/icons.
+def _extract_all_images(content_el: BeautifulSoup) -> list[str]:
+    """Extract ALL item images from Wikidot tabview sections."""
+    images = []
+    
+    # Find all images in the content
     for img in content_el.select("img[src]"):
         src = img.get("src")
         if not src:
             continue
+        
         s = src.lower()
+        # Skip thumbnails/icons/spacers
         if any(x in s for x in ("pixel", "spacer", "icon", "thumb")):
             continue
-        full = _make_absolute(src, None)
-        if "imgur.com" in full.lower():
-            return full
-    return None
+            
+        # Include all valid images (imgur and others)
+        if any(x in s for x in ("imgur.com", "i.imgur.com", ".png", ".jpg", ".jpeg", ".gif")):
+            # Convert relative URLs to absolute
+            if not src.startswith(("http://", "https://")):
+                src = urljoin(WIKI_BASE, src)
+            images.append(src)
+    
+    return images
+
+def _extract_imgur_image(content_el: BeautifulSoup) -> str | None:
+    """Legacy function - returns first imgur image for backward compatibility."""
+    images = _extract_all_images(content_el)
+    # Return first imgur image for compatibility
+    for img in images:
+        if "imgur.com" in img.lower():
+            return img
+    return images[0] if images else None
 
 
 def _extract_title_icons(soup: BeautifulSoup) -> str | None:
@@ -570,7 +607,9 @@ def extract_item_details(page_url: str) -> dict | None:
         # Never break scraping due to debug-only logging.
         pass
 
-    img_url = _extract_imgur_image(content_el)
+    # Extract ALL images for collage generation
+    img_urls = _extract_all_images(content_el)
+    img_url = _extract_imgur_image(content_el)  # Keep for backward compatibility
 
     if len(cleaned) > MAX_DESC_LENGTH:
         cleaned = cleaned[: MAX_DESC_LENGTH - 3] + "..."
@@ -580,6 +619,7 @@ def extract_item_details(page_url: str) -> dict | None:
         "content": cleaned or "No item info available.",
         "price": price,
         "image": img_url,
+        "images": img_urls,  # All images for collage
         "url": page_url,
         "title_icons": title_icons,
     }
@@ -851,8 +891,18 @@ async def update_group_message(channel: discord.TextChannel, message: discord.Me
     # Generate collage if multiple items
     collage_bytes = None
     if len(posts) > 1:
-        image_urls = [post.get("image") for post in posts if post.get("image")]
-        collage_bytes = await asyncio.to_thread(generate_collage, image_urls)
+        # Collect ALL images from all posts
+        all_images = []
+        for post in posts:
+            images = post.get("images", [])
+            if images:
+                all_images.extend(images)
+            elif post.get("image"):  # Fallback to single image
+                all_images.append(post["image"])
+        
+        # Remove duplicates
+        unique_images = list(set(all_images))
+        collage_bytes = await asyncio.to_thread(generate_collage, unique_images)
     
     # Build updated embed
     titles = [post["title"] for post in posts]
@@ -899,8 +949,18 @@ async def create_new_group_message(channel: discord.TextChannel, group_key: str,
         return
     
     # Generate collage
-    image_urls = [post.get("image") for post in posts if post.get("image")]
-    collage_bytes = await asyncio.to_thread(generate_collage, image_urls)
+    # Collect ALL images from all posts
+    all_images = []
+    for post in posts:
+        images = post.get("images", [])
+        if images:
+            all_images.extend(images)
+        elif post.get("image"):  # Fallback to single image
+            all_images.append(post["image"])
+    
+    # Remove duplicates
+    unique_images = list(set(all_images))
+    collage_bytes = await asyncio.to_thread(generate_collage, unique_images)
     
     # Build embed
     titles = [post["title"] for post in posts]
