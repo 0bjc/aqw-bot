@@ -14,6 +14,8 @@ import io
 import aiosqlite
 import requests
 from bs4 import BeautifulSoup
+import json
+import hashlib
 
 import discord
 from discord.ext import commands, tasks
@@ -46,7 +48,7 @@ log = logging.getLogger(__name__)
 async def init_db():
     """Initialize the SQLite database for tracking posted items with grouping."""
     async with aiosqlite.connect(DB) as db:
-        # Create items table for individual items
+        # Create items table for individual items with change detection
         await db.execute("""
             CREATE TABLE IF NOT EXISTS items (
                 id TEXT PRIMARY KEY,
@@ -56,8 +58,11 @@ async def init_db():
                 price TEXT,
                 rarity TEXT,
                 image TEXT,
+                images TEXT,  -- JSON array of all images
                 group_key TEXT,
-                created_at TIMESTAMP
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP,
+                content_hash TEXT  -- For change detection
             )
         """)
         
@@ -117,19 +122,85 @@ def make_group_key(item: dict) -> str:
     
     return "unknown"
 
+def generate_content_hash(item: dict) -> str:
+    """Generate hash for change detection."""
+    content_data = {
+        "title": item.get("title", ""),
+        "content": item.get("content", ""),
+        "price": item.get("price", ""),
+        "rarity": item.get("rarity", ""),
+        "images": sorted(item.get("images", []))  # Sort for consistent hashing
+    }
+    content_str = json.dumps(content_data, sort_keys=True)
+    return hashlib.md5(content_str.encode()).hexdigest()
+
 async def is_posted(pid: str) -> bool:
     """Check if item is already posted."""
     async with aiosqlite.connect(DB) as db:
         async with db.execute("SELECT 1 FROM items WHERE id=?", (pid,)) as cur:
             return await cur.fetchone() is not None
 
+async def get_stored_item(pid: str) -> dict | None:
+    """Get stored item data for comparison."""
+    async with aiosqlite.connect(DB) as db:
+        async with db.execute("""
+            SELECT id, url, title, content, price, rarity, image, images, group_key, content_hash 
+            FROM items WHERE id=?
+        """, (pid,)) as cur:
+            row = await cur.fetchone()
+            if row:
+                return {
+                    "id": row[0],
+                    "url": row[1], 
+                    "title": row[2],
+                    "content": row[3],
+                    "price": row[4],
+                    "rarity": row[5],
+                    "image": row[6],
+                    "images": json.loads(row[7]) if row[7] else [],
+                    "group_key": row[8],
+                    "content_hash": row[9]
+                }
+            return None
+
+async def has_item_changed(pid: str, new_item: dict) -> bool:
+    """Check if item has changed since last posting."""
+    stored = await get_stored_item(pid)
+    if not stored:
+        return True  # New item
+    
+    new_hash = generate_content_hash(new_item)
+    return stored["content_hash"] != new_hash
+
+async def update_stored_item(pid: str, item: dict):
+    """Update stored item data with changes."""
+    content_hash = generate_content_hash(item)
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("""
+            UPDATE items SET 
+                title=?, content=?, price=?, rarity=?, image=?, images=?, 
+                updated_at=datetime('now'), content_hash=?
+            WHERE id=?
+        """, (
+            item.get("title"), item.get("content"), item.get("price"), 
+            item.get("rarity"), item.get("image"), json.dumps(item.get("images", [])),
+            content_hash, pid
+        ))
+        await db.commit()
+
 async def mark_posted(pid: str, item: dict):
     """Mark an item as posted to avoid duplicates."""
+    content_hash = generate_content_hash(item)
     async with aiosqlite.connect(DB) as db:
-        await db.execute("INSERT OR IGNORE INTO items (id, url, title, content, price, rarity, image, group_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))", 
-                          (pid, item.get("url"), item.get("title"), item.get("content"), 
-                           item.get("price"), item.get("rarity"), item.get("image"), 
-                           make_group_key(item)))
+        await db.execute("""
+            INSERT OR REPLACE INTO items 
+            (id, url, title, content, price, rarity, image, images, group_key, created_at, updated_at, content_hash) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), ?)
+        """, (
+            pid, item.get("url"), item.get("title"), item.get("content"), 
+            item.get("price"), item.get("rarity"), item.get("image"), 
+            json.dumps(item.get("images", [])), make_group_key(item), content_hash
+        ))
         await db.commit()
 
 
@@ -860,7 +931,51 @@ async def check_posts():
     for group_key, group_posts in groups.items():
         if not group_posts:
             continue
+        
+        # Check for changes in existing items and new items
+        changed_items = []
+        new_items = []
+        
+        for post in group_posts:
+            pid = urlparse(post["url"]).path.strip("/").replace("/", "-") or post["url"]
             
+            if await has_item_changed(pid, post):
+                if await is_posted(pid):
+                    # Existing item changed
+                    changed_items.append(post)
+                    await update_stored_item(pid, post)
+                    log.info("Item changed: %s", post["title"])
+                else:
+                    # New item
+                    new_items.append(post)
+                    await mark_posted(pid, post)
+                    log.info("New item: %s", post["title"])
+        
+        # Only process if there are changes or new items
+        if not changed_items and not new_items:
+            continue
+            
+        # Get all items for this group (existing + new)
+        all_group_items = []
+        async with aiosqlite.connect(DB) as db:
+            async with db.execute("""
+                SELECT id, url, title, content, price, rarity, image, images, group_key 
+                FROM items WHERE group_key = ?
+            """, (group_key,)) as cur:
+                rows = await cur.fetchall()
+                for row in rows:
+                    all_group_items.append({
+                        "id": row[0],
+                        "url": row[1],
+                        "title": row[2],
+                        "content": row[3],
+                        "price": row[4],
+                        "rarity": row[5],
+                        "image": row[6],
+                        "images": json.loads(row[7]) if row[7] else [],
+                        "group_key": row[8]
+                    })
+        
         # Check if this group was already posted
         existing_message = None
         async with aiosqlite.connect(DB) as db:
@@ -872,14 +987,18 @@ async def check_posts():
             """, (group_key,)) as cur:
                 result = await cur.fetchone()
                 if result:
-                    existing_message = await channel.fetch_message(result[0])
+                    try:
+                        existing_message = await channel.fetch_message(result[0])
+                    except discord.NotFound:
+                        # Message was deleted, create new one
+                        existing_message = None
         
         if existing_message:
             # Update existing message
-            await update_group_message(channel, existing_message, group_posts)
+            await update_group_message(channel, existing_message, all_group_items)
         else:
             # Create new message
-            await create_new_group_message(channel, group_key, group_posts)
+            await create_new_group_message(channel, group_key, all_group_items)
 
 
 # ---------------- MESSAGE HELPERS ----------------
