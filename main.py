@@ -780,43 +780,63 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
 
 
 # ---------------- UI COMPONENTS ----------------
-class ShowPaneView(discord.ui.View):
-    def __init__(self, image_url: str, timeout: float = 180.0):
+class PublicPaneView(discord.ui.View):
+    """View for public messages with Show Pane button."""
+    def __init__(self, image_url: str, timeout: float = None):
         super().__init__(timeout=timeout)
         self.image_url = image_url
-        self.pane_visible = False
-        self.message = None  # Will be set when message is sent
-        
-        # Add the toggle button
-        self.add_item(TogglePaneButton(self))
+        self.add_item(ShowPaneButton(self))
 
-class TogglePaneButton(discord.ui.Button):
-    def __init__(self, view: ShowPaneView):
+class ShowPaneButton(discord.ui.Button):
+    """Button to show ephemeral image pane."""
+    def __init__(self, view: PublicPaneView):
         self.view_ref = view
         super().__init__(
             label="Show Pane ▼",
             style=discord.ButtonStyle.secondary,
-            custom_id="toggle_pane"
+            custom_id="show_pane"
         )
     
     async def callback(self, interaction: discord.Interaction):
         view = self.view_ref
-        view.pane_visible = not view.pane_visible
         
-        # Update button label based on state
-        self.label = "Close Pane ▲" if view.pane_visible else "Show Pane ▼"
+        # Create ephemeral embed with image
+        embed = discord.Embed(
+            title="Image Preview",
+            description="Click 'Close Pane ▲' to hide this preview",
+            color=discord.Color.blue()
+        )
+        embed.set_image(url=view.image_url)
         
-        # Get the current embed from the message
-        embed = interaction.message.embeds[0]
-        
-        # Update embed based on pane state
-        if view.pane_visible:
-            embed.set_image(url=view.image_url)
-        else:
-            embed.set_image(url=None)  # Remove image
-        
-        # Edit the existing message
-        await interaction.response.edit_message(embed=embed, view=view)
+        # Create ephemeral message with close button
+        await interaction.response.send_message(
+            embed=embed,
+            view=EphemeralPaneView(),
+            ephemeral=True
+        )
+
+class EphemeralPaneView(discord.ui.View):
+    """View for ephemeral messages with Close Pane button."""
+    def __init__(self, timeout: float = 600.0):  # 10 minutes timeout
+        super().__init__(timeout=timeout)
+        self.add_item(ClosePaneButton())
+
+class ClosePaneButton(discord.ui.Button):
+    """Button to close ephemeral pane."""
+    def __init__(self):
+        super().__init__(
+            label="Close Pane ▲",
+            style=discord.ButtonStyle.danger,
+            custom_id="close_pane"
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        # Delete the ephemeral message
+        await interaction.response.edit_message(
+            content="Preview closed.",
+            embed=None,
+            view=None
+        )
 
 def create_embed(post: dict) -> discord.Embed:
     wrapped_content = _wrap_lines(post["content"])
@@ -835,8 +855,8 @@ def create_embed(post: dict) -> discord.Embed:
     embed.set_footer(text="AQW Daily Gift")
     return embed
 
-def create_pane_embed(post: dict) -> tuple[discord.Embed, ShowPaneView]:
-    """Create an embed with Show/Close Pane functionality for images."""
+def create_pane_embed(post: dict) -> tuple[discord.Embed, PublicPaneView]:
+    """Create an embed with Show Pane functionality for images."""
     wrapped_content = _wrap_lines(post["content"])
     # Remove title_icons to eliminate aegift hyperlink below item name
     desc = f"{wrapped_content}\n\n[View on Wiki]({post['url']})"
@@ -849,13 +869,13 @@ def create_pane_embed(post: dict) -> tuple[discord.Embed, ShowPaneView]:
         url=post["url"],
         color=0xFF4500,
     )
-    # Note: Image will be handled by ShowPaneView, not set here initially
+    # Note: Image will be shown in ephemeral message only
     embed.set_footer(text="AQW Daily Gift")
     
     # Create view with image URL if available
     view = None
     if post.get("image"):
-        view = ShowPaneView(post["image"])
+        view = PublicPaneView(post["image"])
     
     return embed, view
 
@@ -898,17 +918,13 @@ async def check_posts():
                 else:
                     # Create new message if not found
                     embed, view = create_pane_embed(post)
-                    message = await channel.send(embed=embed, view=view)
-                    if view:
-                        view.message = message
+                    await channel.send(embed=embed, view=view)
                     log.info("Created new message for changed item: %s", post["title"])
             else:
                 # New item
                 await mark_posted(pid, post)
                 embed, view = create_pane_embed(post)
-                message = await channel.send(embed=embed, view=view)
-                if view:
-                    view.message = message
+                await channel.send(embed=embed, view=view)
                 log.info("New item: %s", post["title"])
 
 
@@ -933,9 +949,7 @@ async def latestdrops(interaction: discord.Interaction):
             return
 
         embed, view = create_pane_embed(posts[0])
-        message = await interaction.followup.send(embed=embed, view=view)
-        if view:
-            view.message = message
+        await interaction.followup.send(embed=embed, view=view)
     except asyncio.TimeoutError:
         await interaction.followup.send("Timed out fetching latest drops. Please try again in a few seconds.")
     except Exception as e:
