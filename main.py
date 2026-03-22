@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 
 # ---------------- DATABASE ----------------
 async def init_db():
-    """Initialize the SQLite database for tracking posted items with grouping."""
+    """Initialize the SQLite database for tracking posted items with change detection."""
     async with aiosqlite.connect(DB) as db:
         # Create items table for individual items with change detection
         await db.execute("""
@@ -59,68 +59,15 @@ async def init_db():
                 rarity TEXT,
                 image TEXT,
                 images TEXT,  -- JSON array of all images
-                group_key TEXT,
                 created_at TIMESTAMP,
                 updated_at TIMESTAMP,
                 content_hash TEXT  -- For change detection
             )
         """)
         
-        # Create groups table for message tracking
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS groups (
-                group_key TEXT PRIMARY KEY,
-                message_id TEXT,
-                channel_id TEXT,
-                last_updated TIMESTAMP
-            )
-        """)
-        
         await db.commit()
 
 
-def normalize_location(location_text: str) -> str:
-    """Normalize location text for grouping."""
-    # Remove markdown/wiki links formatting
-    text = re.sub(r'\[\[.*?\|', '', location_text)  # Remove [[[page|display
-    text = re.sub(r'\]\]', '', text)  # Remove ]]]
-    text = re.sub(r'\[.*?\]', '', text)  # Remove [link]
-    text = re.sub(r'\*\*', '', text)  # Remove **bold**
-    text = re.sub(r'\*', '', text)  # Remove *italic*
-    text = re.sub(r'`', '', text)  # Remove `code`
-    
-    # Normalize whitespace
-    text = re.sub(r'\s+', ' ', text)  # Collapse whitespace
-    text = text.strip().lower()
-    
-    return text
-
-def make_group_key(item: dict) -> str:
-    """Generate group key from item Locations or Dropped by field."""
-    content = (item.get("content", "") or "")
-    
-    # Extract Locations field first
-    loc_match = re.search(r"locations?\s*:?\s*(.+?)(?=\n\n|\n\*\*|$)", content, re.IGNORECASE | re.DOTALL)
-    if loc_match:
-        locations = loc_match.group(1).strip()
-        normalized = normalize_location(locations)
-        return f"loc:{normalized}" if normalized else "loc:unknown"
-    
-    # If no Locations, try Dropped by field
-    drop_match = re.search(r"dropped by\s*:?\s*(.+?)(?=\n\n|\n\*\*|$)", content, re.IGNORECASE | re.DOTALL)
-    if drop_match:
-        dropped_by = drop_match.group(1).strip()
-        normalized = normalize_location(dropped_by)
-        return f"drop:{normalized}" if normalized else "drop:unknown"
-    
-    # If neither found, try Price field (for items with Price but no Location/Dropped by)
-    price_match = re.search(r"price\s*:?\s*(.+?)(?=\n\n|\n\*\*|$)", content, re.IGNORECASE | re.DOTALL)
-    if price_match:
-        price = price_match.group(1).strip()
-        normalized = normalize_location(price)
-        return f"price:{normalized}" if normalized else "price:unknown"
-    
-    return "unknown"
 
 def generate_content_hash(item: dict) -> str:
     """Generate hash for change detection."""
@@ -194,12 +141,12 @@ async def mark_posted(pid: str, item: dict):
     async with aiosqlite.connect(DB) as db:
         await db.execute("""
             INSERT OR REPLACE INTO items 
-            (id, url, title, content, price, rarity, image, images, group_key, created_at, updated_at, content_hash) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), ?)
+            (id, url, title, content, price, rarity, image, images, created_at, updated_at, content_hash) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), ?)
         """, (
             pid, item.get("url"), item.get("title"), item.get("content"), 
             item.get("price"), item.get("rarity"), item.get("image"), 
-            json.dumps(item.get("images", [])), make_group_key(item), content_hash
+            json.dumps(item.get("images", [])), content_hash
         ))
         await db.commit()
 
@@ -446,6 +393,12 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
+    text = re.sub(
+        r"Also see\s*:?\s*.+?(?=(?:Notes?\s*:?)|(?:Thanks to\s*)|$)",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
 
     def _norm(val: str) -> str:
         val = re.sub(r"system:page-tags/tag/[^ \n]+", "", val, flags=re.IGNORECASE)
@@ -457,50 +410,20 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     def _format_list(val: str) -> str:
         """
-        Convert a multi-value field into Discord-friendly line items.
-        Preserves original formatting including dashes and line connections.
+        Preserve original line structure without wrapping or modification.
         """
         v = (val or "").strip()
         if not v or v.upper() == "N/A":
             return "N/A"
 
-        # Normalize multiple spaces but preserve single spaces and original structure
+        # Normalize multiple spaces but preserve original structure
         v = re.sub(r"[ \t]+", " ", v).strip()
         
-        # Split by newlines first to preserve original line structure
+        # Split by newlines to preserve original line structure
         lines = [ln.strip() for ln in v.split("\n") if ln.strip()]
         
-        if len(lines) > 1:
-            # Join lines with spaces to preserve connections like "Phlegethon Arena Trophies - Phlegethon Arena"
-            # but keep different location groups on separate lines
-            formatted_lines = []
-            current_line = ""
-            
-            for line in lines:
-                if line == "-":
-                    # Dash separator, join with previous line
-                    if current_line:
-                        current_line += " - "
-                    continue
-                elif current_line and not current_line.endswith(" - "):
-                    # Previous line was complete, start new line
-                    formatted_lines.append(current_line)
-                    current_line = line
-                else:
-                    # Continue current line (after dash or first line)
-                    current_line += line if current_line.endswith(" - ") else f" {line}"
-            
-            if current_line:
-                formatted_lines.append(current_line)
-            
-            return "\n".join(formatted_lines)
-
-        # Fallback: comma-separated values
-        if "," in v:
-            parts = [p.strip() for p in v.split(",") if p.strip()]
-            return "\n".join(parts) if parts else v
-
-        return v
+        # Return lines exactly as they appear on the page
+        return "\n".join(lines)
 
     # Capture only the important fields
     loc = "N/A"
@@ -512,7 +435,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Location field
     m_loc = re.search(
-        r"Locations?\s*:?\s*(?P<val>.+?)\s*(?=(?:Price\s*:?)|(?:Dropped by\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
+        r"Locations?\s*:?\s*(?P<val>.+?)\s*(?=(?:Price\s*:?)|(?:Dropped by\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -521,7 +444,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Price field
     m_price = re.search(
-        r"Price\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Dropped by\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
+        r"Price\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Dropped by\s*:?)|(?:Notes\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -530,7 +453,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Dropped by field (when Price is N/A)
     m_dropped = re.search(
-        r"Dropped by\s*:?\s*(?P<val>.+?)\s*(?=(?:Merge the following\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
+        r"Dropped by\s*:?\s*(?P<val>.+?)\s*(?=(?:Merge the following\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -541,7 +464,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Merge the following field
     m_merge = re.search(
-        r"Merge the following\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
+        r"Merge the following\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -552,7 +475,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Rarity field - more specific to stop at Note field
     m_rarity = re.search(
-        r"Rarity\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity Description\s*:?)|(?:Notes?\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|\Z)",
+        r"Rarity\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity Description\s*:?)|(?:Notes?\s*:?)|(?:Thanks to\s*:?)|\Z)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -561,20 +484,21 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Note field - capture only the first Note: occurrence
     m_note = re.search(
-        r"Notes?\s*:?\s*(?P<val>.+?)(?=(?:\n\s*Notes?\s*:)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|\Z)",
+        r"Notes?\s*:?\s*(?P<val>.+?)(?=(?:\n\s*Notes?\s*:)|(?:Thanks to\s*:?)|\Z)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
     if not m_note:
         # Try singular "Note:" pattern
         m_note = re.search(
-            r"Note\s*:?\s*(?P<val>.+?)(?=(?:\n\s*Note\s*:)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|\Z)",
+            r"Note\s*:?\s*(?P<val>.+?)(?=(?:\n\s*Note\s*:)|(?:Thanks to\s*:?)|\Z)",
             text,
             flags=re.IGNORECASE | re.DOTALL,
         )
     if m_note:
         candidate = _norm(m_note.group("val"))
-        if candidate and candidate.lower() not in {"n/a", "na"}:
+        # Skip note if it only contains "Also see:" content
+        if candidate and candidate.lower() not in {"n/a", "na"} and not re.search(r'^\s*(?:also see\s*:?.*|see\s*:?.*)\s*$', candidate, re.IGNORECASE):
             note = candidate
 
     def _price_is_na(p: str) -> bool:
@@ -915,209 +839,44 @@ async def check_posts():
         log.warning("Channel %s not found", CHANNEL_ID)
         return
 
-    posts = await asyncio.to_thread(fetch_recent_aegifts, limit=10)  # Check more pages for background
+    posts = await asyncio.to_thread(fetch_recent_aegifts, limit=10)
     if not posts:
         return
     
-    # Group items by their origin fields
-    groups = {}
     for post in posts:
-        group_key = make_group_key(post)
-        if group_key not in groups:
-            groups[group_key] = []
-        groups[group_key].append(post)
-    
-    # Process each group
-    for group_key, group_posts in groups.items():
-        if not group_posts:
-            continue
+        pid = urlparse(post["url"]).path.strip("/").replace("/", "-") or post["url"]
         
-        # Check for changes in existing items and new items
-        changed_items = []
-        new_items = []
-        
-        for post in group_posts:
-            pid = urlparse(post["url"]).path.strip("/").replace("/", "-") or post["url"]
-            
-            if await has_item_changed(pid, post):
-                if await is_posted(pid):
-                    # Existing item changed
-                    changed_items.append(post)
-                    await update_stored_item(pid, post)
-                    log.info("Item changed: %s", post["title"])
+        if await has_item_changed(pid, post):
+            if await is_posted(pid):
+                # Existing item changed - update it
+                await update_stored_item(pid, post)
+                log.info("Item changed: %s", post["title"])
+                
+                # Try to find and update existing message
+                existing_messages = []
+                async for msg in channel.history(limit=100):
+                    if msg.embeds and msg.embeds[0].url == post["url"]:
+                        existing_messages.append(msg)
+                        break
+                
+                if existing_messages:
+                    # Update existing message
+                    embed = create_embed(post)
+                    await existing_messages[0].edit(embed=embed)
+                    log.info("Updated existing message for: %s", post["title"])
                 else:
-                    # New item
-                    new_items.append(post)
-                    await mark_posted(pid, post)
-                    log.info("New item: %s", post["title"])
-        
-        # Only process if there are changes or new items
-        if not changed_items and not new_items:
-            continue
-            
-        # Get all items for this group (existing + new)
-        all_group_items = []
-        async with aiosqlite.connect(DB) as db:
-            async with db.execute("""
-                SELECT id, url, title, content, price, rarity, image, images, group_key 
-                FROM items WHERE group_key = ?
-            """, (group_key,)) as cur:
-                rows = await cur.fetchall()
-                for row in rows:
-                    all_group_items.append({
-                        "id": row[0],
-                        "url": row[1],
-                        "title": row[2],
-                        "content": row[3],
-                        "price": row[4],
-                        "rarity": row[5],
-                        "image": row[6],
-                        "images": json.loads(row[7]) if row[7] else [],
-                        "group_key": row[8]
-                    })
-        
-        # Check if this group was already posted
-        existing_message = None
-        async with aiosqlite.connect(DB) as db:
-            async with db.execute("""
-                SELECT message_id, channel_id FROM groups 
-                WHERE group_key = ? 
-                ORDER BY last_updated DESC 
-                LIMIT 1
-            """, (group_key,)) as cur:
-                result = await cur.fetchone()
-                if result:
-                    try:
-                        existing_message = await channel.fetch_message(result[0])
-                    except discord.NotFound:
-                        # Message was deleted, create new one
-                        existing_message = None
-        
-        if existing_message:
-            # Update existing message
-            await update_group_message(channel, existing_message, all_group_items)
-        else:
-            # Create new message
-            await create_new_group_message(channel, group_key, all_group_items)
+                    # Create new message if not found
+                    embed = create_embed(post)
+                    await channel.send(embed=embed)
+                    log.info("Created new message for changed item: %s", post["title"])
+            else:
+                # New item
+                await mark_posted(pid, post)
+                embed = create_embed(post)
+                await channel.send(embed=embed)
+                log.info("New item: %s", post["title"])
 
 
-# ---------------- MESSAGE HELPERS ----------------
-async def update_group_message(channel: discord.TextChannel, message: discord.Message, posts: list[dict]):
-    """Update an existing group message with new items."""
-    if not posts:
-        return
-    
-    # Generate collage if multiple items
-    collage_bytes = None
-    if len(posts) > 1:
-        # Collect ALL images from all posts
-        all_images = []
-        for post in posts:
-            images = post.get("images", [])
-            if images:
-                all_images.extend(images)
-            elif post.get("image"):  # Fallback to single image
-                all_images.append(post["image"])
-        
-        # Remove duplicates
-        unique_images = list(set(all_images))
-        collage_bytes = await asyncio.to_thread(generate_collage, unique_images)
-    
-    # Build updated embed
-    titles = [post["title"] for post in posts]
-    title = f"{titles[0]} ({len(titles)} Variants Found)" if len(titles) > 1 else titles[0]
-    
-    content_parts = []
-    for i, post in enumerate(posts):
-        content_parts = post.get("content", "").split("\n\n")
-        content_parts = [f"**{i+1}.** {part}" for part in content_parts]
-        content_parts.append(f"**Location:**\n{post.get('content', '').split('\\n\\n')[0]}")
-        content_parts.append(f"**Price:**\n{post.get('price', 'N/A')}")
-        content_parts.append(f"**Rarity:**\n{post.get('rarity', 'N/A')}")
-        if post.get('note'):
-            content_parts.append(f"**Note:**\n{post.get('note')}")
-    
-    updated_content = "\n\n".join(content_parts)
-    
-    embed = discord.Embed(
-        title=title,
-        description=updated_content,
-        color=0xFF4500,
-        url=posts[0]["url"]
-    )
-    
-    # Add collage as attachment if generated
-    files = []
-    if collage_bytes:
-        files.append(discord.File(io.BytesIO(collage_bytes), "collage.png"))
-    
-    await message.edit(embed=embed, attachments=files)
-    
-    # Update database
-    group_key = make_group_key(posts[0])
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            UPDATE groups SET last_updated = datetime('now') 
-            WHERE group_key = ?
-        """, (group_key,))
-        await db.commit()
-
-async def create_new_group_message(channel: discord.TextChannel, group_key: str, posts: list[dict]):
-    """Create a new group message with collage."""
-    if not posts:
-        return
-    
-    # Generate collage
-    # Collect ALL images from all posts
-    all_images = []
-    for post in posts:
-        images = post.get("images", [])
-        if images:
-            all_images.extend(images)
-        elif post.get("image"):  # Fallback to single image
-            all_images.append(post["image"])
-    
-    # Remove duplicates
-    unique_images = list(set(all_images))
-    collage_bytes = await asyncio.to_thread(generate_collage, unique_images)
-    
-    # Build embed
-    titles = [post["title"] for post in posts]
-    title = f"{titles[0]} ({len(titles)} Variants Found)" if len(titles) > 1 else titles[0]
-    
-    content_parts = []
-    for i, post in enumerate(posts):
-        content_parts = post.get("content", "").split("\n\n")
-        content_parts = [f"**{i+1}.** {part}" for part in content_parts]
-        content_parts.append(f"**Location:**\n{post.get('content', '').split('\\n\\n')[0]}")
-        content_parts.append(f"**Price:**\n{post.get('price', 'N/A')}")
-        content_parts.append(f"**Rarity:**\n{post.get('rarity', 'N/A')}")
-        if post.get('note'):
-            content_parts.append(f"**Note:**\n{post.get('note')}")
-    
-    updated_content = "\n\n".join(content_parts)
-    
-    embed = discord.Embed(
-        title=title,
-        description=updated_content,
-        color=0xFF4500,
-        url=posts[0]["url"]
-    )
-    
-    # Add collage as attachment
-    files = []
-    if collage_bytes:
-        files.append(discord.File(io.BytesIO(collage_bytes), "collage.png"))
-    
-    message = await channel.send(embed=embed, attachments=files)
-    
-    # Save to database
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            INSERT INTO groups (group_key, message_id, channel_id, last_updated) 
-            VALUES (?, ?, ?, datetime('now'))
-        """, (group_key, message.id, channel.id))
-        await db.commit()
 
 # ---------------- COMMAND ----------------
 @bot.tree.command(name="latestdrops", description="Check latest AE gift pages")
