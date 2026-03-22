@@ -782,9 +782,10 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
 # ---------------- UI COMPONENTS ----------------
 class PublicPaneView(discord.ui.View):
     """View for public messages with Show Pane button."""
-    def __init__(self, image_url: str, timeout: float = None):
+    def __init__(self, image_url: str, item_title: str, timeout: float = None):
         super().__init__(timeout=timeout)
         self.image_url = image_url
+        self.item_title = item_title
         self.add_item(ShowPaneButton(self))
 
 class ShowPaneButton(discord.ui.Button):
@@ -802,7 +803,7 @@ class ShowPaneButton(discord.ui.Button):
         
         # Create ephemeral embed with image
         embed = discord.Embed(
-            title="Image Preview",
+            title=f"{view.item_title} - Image Preview",
             description="Click 'Close ▲' to hide this preview",
             color=discord.Color.blue()
         )
@@ -875,7 +876,7 @@ def create_pane_embed(post: dict) -> tuple[discord.Embed, PublicPaneView]:
     # Create view with image URL if available
     view = None
     if post.get("image"):
-        view = PublicPaneView(post["image"])
+        view = PublicPaneView(post["image"], post["title"])
     
     return embed, view
 
