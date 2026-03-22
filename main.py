@@ -164,7 +164,7 @@ async def update_stored_item(pid: str, item: dict):
         await db.execute("""
             UPDATE items SET 
                 title=?, content=?, price=?, rarity=?, image=?, images=?, 
-                updated_at=datetime('now'), content_hash=?
+                last_updated=datetime('now'), content_hash=?
             WHERE id=?
         """, (
             item.get("title"), item.get("content"), item.get("price"), 
@@ -179,8 +179,8 @@ async def mark_posted(pid: str, item: dict):
     async with aiosqlite.connect(DB) as db:
         await db.execute("""
             INSERT OR REPLACE INTO items 
-            (id, url, title, content, price, rarity, image, images, created_at, updated_at, content_hash) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), ?)
+            (id, url, title, content, price, rarity, image, images, last_updated, content_hash) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
         """, (
             pid, item.get("url"), item.get("title"), item.get("content"), 
             item.get("price"), item.get("rarity"), item.get("image"), 
