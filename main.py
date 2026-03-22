@@ -105,7 +105,7 @@ def generate_daily_gift_title(gift_number: int) -> str:
     weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     current_weekday = weekday_names[datetime.now().weekday()]
     
-    return f"🎁 {current_weekday} Daily Gift #{gift_number} 🎁"
+    return f"🎁 __{current_weekday} Daily Gift #{gift_number}__ 🎁"
 
 
 def generate_content_hash(item: dict) -> str:
@@ -516,25 +516,25 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Assemble only the important fields
     parts: list[str] = [
-        f"**Location:**\n{_format_list(loc)}",
+        f"__**Location:**__\n{_format_list(loc)}",
     ]
 
     if _price_is_na(price):
         # When Price is N/A, show Dropped by / Merge the following
         if dropped_by:
-            parts.append(f"**Dropped by:**\n{_format_list(dropped_by)}")
+            parts.append(f"__**Dropped by:**__\n{_format_list(dropped_by)}")
         if merge_following:
-            parts.append(f"**Merge the following:**\n{_format_list(merge_following)}")
+            parts.append(f"__**Merge the following:**__\n{_format_list(merge_following)}")
         # Fallback if neither exists
         if not dropped_by and not merge_following:
-            parts.append(f"**Price:**\n{_format_list(price)}")
+            parts.append(f"__**Price:**__\n{_format_list(price)}")
     else:
-        parts.append(f"**Price:**\n{_format_list(price)}")
+        parts.append(f"__**Price:**__\n{_format_list(price)}")
 
-    parts.append(f"**Rarity:**\n{_format_list(rarity)}")
+    parts.append(f"__**Rarity:**__\n{_format_list(rarity)}")
 
     if note:
-        parts.append(f"**Note:**\n{_format_list(note)}")
+        parts.append(f"__**Note:**__\n{_format_list(note)}")
         log.info("Found note field: %s", note)
 
     structured = "\n\n".join(parts).strip()
