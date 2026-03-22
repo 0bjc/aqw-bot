@@ -792,7 +792,7 @@ class ShowPaneButton(discord.ui.Button):
     def __init__(self, view: PublicPaneView):
         self.view_ref = view
         super().__init__(
-            label="Show Pane ▼",
+            label="View ▼",
             style=discord.ButtonStyle.secondary,
             custom_id="show_pane"
         )
@@ -803,7 +803,7 @@ class ShowPaneButton(discord.ui.Button):
         # Create ephemeral embed with image
         embed = discord.Embed(
             title="Image Preview",
-            description="Click 'Close Pane ▲' to hide this preview",
+            description="Click 'Close ▲' to hide this preview",
             color=discord.Color.blue()
         )
         embed.set_image(url=view.image_url)
@@ -825,7 +825,7 @@ class ClosePaneButton(discord.ui.Button):
     """Button to close ephemeral pane."""
     def __init__(self):
         super().__init__(
-            label="Close Pane ▲",
+            label="Close ▲",
             style=discord.ButtonStyle.danger,
             custom_id="close_pane"
         )
