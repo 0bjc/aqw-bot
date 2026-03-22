@@ -915,7 +915,7 @@ async def create_pane_embed(post: dict) -> tuple[discord.Embed, PublicPaneView]:
 
     embed = discord.Embed(
         title=title.upper(),
-        description=f"\n**[{post['title']}]({post['url']})**\n\n{desc}",
+        description=f"\n\n**[{post['title']}]({post['url']})**\n\n{desc}",
         color=0xFF4500,
     )
     # Note: Image will be shown in ephemeral message only
