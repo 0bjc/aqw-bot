@@ -90,7 +90,7 @@ async def get_stored_item(pid: str) -> dict | None:
     """Get stored item data for comparison."""
     async with aiosqlite.connect(DB) as db:
         async with db.execute("""
-            SELECT id, url, title, content, price, rarity, image, images, group_key, content_hash 
+            SELECT id, url, title, content, price, rarity, image, images, content_hash 
             FROM items WHERE id=?
         """, (pid,)) as cur:
             row = await cur.fetchone()
@@ -104,8 +104,7 @@ async def get_stored_item(pid: str) -> dict | None:
                     "rarity": row[5],
                     "image": row[6],
                     "images": json.loads(row[7]) if row[7] else [],
-                    "group_key": row[8],
-                    "content_hash": row[9]
+                    "content_hash": row[8]
                 }
             return None
 
