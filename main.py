@@ -354,20 +354,42 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     def _format_list(val: str) -> str:
         """
-        Preserve original line structure without wrapping or modification.
+        Preserve original line structure including dash connections.
         """
         v = (val or "").strip()
         if not v or v.upper() == "N/A":
             return "N/A"
 
-        # Normalize multiple spaces but preserve original structure
+        # Only normalize excessive spaces, preserve structure and dashes
         v = re.sub(r"[ \t]+", " ", v).strip()
         
-        # Split by newlines to preserve original line structure
-        lines = [ln.strip() for ln in v.split("\n") if ln.strip()]
+        # Handle dash connections - join lines where dash indicates continuation
+        lines = v.split("\n")
+        result_lines = []
+        current_line = ""
         
-        # Return lines exactly as they appear on the page
-        return "\n".join(lines)
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            if line == "-":
+                # Dash separator - connect to previous line
+                if current_line:
+                    current_line += " - "
+                continue
+            elif current_line and not current_line.endswith(" - "):
+                # Previous line complete, start new line
+                result_lines.append(current_line)
+                current_line = line
+            else:
+                # Continue current line or start new line
+                current_line += line if current_line.endswith(" - ") else f" {line}"
+        
+        if current_line:
+            result_lines.append(current_line)
+        
+        return "\n".join(result_lines)
 
     # Capture only the important fields
     loc = "N/A"
