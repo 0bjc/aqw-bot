@@ -389,12 +389,15 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Price field
     m_price = re.search(
-        r"Price\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Dropped by\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|$)",
+        r"Price\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Dropped by\s*:?)|(?:Notes?\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
     if m_price:
-        price = _norm(m_price.group("val"))
+        price_raw = m_price.group("val")
+        # Clean up price formatting but preserve quest text structure
+        price = re.sub(r"\s+", " ", price_raw.strip())
+        price = price.strip()
 
     # Dropped by field (when Price is N/A)
     m_dropped = re.search(
