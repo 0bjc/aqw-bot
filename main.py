@@ -914,9 +914,8 @@ async def create_pane_embed(post: dict) -> tuple[discord.Embed, PublicPaneView]:
     title = generate_daily_gift_title(gift_number)
 
     embed = discord.Embed(
-        title=title,
-        description=f"**{post['title']}**\n\n{desc}",
-        url=post["url"],
+        title=title.upper(),
+        description=f"**[{post['title']}]({post['url']})**\n\n{desc}",
         color=0xFF4500,
     )
     # Note: Image will be shown in ephemeral message only
