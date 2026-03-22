@@ -389,7 +389,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Price field
     m_price = re.search(
-        r"Price\s*:?\s*(?P<val>.+?)(?=\s*(?:Rarity\s*:?)|(?:Dropped by\s*:?)|(?:Notes?\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
+        r"Price\s*:?\s*(?P<val>.*?)(?=\s*Rarity\s*:|\s*Dropped by\s*:|\s*Notes?\s*:|\s*Also see\s*:|\s*Thanks to\s*:|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
