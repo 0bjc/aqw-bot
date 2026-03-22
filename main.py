@@ -915,7 +915,7 @@ async def create_pane_embed(post: dict) -> tuple[discord.Embed, PublicPaneView]:
 
     embed = discord.Embed(
         title=title,
-        description=desc,
+        description=f"**{post['title']}**\n\n{desc}",
         url=post["url"],
         color=0xFF4500,
     )
