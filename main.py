@@ -832,9 +832,17 @@ class ClosePaneButton(discord.ui.Button):
         )
     
     async def callback(self, interaction: discord.Interaction):
-        # Dismiss the ephemeral message immediately
+        # Dismiss the ephemeral message
         await interaction.response.defer()  # Acknowledge the interaction
-        await interaction.message.delete()  # Delete the ephemeral message
+        try:
+            await interaction.delete_original_response()  # Delete the original ephemeral message
+        except:
+            # If deletion fails, try editing to empty
+            await interaction.followup.edit_message(
+                content="",
+                embed=None,
+                view=None
+            )
 
 def create_embed(post: dict) -> discord.Embed:
     wrapped_content = _wrap_lines(post["content"])
