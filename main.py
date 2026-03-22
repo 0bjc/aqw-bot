@@ -231,8 +231,8 @@ def _wrap_lines(text: str) -> str:
     """Wrap lines to Discord's 4096 character limit with word boundaries."""
     if not text:
         return ""
-    wrapped = textwrap.fill(text, width=WRAP_WIDTH, replace_whitespace=False, break_long_words=False)
-    return wrapped
+    # Don't wrap - preserve original structure and spacing
+    return text
 
 
 
