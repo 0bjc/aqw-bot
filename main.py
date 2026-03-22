@@ -930,7 +930,7 @@ async def create_pane_embed(post: dict) -> tuple[discord.Embed, PublicPaneView]:
 
 
 # ---------------- LOOP ----------------
-@tasks.loop(seconds=30)
+@tasks.loop(seconds=60)  # Increased from 30 to 60 seconds to reduce rate limiting
 async def check_posts():
     await bot.wait_until_ready()
 
@@ -938,6 +938,9 @@ async def check_posts():
     if not channel:
         log.warning("Channel %s not found", CHANNEL_ID)
         return
+    
+    # Add delay between messages to avoid rate limiting
+    message_delay = 2.0  # 2 seconds between messages
 
     posts = await asyncio.to_thread(fetch_recent_aegifts, limit=10)
     if not posts:
@@ -961,20 +964,35 @@ async def check_posts():
                 
                 if existing_messages:
                     # Update existing message
-                    embed, view = await create_pane_embed(post)
-                    await existing_messages[0].edit(embed=embed, view=view)
-                    log.info("Updated existing message for: %s", post["title"])
+                    try:
+                        embed, view = await create_pane_embed(post)
+                        await existing_messages[0].edit(embed=embed, view=view)
+                        log.info("Updated existing message for: %s", post["title"])
+                        await asyncio.sleep(message_delay)  # Delay after editing
+                    except discord.HTTPException as e:
+                        log.error("Failed to update message: %s", e)
+                        await asyncio.sleep(5)  # Longer delay on error
                 else:
                     # Create new message if not found
-                    embed, view = await create_pane_embed(post)
-                    await channel.send(embed=embed, view=view)
-                    log.info("Created new message for changed item: %s", post["title"])
+                    try:
+                        embed, view = await create_pane_embed(post)
+                        await channel.send(embed=embed, view=view)
+                        log.info("Created new message for changed item: %s", post["title"])
+                        await asyncio.sleep(message_delay)  # Delay after sending
+                    except discord.HTTPException as e:
+                        log.error("Failed to send message: %s", e)
+                        await asyncio.sleep(5)  # Longer delay on error
             else:
                 # New item
                 await mark_posted(pid, post)
-                embed, view = await create_pane_embed(post)
-                await channel.send(embed=embed, view=view)
-                log.info("New item: %s", post["title"])
+                try:
+                    embed, view = await create_pane_embed(post)
+                    await channel.send(embed=embed, view=view)
+                    log.info("New item: %s", post["title"])
+                    await asyncio.sleep(message_delay)  # Delay after sending
+                except discord.HTTPException as e:
+                    log.error("Failed to send new message: %s", e)
+                    await asyncio.sleep(5)  # Longer delay on error
 
 
 
