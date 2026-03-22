@@ -779,6 +779,45 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
     return results
 
 
+# ---------------- UI COMPONENTS ----------------
+class ShowPaneView(discord.ui.View):
+    def __init__(self, image_url: str, timeout: float = 180.0):
+        super().__init__(timeout=timeout)
+        self.image_url = image_url
+        self.pane_visible = False
+        self.message = None  # Will be set when message is sent
+        
+        # Add the toggle button
+        self.add_item(TogglePaneButton(self))
+
+class TogglePaneButton(discord.ui.Button):
+    def __init__(self, view: ShowPaneView):
+        self.view_ref = view
+        super().__init__(
+            label="Show Pane ▼",
+            style=discord.ButtonStyle.secondary,
+            custom_id="toggle_pane"
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view_ref
+        view.pane_visible = not view.pane_visible
+        
+        # Update button label based on state
+        self.label = "Close Pane ▲" if view.pane_visible else "Show Pane ▼"
+        
+        # Get the current embed from the message
+        embed = interaction.message.embeds[0]
+        
+        # Update embed based on pane state
+        if view.pane_visible:
+            embed.set_image(url=view.image_url)
+        else:
+            embed.set_image(url=None)  # Remove image
+        
+        # Edit the existing message
+        await interaction.response.edit_message(embed=embed, view=view)
+
 def create_embed(post: dict) -> discord.Embed:
     wrapped_content = _wrap_lines(post["content"])
     # Remove title_icons to eliminate aegift hyperlink below item name
@@ -792,10 +831,33 @@ def create_embed(post: dict) -> discord.Embed:
         url=post["url"],
         color=0xFF4500,
     )
-    if post.get("image"):
-        embed.set_image(url=post["image"])
+    # Note: Image will be handled by ShowPaneView, not set here initially
     embed.set_footer(text="AQW Daily Gift")
     return embed
+
+def create_pane_embed(post: dict) -> tuple[discord.Embed, ShowPaneView]:
+    """Create an embed with Show/Close Pane functionality for images."""
+    wrapped_content = _wrap_lines(post["content"])
+    # Remove title_icons to eliminate aegift hyperlink below item name
+    desc = f"{wrapped_content}\n\n[View on Wiki]({post['url']})"
+    if len(desc) > 4096:
+        desc = desc[:4090] + "..."
+
+    embed = discord.Embed(
+        title=post["title"],
+        description=desc,
+        url=post["url"],
+        color=0xFF4500,
+    )
+    # Note: Image will be handled by ShowPaneView, not set here initially
+    embed.set_footer(text="AQW Daily Gift")
+    
+    # Create view with image URL if available
+    view = None
+    if post.get("image"):
+        view = ShowPaneView(post["image"])
+    
+    return embed, view
 
 
 # ---------------- LOOP ----------------
@@ -830,19 +892,23 @@ async def check_posts():
                 
                 if existing_messages:
                     # Update existing message
-                    embed = create_embed(post)
-                    await existing_messages[0].edit(embed=embed)
+                    embed, view = create_pane_embed(post)
+                    await existing_messages[0].edit(embed=embed, view=view)
                     log.info("Updated existing message for: %s", post["title"])
                 else:
                     # Create new message if not found
-                    embed = create_embed(post)
-                    await channel.send(embed=embed)
+                    embed, view = create_pane_embed(post)
+                    message = await channel.send(embed=embed, view=view)
+                    if view:
+                        view.message = message
                     log.info("Created new message for changed item: %s", post["title"])
             else:
                 # New item
                 await mark_posted(pid, post)
-                embed = create_embed(post)
-                await channel.send(embed=embed)
+                embed, view = create_pane_embed(post)
+                message = await channel.send(embed=embed, view=view)
+                if view:
+                    view.message = message
                 log.info("New item: %s", post["title"])
 
 
@@ -866,7 +932,10 @@ async def latestdrops(interaction: discord.Interaction):
             await interaction.followup.send("No recent AE gifts found in the last 30 pages.")
             return
 
-        await interaction.followup.send(embed=create_embed(posts[0]))
+        embed, view = create_pane_embed(posts[0])
+        message = await interaction.followup.send(embed=embed, view=view)
+        if view:
+            view.message = message
     except asyncio.TimeoutError:
         await interaction.followup.send("Timed out fetching latest drops. Please try again in a few seconds.")
     except Exception as e:
