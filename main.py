@@ -8,7 +8,6 @@ import textwrap
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlparse, parse_qs
-from PIL import Image
 import io
 
 import aiosqlite
@@ -237,64 +236,6 @@ def _wrap_lines(text: str) -> str:
     return wrapped
 
 
-def generate_collage(image_urls: list[str]) -> bytes:
-    """Generate a collage from multiple item images."""
-    if not image_urls:
-        return None
-    
-    # Download images temporarily
-    images = []
-    for url in image_urls:
-        try:
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200:
-                img_data = io.BytesIO(response.content)
-                img = Image.open(img_data)
-                images.append(img)
-        except Exception as e:
-            log.warning(f"Failed to download image {url}: {e}")
-            continue
-    
-    if not images:
-        return None
-    
-    # Determine layout based on number of images
-    n = len(images)
-    if n == 1:
-        # Single image - use original
-        return io.BytesIO(response.content)
-    elif n == 2:
-        # Two images - side by side
-        width, height = max(img.width for img in images), max(img.height for img in images)
-        collage = Image.new('RGBA', (width * 2, height), (255, 255, 255, 0))
-        collage.paste(images[0], (0, 0))
-        collage.paste(images[1], (width, 0))
-    elif n <= 4:
-        # 3-4 images - 2x2 grid
-        width, height = max(img.width for img in images), max(img.height for img in images)
-        collage = Image.new('RGBA', (width * 2, height * 2), (255, 255, 255, 0))
-        for i, img in enumerate(images):
-            x = (i % 2) * width
-            y = (i // 2) * height
-            collage.paste(img, (x, y))
-    else:
-        # 5-9 images - square grid
-        size = int((300 * 300) ** 0.5)  # Approximate square layout
-        grid_size = int(size ** 0.5)
-        collage = Image.new('RGBA', (grid_size, grid_size), (255, 255, 255, 0))
-        img_size = size // len(images)
-        for i, img in enumerate(images):
-            x = (i % grid_size) * img_size
-            y = (i // grid_size) * img_size
-            # Resize images to uniform size
-            resized_img = img.resize((img_size, img_size), Image.Resampling.LANCZOS)
-            collage.paste(resized_img, (x, y))
-    
-    # Convert to bytes
-    img_bytes = io.BytesIO()
-    collage.save(img_bytes, format='PNG')
-    img_bytes.seek(0)
-    return img_bytes.getvalue()
 
 
 def _extract_all_images(content_el: BeautifulSoup) -> list[str]:
