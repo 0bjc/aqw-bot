@@ -44,28 +44,68 @@ log = logging.getLogger(__name__)
 
 
 # ---------------- DATABASE ----------------
-async def init_db():
-    """Initialize the SQLite database for tracking posted items with change detection."""
+async def init_db() -> None:
+    """Initialize SQLite database with items and counters tables."""
     async with aiosqlite.connect(DB) as db:
-        # Create items table for individual items with change detection
         await db.execute("""
             CREATE TABLE IF NOT EXISTS items (
                 id TEXT PRIMARY KEY,
-                url TEXT UNIQUE,
-                title TEXT,
+                url TEXT NOT NULL,
+                title TEXT NOT NULL,
                 content TEXT,
                 price TEXT,
                 rarity TEXT,
                 image TEXT,
-                images TEXT,  -- JSON array of all images
-                created_at TIMESTAMP,
-                updated_at TIMESTAMP,
-                content_hash TEXT  -- For change detection
+                images TEXT,
+                content_hash TEXT,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+        """)
+        
+        # Create counters table for daily gift numbering
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS counters (
+                name TEXT PRIMARY KEY,
+                value INTEGER NOT NULL DEFAULT 0,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Initialize daily gift counter if it doesn't exist
+        await db.execute("""
+            INSERT OR IGNORE INTO counters (name, value) VALUES ('daily_gift', 0)
         """)
         
         await db.commit()
 
+
+async def get_and_increment_counter(counter_name: str) -> int:
+    """Get current counter value and increment it atomically."""
+    async with aiosqlite.connect(DB) as db:
+        # Get current value and increment in one transaction
+        async with db.execute("SELECT value FROM counters WHERE name = ?", (counter_name,)) as cur:
+            result = await cur.fetchone()
+            if result is None:
+                # Counter doesn't exist, create it
+                await db.execute("INSERT INTO counters (name, value) VALUES (?, 1)", (counter_name,))
+                new_value = 1
+            else:
+                current_value = result[0]
+                new_value = current_value + 1
+                await db.execute("UPDATE counters SET value = ?, last_updated = CURRENT_TIMESTAMP WHERE name = ?", 
+                               (new_value, counter_name))
+        
+        await db.commit()
+        return new_value
+
+
+def generate_daily_gift_title(gift_number: int) -> str:
+    """Generate formatted daily gift title with weekday and number."""
+    from datetime import datetime
+    weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    current_weekday = weekday_names[datetime.now().weekday()]
+    
+    return f"🎁 {current_weekday} Daily Gift #{gift_number} 🎁"
 
 
 def generate_content_hash(item: dict) -> str:
@@ -861,7 +901,7 @@ def create_embed(post: dict) -> discord.Embed:
     embed.set_footer(text="AQW Daily Gift")
     return embed
 
-def create_pane_embed(post: dict) -> tuple[discord.Embed, PublicPaneView]:
+async def create_pane_embed(post: dict) -> tuple[discord.Embed, PublicPaneView]:
     """Create an embed with Show Pane functionality for images."""
     wrapped_content = _wrap_lines(post["content"])
     # Remove title_icons to eliminate aegift hyperlink below item name
@@ -869,8 +909,12 @@ def create_pane_embed(post: dict) -> tuple[discord.Embed, PublicPaneView]:
     if len(desc) > 4096:
         desc = desc[:4090] + "..."
 
+    # Get daily gift number and generate title
+    gift_number = await get_and_increment_counter("daily_gift")
+    title = generate_daily_gift_title(gift_number)
+
     embed = discord.Embed(
-        title=post["title"],
+        title=title,
         description=desc,
         url=post["url"],
         color=0xFF4500,
@@ -918,18 +962,18 @@ async def check_posts():
                 
                 if existing_messages:
                     # Update existing message
-                    embed, view = create_pane_embed(post)
+                    embed, view = await create_pane_embed(post)
                     await existing_messages[0].edit(embed=embed, view=view)
                     log.info("Updated existing message for: %s", post["title"])
                 else:
                     # Create new message if not found
-                    embed, view = create_pane_embed(post)
+                    embed, view = await create_pane_embed(post)
                     await channel.send(embed=embed, view=view)
                     log.info("Created new message for changed item: %s", post["title"])
             else:
                 # New item
                 await mark_posted(pid, post)
-                embed, view = create_pane_embed(post)
+                embed, view = await create_pane_embed(post)
                 await channel.send(embed=embed, view=view)
                 log.info("New item: %s", post["title"])
 
@@ -954,7 +998,7 @@ async def latestdrops(interaction: discord.Interaction):
             await interaction.followup.send("No recent AE gifts found in the last 30 pages.")
             return
 
-        embed, view = create_pane_embed(posts[0])
+        embed, view = await create_pane_embed(posts[0])
         await interaction.followup.send(embed=embed, view=view)
     except asyncio.TimeoutError:
         await interaction.followup.send("Timed out fetching latest drops. Please try again in a few seconds.")
