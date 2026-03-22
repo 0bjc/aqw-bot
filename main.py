@@ -340,12 +340,19 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
+    text = re.sub(
+        r"Thanks to\s*:?\s*.+?(?=(?:Notes?\s*:?)|$)",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
 
     def _norm(val: str) -> str:
         val = re.sub(r"system:page-tags/tag/[^ \n]+", "", val, flags=re.IGNORECASE)
-        # Keep newlines so multi-value fields (like multiple locations) can be listed.
-        val = re.sub(r"[ \t]+", " ", val)
-        val = re.sub(r"\n{3,}", "\n\n", val)
+        # Clean up price formatting - remove excessive newlines
+        val = re.sub(r"\n+", " ", val)  # Replace newlines with spaces
+        val = re.sub(r"[ \t]+", " ", val)  # Collapse multiple spaces
+        val = re.sub(r"\s*\(\s*|\s*\)", " ", val)  # Clean up parentheses
         val = val.strip()
         return val
 
@@ -376,7 +383,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Location field
     m_loc = re.search(
-        r"Locations?\s*:?\s*(?P<val>.+?)\s*(?=(?:Price\s*:?)|(?:Dropped by\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Thanks to\s*:?)|$)",
+        r"Locations?\s*:?\s*(?P<val>.+?)\s*(?=(?:Price\s*:?)|(?:Dropped by\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -385,7 +392,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Price field
     m_price = re.search(
-        r"Price\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Dropped by\s*:?)|(?:Notes\s*:?)|(?:Thanks to\s*:?)|$)",
+        r"Price\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Dropped by\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -394,7 +401,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Dropped by field (when Price is N/A)
     m_dropped = re.search(
-        r"Dropped by\s*:?\s*(?P<val>.+?)\s*(?=(?:Merge the following\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Thanks to\s*:?)|$)",
+        r"Dropped by\s*:?\s*(?P<val>.+?)\s*(?=(?:Merge the following\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -405,7 +412,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Merge the following field
     m_merge = re.search(
-        r"Merge the following\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Thanks to\s*:?)|$)",
+        r"Merge the following\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -416,7 +423,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Rarity field - more specific to stop at Note field
     m_rarity = re.search(
-        r"Rarity\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity Description\s*:?)|(?:Notes?\s*:?)|(?:Thanks to\s*:?)|\Z)",
+        r"Rarity\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity Description\s*:?)|(?:Notes?\s*:?)|(?:Also see\s*:?)|\Z)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -425,14 +432,14 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Note field - capture only the first Note: occurrence
     m_note = re.search(
-        r"Notes?\s*:?\s*(?P<val>.+?)(?=(?:\n\s*Notes?\s*:)|(?:Thanks to\s*:?)|\Z)",
+        r"Notes?\s*:?\s*(?P<val>.+?)(?=(?:\n\s*Notes?\s*:)|\Z)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
     if not m_note:
         # Try singular "Note:" pattern
         m_note = re.search(
-            r"Note\s*:?\s*(?P<val>.+?)(?=(?:\n\s*Note\s*:)|(?:Thanks to\s*:?)|\Z)",
+            r"Note\s*:?\s*(?P<val>.+?)(?=(?:\n\s*Note\s*:)|\Z)",
             text,
             flags=re.IGNORECASE | re.DOTALL,
         )
