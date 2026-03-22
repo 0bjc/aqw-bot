@@ -349,10 +349,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     def _norm(val: str) -> str:
         val = re.sub(r"system:page-tags/tag/[^ \n]+", "", val, flags=re.IGNORECASE)
-        # Clean up price formatting - remove excessive newlines
-        val = re.sub(r"\n+", " ", val)  # Replace newlines with spaces
-        val = re.sub(r"[ \t]+", " ", val)  # Collapse multiple spaces
-        val = re.sub(r"\s*\(\s*|\s*\)", " ", val)  # Clean up parentheses
+        # Only clean up system tags, preserve original structure
         val = val.strip()
         return val
 
