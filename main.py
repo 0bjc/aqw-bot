@@ -1167,18 +1167,28 @@ async def update_discord_message_info(pid: str, message_id: int, channel_id: int
 
 
 def normalize_string(s: str) -> str:
-    """Normalize string for consistent grouping and comparison."""
+    """Normalize string for consistent grouping and comparison with aggressive cleaning."""
     if not s:
         return ""
     
     # Convert to lowercase and strip whitespace
     normalized = s.lower().strip()
     
-    # Replace multiple spaces with single space
+    # Replace multiple whitespace with single space
     normalized = re.sub(r'\s+', ' ', normalized)
     
+    # Remove common Wikidot formatting artifacts
+    normalized = re.sub(r'__\*\*(.*?)\*\*__', r'\1', normalized)  # Remove bold formatting
+    normalized = re.sub(r'\*\*(.*?)\*\*', r'\1', normalized)     # Remove simple bold
+    normalized = re.sub(r'__(.*?)__', r'\1', normalized)         # Remove underline
+    normalized = re.sub(r'~~(.*?)~~', r'\1', normalized)         # Remove strikethrough
+    
     # Remove extra punctuation but keep essential ones
-    normalized = re.sub(r'[^\w\s\-.,:()]', '', normalized)
+    normalized = re.sub(r'[^\w\s\-.,:()\/]', '', normalized)
+    
+    # Normalize common variations
+    normalized = re.sub(r'n/a', 'na', normalized)  # Normalize N/A variations
+    normalized = re.sub(r'ac\s*$', 'ac', normalized)  # Normalize AC currency
     
     # Strip again after regex operations
     normalized = normalized.strip()
@@ -1187,27 +1197,46 @@ def normalize_string(s: str) -> str:
 
 
 def generate_group_key(location: str, price: str, items: list[dict]) -> str:
-    """Generate a unique key for a group of items based on normalized location, price, and item titles."""
-    # Normalize location and price
+    """Generate a stable unique key for a group of items with robust normalization."""
+    # Normalize location and price with aggressive cleaning
     norm_location = normalize_string(location)
     norm_price = normalize_string(price)
     
-    # Sort item titles for consistent key generation
-    item_titles = sorted([normalize_string(item.get("title", "")) for item in items])
+    # Create a more stable item signature
+    item_signatures = []
+    for item in items:
+        # Use multiple fields for stability
+        title = normalize_string(item.get("title", ""))
+        url = normalize_string(item.get("url", ""))
+        
+        # Create item signature from title and URL (URL is more stable than title)
+        item_sig = f"{title}|{url}"
+        item_signatures.append(item_sig)
     
-    # Create a combined string for hashing
-    combined = f"{norm_location}|{norm_price}|{'|'.join(item_titles)}"
+    # Sort signatures for consistent ordering
+    item_signatures.sort()
+    
+    # Create combined string with separator that won't appear in normalized data
+    combined = f"{norm_location}||{norm_price}||{'||'.join(item_signatures)}"
     
     # Generate hash for unique key
     import hashlib
-    return hashlib.md5(combined.encode()).hexdigest()
+    return hashlib.md5(combined.encode('utf-8')).hexdigest()
 
 
 async def is_group_already_posted(group_key: str) -> bool:
-    """Check if a group has already been posted."""
+    """Check if a group has already been posted with atomic operation."""
     async with aiosqlite.connect(DB) as db:
-        async with db.execute("SELECT 1 FROM grouped_posts WHERE group_key=?", (group_key,)) as cur:
-            return await cur.fetchone() is not None
+        # Use immediate lock for atomic check
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            async with db.execute("SELECT 1 FROM grouped_posts WHERE group_key=?", (group_key,)) as cur:
+                exists = await cur.fetchone() is not None
+            await db.commit()
+            return exists
+        except Exception:
+            await db.rollback()
+            raise
 
 
 async def get_stored_group(group_key: str) -> dict | None:
@@ -1233,21 +1262,27 @@ async def get_stored_group(group_key: str) -> dict | None:
 
 async def mark_group_posted(group_key: str, location: str, price: str, items: list[dict], 
                           message_id: int = None, channel_id: int = None):
-    """Mark a group as posted to avoid duplicates."""
+    """Mark a group as posted to avoid duplicates with atomic operation."""
     # Extract item titles and categories
     item_titles = [item.get("title", "") for item in items]
     categories = list(set([categorize_item(item) for item in items]))  # Unique categories
     
     async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            INSERT OR REPLACE INTO grouped_posts 
-            (group_key, location, price, item_titles, categories, discord_message_id, discord_channel_id, last_updated) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        """, (
-            group_key, location, price, json.dumps(item_titles), json.dumps(categories),
-            message_id, channel_id
-        ))
-        await db.commit()
+        # Use immediate lock for atomic operation
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await db.execute("""
+                INSERT OR REPLACE INTO grouped_posts 
+                (group_key, location, price, item_titles, categories, discord_message_id, discord_channel_id, last_updated) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            """, (
+                group_key, location, price, json.dumps(item_titles), json.dumps(categories),
+                message_id, channel_id
+            ))
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
 
 async def update_group_discord_message_info(group_key: str, message_id: int, channel_id: int):
@@ -1265,6 +1300,50 @@ async def delete_group_post(group_key: str):
     async with aiosqlite.connect(DB) as db:
         await db.execute("DELETE FROM grouped_posts WHERE group_key=?", (group_key,))
         await db.commit()
+
+
+async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_group: list[dict]) -> bool:
+    """Safely post a grouped embed with proper locking and duplicate prevention."""
+    global posting_lock
+    
+    async with posting_lock:  # Prevent race conditions
+        location, price = group_key
+        
+        # Generate stable group key
+        group_key_hash = generate_group_key(location, price, items_in_group)
+        
+        # Double-check if already posted (within lock)
+        if await is_group_already_posted(group_key_hash):
+            log.info("Group already posted (double-check), skipping: %s", group_key_hash[:8])
+            return False
+        
+        try:
+            # Delete old individual messages first
+            await delete_old_individual_messages(items_in_group)
+            
+            # Create and send grouped embed
+            grouped_embed, view = await create_grouped_embed(group_key, items_in_group)
+            grouped_msg = await channel.send(embed=grouped_embed, view=view)
+            
+            # Mark group as posted atomically
+            await mark_group_posted(group_key_hash, location, price, items_in_group, 
+                                  grouped_msg.id, channel.id)
+            
+            # Update all items in the group to reference the grouped message
+            for item in items_in_group:
+                pid = item["pid"]
+                await update_stored_item(pid, item)
+                await update_discord_message_info(pid, grouped_msg.id, channel.id)
+            
+            log.info("✅ Posted grouped embed with %d items (key: %s)", len(items_in_group), group_key_hash[:8])
+            return True
+            
+        except discord.HTTPException as e:
+            log.error("❌ Failed to send grouped message: %s", e)
+            return False
+        except Exception as e:
+            log.error("❌ Unexpected error posting group: %s", e)
+            return False
 
 
 # ---------------- HELPERS ----------------
@@ -2002,6 +2081,9 @@ class SmartPolling:
 # Global smart polling instance
 smart_polling = SmartPolling()
 
+# Global posting lock to prevent race conditions
+posting_lock = asyncio.Lock()
+
 # ---------------- LOOP ----------------
 @tasks.loop(seconds=1)  # Base loop, interval managed dynamically
 async def check_posts():
@@ -2051,37 +2133,12 @@ async def check_posts():
                         log.info("Processing group: %d items with Location='%s', Price='%s'", 
                                 len(items_in_group), location, price)
                         
-                        # Generate unique group key for duplicate prevention
-                        group_key_hash = generate_group_key(location, price, items_in_group)
+                        # Use safe posting with proper locking and duplicate prevention
+                        success = await safe_post_grouped_embed(channel, group_key, items_in_group)
                         
-                        # Check if this group has already been posted
-                        if await is_group_already_posted(group_key_hash):
-                            log.info("Group already posted, skipping: %s", group_key_hash)
-                            continue
-                        
-                        # Delete old individual messages
-                        await delete_old_individual_messages(items_in_group)
-                        
-                        # Create and send grouped embed with ephemeral images
-                        try:
-                            grouped_embed, view = await create_grouped_embed(group_key, items_in_group)
-                            grouped_msg = await channel.send(embed=grouped_embed, view=view)
-                            
-                            # Mark group as posted in database
-                            await mark_group_posted(group_key_hash, location, price, items_in_group, 
-                                                  grouped_msg.id, channel.id)
-                            
-                            # Update all items in the group to reference the grouped message
-                            for item in items_in_group:
-                                pid = item["pid"]
-                                await update_stored_item(pid, item)
-                                await update_discord_message_info(pid, grouped_msg.id, channel.id)
-                                
-                            log.info("Posted grouped embed with %d items (key: %s)", len(items_in_group), group_key_hash[:8])
-                            await asyncio.sleep(message_delay)
-                            
-                        except discord.HTTPException as e:
-                            log.error("Failed to send grouped message: %s", e)
+                        if success:
+                            await asyncio.sleep(message_delay)  # Rate limiting
+                        else:
                             await asyncio.sleep(5)  # Longer delay on error
                     
                     else:
