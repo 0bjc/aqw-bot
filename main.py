@@ -24,11 +24,28 @@ session = requests.Session()
 
 def wikidot_login(session: requests.Session) -> bool:
     """Perform Wikidot login and store session cookies."""
+    # Debug: Check all environment variables
+    print("DEBUG: Checking environment variables...")
+    print(f"DEBUG: All env vars starting with WIKIDOT: {[k for k in os.environ.keys() if k.startswith('WIKIDOT')]}")
+    
     email = os.getenv("WIKIDOT_EMAIL")
     password = os.getenv("WIKIDOT_PASSWORD")
     
+    # Debug: Print environment variables status
+    print(f"DEBUG: WIKIDOT_EMAIL found: {email is not None}")
+    print(f"DEBUG: WIKIDOT_PASSWORD found: {password is not None}")
+    print(f"DEBUG: WIKIDOT_EMAIL value (first 3 chars): {email[:3] if email else 'None'}")
+    print(f"DEBUG: WIKIDOT_PASSWORD length: {len(password) if password else 0}")
+    
     if not email or not password:
-        print("WIKIDOT_EMAIL or WIKIDOT_PASSWORD not found in environment variables")
+        print("ERROR: WIKIDOT_EMAIL or WIKIDOT_PASSWORD not found in environment variables")
+        print("Please set these environment variables in your deployment:")
+        print("- WIKIDOT_EMAIL: your Wikidot email")
+        print("- WIKIDOT_PASSWORD: your Wikidot password")
+        print("\nDEBUG: Available environment variables:")
+        for key in sorted(os.environ.keys()):
+            if 'TOKEN' in key or 'WIKIDOT' in key or 'CHANNEL' in key:
+                print(f"  {key}: {'*' * len(os.environ[key]) if os.environ[key] else 'None'}")
         return False
     
     login_url = "https://www.wikidot.com/default--flow/login__LoginPopupScreen"
