@@ -131,7 +131,7 @@ log = logging.getLogger(__name__)
 
 # ---------------- DATABASE ----------------
 async def init_db() -> None:
-    """Initialize SQLite database with items and counters tables."""
+    """Initialize SQLite database with items, counters, and grouped_posts tables."""
     async with aiosqlite.connect(DB) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS items (
@@ -155,6 +155,21 @@ async def init_db() -> None:
             CREATE TABLE IF NOT EXISTS counters (
                 name TEXT PRIMARY KEY,
                 value INTEGER NOT NULL DEFAULT 0,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create grouped_posts table for tracking grouped posts and preventing duplicates
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS grouped_posts (
+                group_key TEXT PRIMARY KEY,
+                location TEXT NOT NULL,
+                price TEXT NOT NULL,
+                item_titles TEXT NOT NULL,
+                categories TEXT NOT NULL,
+                discord_message_id INTEGER,
+                discord_channel_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -379,7 +394,7 @@ def categorize_item(item: dict) -> str:
 
 
 def group_items_by_location_price(items: list[dict]) -> dict[tuple[str, str], list[dict]]:
-    """Group items by Location and Price."""
+    """Group items by normalized Location and Price."""
     groups = {}
     
     for item in items:
@@ -389,17 +404,16 @@ def group_items_by_location_price(items: list[dict]) -> dict[tuple[str, str], li
         price = "Unknown"
         
         # Parse location
-        import re
         loc_match = re.search(r"__\*\*Location:\*\*__\s*\n(.+?)(?=\n\n|\n__\*\*|$)", content, re.IGNORECASE | re.DOTALL)
         if loc_match:
-            location = loc_match.group(1).strip()
+            location = normalize_string(loc_match.group(1).strip())
         
         # Parse price
         price_match = re.search(r"__\*\*Price:\*\*__\s*\n(.+?)(?=\n\n|\n__\*\*|$)", content, re.IGNORECASE | re.DOTALL)
         if price_match:
-            price = price_match.group(1).strip()
+            price = normalize_string(price_match.group(1).strip())
         
-        # Create group key
+        # Create group key with normalized values
         group_key = (location, price)
         
         if group_key not in groups:
@@ -443,8 +457,8 @@ def create_categorized_item_list(items: list[dict]) -> str:
     return "\n".join(sections)
 
 
-async def create_grouped_embed(group_key: tuple[str, str], items: list[dict]) -> discord.Embed:
-    """Create a grouped embed for items with same Location and Price."""
+async def create_grouped_embed(group_key: tuple[str, str], items: list[dict]) -> tuple[discord.Embed, PublicPaneView]:
+    """Create a grouped embed for items with same Location and Price with ephemeral images."""
     location, price = group_key
     
     # Get daily gift number and generate title
@@ -480,7 +494,30 @@ async def create_grouped_embed(group_key: tuple[str, str], items: list[dict]) ->
     
     embed.set_footer(text=f"AQW Daily Gift - {len(items)} items grouped")
     
-    return embed
+    # Collect all images from all items for the ephemeral view
+    all_images = []
+    for item in items:
+        if item.get("images"):
+            all_images.extend(item.get("images", []))
+        elif item.get("image"):
+            all_images.append(item["image"])
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_images = []
+    for img in all_images:
+        if img and img not in seen:
+            seen.add(img)
+            unique_images.append(img)
+    
+    # Create view with the first image (or None if no images)
+    view = None
+    if unique_images:
+        # Create a composite title for the group
+        group_title = f"{len(items)} Items from {location}"
+        view = PublicPaneView(unique_images[0], group_title)
+    
+    return embed, view
 
 
 async def delete_old_individual_messages(items: list[dict]):
@@ -598,6 +635,107 @@ async def update_discord_message_info(pid: str, message_id: int, channel_id: int
             UPDATE items SET discord_message_id=?, discord_channel_id=?, last_updated=datetime('now')
             WHERE id=?
         """, (message_id, channel_id, pid))
+        await db.commit()
+
+
+def normalize_string(s: str) -> str:
+    """Normalize string for consistent grouping and comparison."""
+    if not s:
+        return ""
+    
+    # Convert to lowercase and strip whitespace
+    normalized = s.lower().strip()
+    
+    # Replace multiple spaces with single space
+    normalized = re.sub(r'\s+', ' ', normalized)
+    
+    # Remove extra punctuation but keep essential ones
+    normalized = re.sub(r'[^\w\s\-.,:()]', '', normalized)
+    
+    # Strip again after regex operations
+    normalized = normalized.strip()
+    
+    return normalized
+
+
+def generate_group_key(location: str, price: str, items: list[dict]) -> str:
+    """Generate a unique key for a group of items based on normalized location, price, and item titles."""
+    # Normalize location and price
+    norm_location = normalize_string(location)
+    norm_price = normalize_string(price)
+    
+    # Sort item titles for consistent key generation
+    item_titles = sorted([normalize_string(item.get("title", "")) for item in items])
+    
+    # Create a combined string for hashing
+    combined = f"{norm_location}|{norm_price}|{'|'.join(item_titles)}"
+    
+    # Generate hash for unique key
+    import hashlib
+    return hashlib.md5(combined.encode()).hexdigest()
+
+
+async def is_group_already_posted(group_key: str) -> bool:
+    """Check if a group has already been posted."""
+    async with aiosqlite.connect(DB) as db:
+        async with db.execute("SELECT 1 FROM grouped_posts WHERE group_key=?", (group_key,)) as cur:
+            return await cur.fetchone() is not None
+
+
+async def get_stored_group(group_key: str) -> dict | None:
+    """Get stored group data for comparison."""
+    async with aiosqlite.connect(DB) as db:
+        async with db.execute("""
+            SELECT group_key, location, price, item_titles, categories, discord_message_id, discord_channel_id 
+            FROM grouped_posts WHERE group_key=?
+        """, (group_key,)) as cur:
+            row = await cur.fetchone()
+            if row:
+                return {
+                    "group_key": row[0],
+                    "location": row[1],
+                    "price": row[2],
+                    "item_titles": json.loads(row[3]) if row[3] else [],
+                    "categories": json.loads(row[4]) if row[4] else [],
+                    "discord_message_id": row[5],
+                    "discord_channel_id": row[6]
+                }
+            return None
+
+
+async def mark_group_posted(group_key: str, location: str, price: str, items: list[dict], 
+                          message_id: int = None, channel_id: int = None):
+    """Mark a group as posted to avoid duplicates."""
+    # Extract item titles and categories
+    item_titles = [item.get("title", "") for item in items]
+    categories = list(set([categorize_item(item) for item in items]))  # Unique categories
+    
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("""
+            INSERT OR REPLACE INTO grouped_posts 
+            (group_key, location, price, item_titles, categories, discord_message_id, discord_channel_id, last_updated) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        """, (
+            group_key, location, price, json.dumps(item_titles), json.dumps(categories),
+            message_id, channel_id
+        ))
+        await db.commit()
+
+
+async def update_group_discord_message_info(group_key: str, message_id: int, channel_id: int):
+    """Update Discord message info for an existing group."""
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("""
+            UPDATE grouped_posts SET discord_message_id=?, discord_channel_id=?, last_updated=datetime('now')
+            WHERE group_key=?
+        """, (message_id, channel_id, group_key))
+        await db.commit()
+
+
+async def delete_group_post(group_key: str):
+    """Delete a group post record."""
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("DELETE FROM grouped_posts WHERE group_key=?", (group_key,))
         await db.commit()
 
 
@@ -1446,16 +1584,28 @@ async def check_posts():
                     
                     if len(items_in_group) >= 2:
                         # GROUPED POST: 2+ items with same Location + Price
-                        log.info("Creating grouped post: %d items with Location='%s', Price='%s'", 
+                        log.info("Processing group: %d items with Location='%s', Price='%s'", 
                                 len(items_in_group), location, price)
+                        
+                        # Generate unique group key for duplicate prevention
+                        group_key_hash = generate_group_key(location, price, items_in_group)
+                        
+                        # Check if this group has already been posted
+                        if await is_group_already_posted(group_key_hash):
+                            log.info("Group already posted, skipping: %s", group_key_hash)
+                            continue
                         
                         # Delete old individual messages
                         await delete_old_individual_messages(items_in_group)
                         
-                        # Create and send grouped embed
+                        # Create and send grouped embed with ephemeral images
                         try:
-                            grouped_embed = await create_grouped_embed(group_key, items_in_group)
-                            grouped_msg = await channel.send(embed=grouped_embed)
+                            grouped_embed, view = await create_grouped_embed(group_key, items_in_group)
+                            grouped_msg = await channel.send(embed=grouped_embed, view=view)
+                            
+                            # Mark group as posted in database
+                            await mark_group_posted(group_key_hash, location, price, items_in_group, 
+                                                  grouped_msg.id, channel.id)
                             
                             # Update all items in the group to reference the grouped message
                             for item in items_in_group:
@@ -1463,7 +1613,7 @@ async def check_posts():
                                 await update_stored_item(pid, item)
                                 await update_discord_message_info(pid, grouped_msg.id, channel.id)
                                 
-                            log.info("Posted grouped embed with %d items", len(items_in_group))
+                            log.info("Posted grouped embed with %d items (key: %s)", len(items_in_group), group_key_hash[:8])
                             await asyncio.sleep(message_delay)
                             
                         except discord.HTTPException as e:
