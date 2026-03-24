@@ -47,7 +47,7 @@ def wikidot_login(session: requests.Session) -> bool:
             # Verify we have the required Wikidot session cookies
             wikidot_cookies = [c for c in session.cookies if 'wikidot' in c.name.lower()]
             if wikidot_cookies:
-                print("Wikidot login successful")
+                print("Wikidot session active")
                 return True
             else:
                 print("Wikidot login failed: No session cookies found")
@@ -59,6 +59,34 @@ def wikidot_login(session: requests.Session) -> bool:
     except Exception as e:
         print(f"Wikidot login failed: {e}")
         return False
+
+
+def ensure_wikidot_session(session: requests.Session) -> bool:
+    """Ensure Wikidot session is active, re-login if necessary."""
+    # Check if we have session cookies
+    wikidot_cookies = [c for c in session.cookies if 'wikidot' in c.name.lower()]
+    
+    if not wikidot_cookies:
+        # No session cookies, need to login
+        return wikidot_login(session)
+    
+    # Test session by making a simple request
+    try:
+        test_url = f"{WIKI_BASE}/system:recent-changes"
+        response = session.get(test_url, timeout=10)
+        
+        # Check if we're redirected to login page or get auth errors
+        if (response.status_code in (403, 429) or 
+            'login' in response.url.lower() or 
+            'wikidot.com/default--flow/login' in response.text):
+            # Session expired, re-login
+            return wikidot_login(session)
+        
+        return True  # Session is active
+        
+    except Exception as e:
+        print(f"Session check failed: {e}")
+        return wikidot_login(session)
 
 # ---------------- CONFIG ----------------
 TOKEN = os.getenv("TOKEN")
@@ -99,6 +127,8 @@ async def init_db() -> None:
                 image TEXT,
                 images TEXT,
                 content_hash TEXT,
+                discord_message_id INTEGER,
+                discord_channel_id INTEGER,
                 last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -171,7 +201,7 @@ async def get_stored_item(pid: str) -> dict | None:
     """Get stored item data for comparison."""
     async with aiosqlite.connect(DB) as db:
         async with db.execute("""
-            SELECT id, url, title, content, price, rarity, image, images, content_hash 
+            SELECT id, url, title, content, price, rarity, image, images, content_hash, discord_message_id, discord_channel_id 
             FROM items WHERE id=?
         """, (pid,)) as cur:
             row = await cur.fetchone()
@@ -185,7 +215,9 @@ async def get_stored_item(pid: str) -> dict | None:
                     "rarity": row[5],
                     "image": row[6],
                     "images": json.loads(row[7]) if row[7] else [],
-                    "content_hash": row[8]
+                    "content_hash": row[8],
+                    "discord_message_id": row[9],
+                    "discord_channel_id": row[10]
                 }
             return None
 
@@ -214,19 +246,29 @@ async def update_stored_item(pid: str, item: dict):
         ))
         await db.commit()
 
-async def mark_posted(pid: str, item: dict):
+async def mark_posted(pid: str, item: dict, message_id: int = None, channel_id: int = None):
     """Mark an item as posted to avoid duplicates."""
     content_hash = generate_content_hash(item)
     async with aiosqlite.connect(DB) as db:
         await db.execute("""
             INSERT OR REPLACE INTO items 
-            (id, url, title, content, price, rarity, image, images, last_updated, content_hash) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+            (id, url, title, content, price, rarity, image, images, last_updated, content_hash, discord_message_id, discord_channel_id) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
         """, (
             pid, item.get("url"), item.get("title"), item.get("content"), 
             item.get("price"), item.get("rarity"), item.get("image"), 
-            json.dumps(item.get("images", [])), content_hash
+            json.dumps(item.get("images", [])), content_hash, message_id, channel_id
         ))
+        await db.commit()
+
+
+async def update_discord_message_info(pid: str, message_id: int, channel_id: int):
+    """Update Discord message info for an existing item."""
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("""
+            UPDATE items SET discord_message_id=?, discord_channel_id=?, last_updated=datetime('now')
+            WHERE id=?
+        """, (message_id, channel_id, pid))
         await db.commit()
 
 
@@ -584,6 +626,10 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
 
 def extract_item_details(page_url: str) -> dict | None:
+    # Ensure we have an active session before making requests
+    if not ensure_wikidot_session(session):
+        return None
+        
     try:
         r = session.get(
             page_url,
@@ -681,6 +727,10 @@ def _extract_recent_changes_entries() -> dict[str, datetime]:
     log.info("Starting recent changes extraction, cutoff: %s", cutoff)
 
     try:
+        # Ensure we have an active session before making requests
+        if not ensure_wikidot_session(session):
+            return page_times
+            
         res = session.get(RECENT_URL_HTTP, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
         res.raise_for_status()
         soup = BeautifulSoup(res.text, "html.parser")
@@ -735,6 +785,10 @@ def _extract_related_item_links(page_url: str, max_links: int = 25) -> list[str]
     Skips system pages and returns absolute URLs.
     """
     try:
+        # Ensure we have an active session before making requests
+        if not ensure_wikidot_session(session):
+            return []
+            
         r = session.get(page_url, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
         r.raise_for_status()
     except Exception as e:
@@ -1046,46 +1100,56 @@ async def check_posts():
                 
                 if await has_item_changed(pid, post):
                     has_new_changes = True
-                    if await is_posted(pid):
+                    stored_item = await get_stored_item(pid)
+                    
+                    if stored_item:
                         # Existing item changed - update it
                         await update_stored_item(pid, post)
                         log.info("Item changed: %s", post["title"])
                         
-                        # Try to find and update existing message
-                        existing_messages = []
-                        async for msg in channel.history(limit=100):
-                            if msg.embeds and msg.embeds[0].url == post["url"]:
-                                existing_messages.append(msg)
-                                break
-                        
-                        if existing_messages:
-                            # Update existing message
-                            try:
-                                embed, view = await create_pane_embed(post)
-                                await existing_messages[0].edit(embed=embed, view=view)
-                                log.info("Updated existing message for: %s", post["title"])
-                                await asyncio.sleep(message_delay)  # Delay after editing
-                            except discord.HTTPException as e:
-                                log.error("Failed to update message: %s", e)
-                                await asyncio.sleep(5)  # Longer delay on error
-                        else:
-                            # Create new message if not found
-                            try:
-                                embed, view = await create_pane_embed(post)
-                                await channel.send(embed=embed, view=view)
-                                log.info("Created new message for changed item: %s", post["title"])
-                                await asyncio.sleep(message_delay)  # Delay after sending
-                            except discord.HTTPException as e:
-                                log.error("Failed to send message: %s", e)
-                                await asyncio.sleep(5)  # Longer delay on error
-                    else:
-                        # New item
-                        await mark_posted(pid, post)
+                        # Try to edit existing Discord message
                         try:
                             embed, view = await create_pane_embed(post)
-                            await channel.send(embed=embed, view=view)
+                            
+                            # Get stored message info
+                            msg_id = stored_item.get("discord_message_id")
+                            ch_id = stored_item.get("discord_channel_id")
+                            
+                            if msg_id and ch_id:
+                                # Try to edit existing message
+                                target_channel = bot.get_channel(ch_id)
+                                if target_channel:
+                                    try:
+                                        existing_msg = await target_channel.fetch_message(msg_id)
+                                        embed.set_footer(text="AQW Daily Gift - Updated")
+                                        await existing_msg.edit(embed=embed, view=view)
+                                        log.info("Updated existing message for: %s", post["title"])
+                                        await asyncio.sleep(message_delay)
+                                        continue
+                                    except discord.NotFound:
+                                        log.info("Original message not found, creating new one for: %s", post["title"])
+                                    except discord.Forbidden:
+                                        log.error("No permission to edit message for: %s", post["title"])
+                                    except Exception as e:
+                                        log.error("Failed to edit message for %s: %s", post["title"], e)
+                            
+                            # Fallback: create new message
+                            new_msg = await channel.send(embed=embed, view=view)
+                            await update_discord_message_info(pid, new_msg.id, channel.id)
+                            log.info("Created new message for changed item: %s", post["title"])
+                            await asyncio.sleep(message_delay)
+                            
+                        except discord.HTTPException as e:
+                            log.error("Failed to update message: %s", e)
+                            await asyncio.sleep(5)  # Longer delay on error
+                    else:
+                        # New item
+                        try:
+                            embed, view = await create_pane_embed(post)
+                            new_msg = await channel.send(embed=embed, view=view)
+                            await mark_posted(pid, post, new_msg.id, channel.id)
                             log.info("New item: %s", post["title"])
-                            await asyncio.sleep(message_delay)  # Delay after sending
+                            await asyncio.sleep(message_delay)
                         except discord.HTTPException as e:
                             log.error("Failed to send new message: %s", e)
                             await asyncio.sleep(5)  # Longer delay on error
