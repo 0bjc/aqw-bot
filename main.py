@@ -188,12 +188,12 @@ async def get_and_increment_counter(counter_name: str) -> int:
 
 
 def generate_daily_gift_title(gift_number: int) -> str:
-    """Generate formatted daily gift title with weekday and number."""
+    """Generate formatted daily gift title with weekday (no numbering)."""
     from datetime import datetime
     weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     current_weekday = weekday_names[datetime.now().weekday()]
     
-    return f"🎁 __{current_weekday} Daily Gift #{gift_number}__ 🎁"
+    return f"🎁 __{current_weekday} Daily Gift__ 🎁"
 
 
 def generate_content_hash(item: dict) -> str:
