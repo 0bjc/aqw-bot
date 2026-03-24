@@ -648,12 +648,12 @@ async def create_grouped_embed(group_key: tuple[str, str], items: list[dict]) ->
             seen.add(img)
             unique_images.append(img)
     
-    # Create view with first image (or None if no images)
+    # Create grouped view with all images (or None if no images)
     view = None
     if unique_images:
         # Create a composite title for the group
         group_title = f"{len(items)} Items from {location}"
-        view = PublicPaneView(unique_images[0], group_title)
+        view = GroupedPaneView(items, group_title)
     
     return embed, view
 
@@ -1529,6 +1529,16 @@ class PublicPaneView(discord.ui.View):
         self.item_title = item_title
         self.add_item(ShowPaneButton(self))
 
+
+class GroupedPaneView(discord.ui.View):
+    """View for grouped messages with multi-image Show Pane button."""
+    def __init__(self, items: list[dict], group_title: str, timeout: float = None):
+        super().__init__(timeout=timeout)
+        self.items = items
+        self.group_title = group_title
+        self.current_image_index = 0
+        self.add_item(GroupedShowPaneButton(self))
+
 class ShowPaneButton(discord.ui.Button):
     """Button to show ephemeral image pane."""
     def __init__(self, view: PublicPaneView):
@@ -1556,6 +1566,176 @@ class ShowPaneButton(discord.ui.Button):
             view=EphemeralPaneView(),
             ephemeral=True
         )
+
+
+class GroupedShowPaneButton(discord.ui.Button):
+    """Button to show ephemeral multi-image pane for grouped items."""
+    def __init__(self, view: GroupedPaneView):
+        self.view_ref = view
+        super().__init__(
+            label="View ▼",
+            style=discord.ButtonStyle.secondary,
+            custom_id="show_grouped_pane"
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view_ref
+        
+        # Collect all images from all items
+        all_images = []
+        for item in view.items:
+            if item.get("images"):
+                all_images.extend(item.get("images", []))
+            elif item.get("image"):
+                all_images.append(item["image"])
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_images = []
+        for img in all_images:
+            if img and img not in seen:
+                seen.add(img)
+                unique_images.append(img)
+        
+        if not unique_images:
+            await interaction.response.send_message(
+                "No images available for this group.",
+                ephemeral=True
+            )
+            return
+        
+        # Send the first image embed with navigation controls
+        await interaction.response.send_message(
+            embed=self._create_image_embed(0, unique_images),
+            view=GroupedEphemeralPaneView(unique_images, view.group_title),
+            ephemeral=True
+        )
+    
+    def _create_image_embed(self, index: int, images: list[str]) -> discord.Embed:
+        """Create an embed for a specific image index."""
+        current_image = images[index]
+        item_title = self.view_ref.group_title
+        
+        # Find which item this image belongs to (for additional info)
+        item_info = ""
+        for item in self.view_ref.items:
+            if current_image in (item.get("images", []) + [item.get("image")]):
+                item_info = f"\n**Item:** {item.get('title', 'Unknown')}\n**Price:** {item.get('price', 'N/A')}"
+                break
+        
+        embed = discord.Embed(
+            title=f"{item_title} - Image {index + 1}/{len(images)}",
+            description=f"Use ◀️/▶️ to navigate images{item_info}\nClick 'Close ▲' to hide this preview",
+            color=discord.Color.blue()
+        )
+        embed.set_image(url=current_image)
+        return embed
+
+
+class GroupedEphemeralPaneView(discord.ui.View):
+    """View for ephemeral grouped messages with navigation and close buttons."""
+    def __init__(self, images: list[str], group_title: str, timeout: float = 600.0):
+        super().__init__(timeout=timeout)
+        self.images = images
+        self.group_title = group_title
+        self.current_index = 0
+        
+        # Add navigation buttons
+        self.add_item(GroupedPrevButton(self))
+        self.add_item(GroupedNextButton(self))
+        self.add_item(ClosePaneButton())
+        
+        # Disable prev button if we're at the first image
+        self.children[0].disabled = (len(images) <= 1)
+        # Disable next button if we're at the last image
+        if len(self.children) > 1:
+            self.children[1].disabled = (len(images) <= 1)
+
+
+class GroupedPrevButton(discord.ui.Button):
+    """Button to show previous image in grouped ephemeral pane."""
+    def __init__(self, view: GroupedEphemeralPaneView):
+        self.view_ref = view
+        super().__init__(
+            label="◀️",
+            style=discord.ButtonStyle.primary,
+            custom_id="prev_image"
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view_ref
+        if view.current_index > 0:
+            view.current_index -= 1
+            
+            # Update button states
+            view.children[0].disabled = (view.current_index == 0)
+            view.children[1].disabled = (view.current_index == len(view.images) - 1)
+            
+            await interaction.response.edit_message(
+                embed=self._create_image_embed(),
+                view=view
+            )
+        else:
+            await interaction.response.defer()  # Already at first image
+    
+    def _create_image_embed(self) -> discord.Embed:
+        """Create embed for current image."""
+        current_image = self.view_ref.images[self.view_ref.current_index]
+        
+        # Find which item this image belongs to
+        item_info = ""
+        # This would need access to the original items, but for now just show basic info
+        item_info = f"\n**Image:** {self.view_ref.current_index + 1}/{len(self.view_ref.images)}"
+        
+        embed = discord.Embed(
+            title=f"{self.view_ref.group_title} - Image {self.view_ref.current_index + 1}/{len(self.view_ref.images)}",
+            description=f"Use ◀️/▶️ to navigate images{item_info}\nClick 'Close ▲' to hide this preview",
+            color=discord.Color.blue()
+        )
+        embed.set_image(url=current_image)
+        return embed
+
+
+class GroupedNextButton(discord.ui.Button):
+    """Button to show next image in grouped ephemeral pane."""
+    def __init__(self, view: GroupedEphemeralPaneView):
+        self.view_ref = view
+        super().__init__(
+            label="▶️",
+            style=discord.ButtonStyle.primary,
+            custom_id="next_image"
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view_ref
+        if view.current_index < len(view.images) - 1:
+            view.current_index += 1
+            
+            # Update button states
+            view.children[0].disabled = (view.current_index == 0)
+            view.children[1].disabled = (view.current_index == len(view.images) - 1)
+            
+            await interaction.response.edit_message(
+                embed=self._create_image_embed(),
+                view=view
+            )
+        else:
+            await interaction.response.defer()  # Already at last image
+    
+    def _create_image_embed(self) -> discord.Embed:
+        """Create embed for current image."""
+        current_image = self.view_ref.images[self.view_ref.current_index]
+        
+        # Find which item this image belongs to
+        item_info = f"\n**Image:** {self.view_ref.current_index + 1}/{len(self.view_ref.images)}"
+        
+        embed = discord.Embed(
+            title=f"{self.view_ref.group_title} - Image {self.view_ref.current_index + 1}/{len(self.view_ref.images)}",
+            description=f"Use ◀️/▶️ to navigate images{item_info}\nClick 'Close ▲' to hide this preview",
+            color=discord.Color.blue()
+        )
+        embed.set_image(url=current_image)
+        return embed
 
 class EphemeralPaneView(discord.ui.View):
     """View for ephemeral messages with Close Pane button."""
