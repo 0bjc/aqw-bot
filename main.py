@@ -19,6 +19,47 @@ import hashlib
 import discord
 from discord.ext import commands, tasks
 
+# ---------------- WIKIDOT SESSION ----------------
+session = requests.Session()
+
+def wikidot_login(session: requests.Session) -> bool:
+    """Perform Wikidot login and store session cookies."""
+    email = os.getenv("WIKIDOT_EMAIL")
+    password = os.getenv("WIKIDOT_PASSWORD")
+    
+    if not email or not password:
+        print("WIKIDOT_EMAIL or WIKIDOT_PASSWORD not found in environment variables")
+        return False
+    
+    login_url = "https://www.wikidot.com/default--flow/login__LoginPopupScreen"
+    payload = {
+        "login": email,
+        "password": password,
+        "action": "Login"
+    }
+    
+    try:
+        response = session.post(login_url, data=payload, timeout=30)
+        
+        # Check if login was successful by looking for success indicators
+        # Wikidot typically redirects or sets specific cookies on successful login
+        if response.status_code == 200 and len(session.cookies) > 0:
+            # Verify we have the required Wikidot session cookies
+            wikidot_cookies = [c for c in session.cookies if 'wikidot' in c.name.lower()]
+            if wikidot_cookies:
+                print("Wikidot login successful")
+                return True
+            else:
+                print("Wikidot login failed: No session cookies found")
+                return False
+        else:
+            print(f"Wikidot login failed: HTTP {response.status_code}")
+            return False
+            
+    except Exception as e:
+        print(f"Wikidot login failed: {e}")
+        return False
+
 # ---------------- CONFIG ----------------
 TOKEN = os.getenv("TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1484113318095622315"))
@@ -544,7 +585,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
 def extract_item_details(page_url: str) -> dict | None:
     try:
-        r = requests.get(
+        r = session.get(
             page_url,
             timeout=8,  # Reduced timeout
             headers={"User-Agent": "aqw-wiki-bot/1.0"},
@@ -640,7 +681,7 @@ def _extract_recent_changes_entries() -> dict[str, datetime]:
     log.info("Starting recent changes extraction, cutoff: %s", cutoff)
 
     try:
-        res = requests.get(RECENT_URL_HTTP, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
+        res = session.get(RECENT_URL_HTTP, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
         res.raise_for_status()
         soup = BeautifulSoup(res.text, "html.parser")
         log.info("Fetching page: %s", RECENT_URL_HTTP)
@@ -694,7 +735,7 @@ def _extract_related_item_links(page_url: str, max_links: int = 25) -> list[str]
     Skips system pages and returns absolute URLs.
     """
     try:
-        r = requests.get(page_url, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
+        r = session.get(page_url, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
         r.raise_for_status()
     except Exception as e:
         log.warning("Failed to fetch page content for links %s: %s", page_url, e)
@@ -929,8 +970,54 @@ async def create_pane_embed(post: dict) -> tuple[discord.Embed, PublicPaneView]:
     return embed, view
 
 
+# ---------------- SMART POLLING STATE ----------------
+class SmartPolling:
+    def __init__(self):
+        self.current_interval = 60.0  # Default idle mode
+        self.last_change_timestamp = None
+        self.burst_mode = False
+        self.no_change_count = 0  # Track consecutive no-change cycles
+        
+    def update_interval(self, has_new_changes: bool, has_error: bool = False):
+        if has_error:
+            # Error backoff mode
+            self.current_interval = 90.0
+            log.info("SMART POLLING: Error backoff (90s)")
+            return
+            
+        if has_new_changes:
+            # Activity detected - enter burst mode
+            if not self.burst_mode:
+                self.burst_mode = True
+                self.current_interval = 15.0
+                log.info("SMART POLLING: Burst mode (15s)")
+            self.last_change_timestamp = datetime.now(timezone.utc)
+            self.no_change_count = 0
+        else:
+            # No changes detected
+            self.no_change_count += 1
+            
+            if self.burst_mode:
+                # Check if we should exit burst mode (3 minutes of no changes)
+                time_since_change = (datetime.now(timezone.utc) - self.last_change_timestamp).total_seconds() if self.last_change_timestamp else float('inf')
+                
+                if time_since_change > 180:  # 3 minutes
+                    self.burst_mode = False
+                    self.current_interval = 60.0
+                    log.info("SMART POLLING: Cooldown → Idle")
+                    self.no_change_count = 0
+            elif self.no_change_count >= 3 and not self.burst_mode:
+                # Safety: if we've had no changes for 3+ cycles, ensure idle mode
+                self.current_interval = 60.0
+                log.info("SMART POLLING: Idle (60s)")
+        
+        return self.current_interval
+
+# Global smart polling instance
+smart_polling = SmartPolling()
+
 # ---------------- LOOP ----------------
-@tasks.loop(seconds=60)  # Increased from 30 to 60 seconds to reduce rate limiting
+@tasks.loop(seconds=1)  # Base loop, interval managed dynamically
 async def check_posts():
     await bot.wait_until_ready()
 
@@ -941,58 +1028,77 @@ async def check_posts():
     
     # Add delay between messages to avoid rate limiting
     message_delay = 2.0  # 2 seconds between messages
-
-    posts = await asyncio.to_thread(fetch_recent_aegifts, limit=10)
-    if not posts:
-        return
     
-    for post in posts:
-        pid = urlparse(post["url"]).path.strip("/").replace("/", "-") or post["url"]
+    while True:
+        try:
+            posts = await asyncio.to_thread(fetch_recent_aegifts, limit=10)
+            
+            if posts is None:
+                # Request failed
+                smart_polling.update_interval(has_new_changes=False, has_error=True)
+                await asyncio.sleep(smart_polling.current_interval)
+                continue
+            
+            # Check for new changes
+            has_new_changes = False
+            for post in posts:
+                pid = urlparse(post["url"]).path.strip("/").replace("/", "-") or post["url"]
+                
+                if await has_item_changed(pid, post):
+                    has_new_changes = True
+                    if await is_posted(pid):
+                        # Existing item changed - update it
+                        await update_stored_item(pid, post)
+                        log.info("Item changed: %s", post["title"])
+                        
+                        # Try to find and update existing message
+                        existing_messages = []
+                        async for msg in channel.history(limit=100):
+                            if msg.embeds and msg.embeds[0].url == post["url"]:
+                                existing_messages.append(msg)
+                                break
+                        
+                        if existing_messages:
+                            # Update existing message
+                            try:
+                                embed, view = await create_pane_embed(post)
+                                await existing_messages[0].edit(embed=embed, view=view)
+                                log.info("Updated existing message for: %s", post["title"])
+                                await asyncio.sleep(message_delay)  # Delay after editing
+                            except discord.HTTPException as e:
+                                log.error("Failed to update message: %s", e)
+                                await asyncio.sleep(5)  # Longer delay on error
+                        else:
+                            # Create new message if not found
+                            try:
+                                embed, view = await create_pane_embed(post)
+                                await channel.send(embed=embed, view=view)
+                                log.info("Created new message for changed item: %s", post["title"])
+                                await asyncio.sleep(message_delay)  # Delay after sending
+                            except discord.HTTPException as e:
+                                log.error("Failed to send message: %s", e)
+                                await asyncio.sleep(5)  # Longer delay on error
+                    else:
+                        # New item
+                        await mark_posted(pid, post)
+                        try:
+                            embed, view = await create_pane_embed(post)
+                            await channel.send(embed=embed, view=view)
+                            log.info("New item: %s", post["title"])
+                            await asyncio.sleep(message_delay)  # Delay after sending
+                        except discord.HTTPException as e:
+                            log.error("Failed to send new message: %s", e)
+                            await asyncio.sleep(5)  # Longer delay on error
+            
+            # Update polling interval based on whether we found changes
+            smart_polling.update_interval(has_new_changes=has_new_changes, has_error=False)
+            
+        except Exception as e:
+            log.error("Error in check_posts loop: %s", e)
+            smart_polling.update_interval(has_new_changes=False, has_error=True)
         
-        if await has_item_changed(pid, post):
-            if await is_posted(pid):
-                # Existing item changed - update it
-                await update_stored_item(pid, post)
-                log.info("Item changed: %s", post["title"])
-                
-                # Try to find and update existing message
-                existing_messages = []
-                async for msg in channel.history(limit=100):
-                    if msg.embeds and msg.embeds[0].url == post["url"]:
-                        existing_messages.append(msg)
-                        break
-                
-                if existing_messages:
-                    # Update existing message
-                    try:
-                        embed, view = await create_pane_embed(post)
-                        await existing_messages[0].edit(embed=embed, view=view)
-                        log.info("Updated existing message for: %s", post["title"])
-                        await asyncio.sleep(message_delay)  # Delay after editing
-                    except discord.HTTPException as e:
-                        log.error("Failed to update message: %s", e)
-                        await asyncio.sleep(5)  # Longer delay on error
-                else:
-                    # Create new message if not found
-                    try:
-                        embed, view = await create_pane_embed(post)
-                        await channel.send(embed=embed, view=view)
-                        log.info("Created new message for changed item: %s", post["title"])
-                        await asyncio.sleep(message_delay)  # Delay after sending
-                    except discord.HTTPException as e:
-                        log.error("Failed to send message: %s", e)
-                        await asyncio.sleep(5)  # Longer delay on error
-            else:
-                # New item
-                await mark_posted(pid, post)
-                try:
-                    embed, view = await create_pane_embed(post)
-                    await channel.send(embed=embed, view=view)
-                    log.info("New item: %s", post["title"])
-                    await asyncio.sleep(message_delay)  # Delay after sending
-                except discord.HTTPException as e:
-                    log.error("Failed to send new message: %s", e)
-                    await asyncio.sleep(5)  # Longer delay on error
+        # Sleep for the dynamically determined interval
+        await asyncio.sleep(smart_polling.current_interval)
 
 
 
@@ -1008,7 +1114,7 @@ async def latestdrops(interaction: discord.Interaction):
     try:
         # Check the main page only
         posts = await asyncio.wait_for(
-            asyncio.to_thread(fetch_recent_aegifts_fast, 1, True),
+            asyncio.to_thread(fetch_recent_aegifts, 1, True),
             timeout=15  # Shorter timeout for single page
         )
         if not posts:
@@ -1087,6 +1193,11 @@ async def ping(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
     log.info("Logged in as %s", bot.user)
+    
+    # Perform Wikidot login once at startup
+    if not wikidot_login(session):
+        log.error("Wikidot login failed, bot will continue without authentication")
+    
     await init_db()
     if not check_posts.is_running():
         check_posts.start()
