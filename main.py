@@ -648,7 +648,7 @@ class ShowPaneButton(discord.ui.Button):
 
 
 class GroupedShowPaneButton(discord.ui.Button):
-    """Button to show ephemeral multi-image pane for grouped items."""
+    """Button to show ephemeral category-separated messages for grouped items."""
     def __init__(self, view: GroupedPaneView):
         self.view_ref = view
         super().__init__(
@@ -660,51 +660,189 @@ class GroupedShowPaneButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         view = self.view_ref
         
-        # Collect all images from all items
-        all_images = []
+        # Categorize items first
+        categorized_items = {}
         for item in view.items:
-            if item.get("images"):
-                all_images.extend(item.get("images", []))
-            elif item.get("image"):
-                all_images.append(item["image"])
+            category = categorize_item(item)
+            if category not in categorized_items:
+                categorized_items[category] = []
+            categorized_items[category].append(item)
         
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_images = []
-        for img in all_images:
-            if img and img not in seen:
-                seen.add(img)
-                unique_images.append(img)
-        
-        if not unique_images:
+        if not categorized_items:
             await interaction.response.send_message(
-                "No images available for this group.",
+                "No items available for this group.",
                 ephemeral=True
             )
             return
         
-        # Send the first image embed with navigation controls
+        # Respond to the initial interaction
         await interaction.response.send_message(
-            embed=self._create_image_embed(0, unique_images),
-            view=GroupedEphemeralPaneView(unique_images, view.group_title),
+            f"📦 Showing {len(categorized_items)} categories from {view.group_title}...",
             ephemeral=True
         )
-    
-    def _create_image_embed(self, index: int, images: list[str]) -> discord.Embed:
-        """Create an embed for a specific image index."""
-        current_image = images[index]
-        item_title = self.view_ref.group_title
         
-        # Find which item this image belongs to (for additional info)
-        item_info = ""
-        for item in self.view_ref.items:
-            if current_image in (item.get("images", []) + [item.get("image")]):
-                item_info = f"\n**Item:** {item.get('title', 'Unknown')}\n**Price:** {item.get('price', 'N/A')}"
-                break
+        # Send separate ephemeral message for each category
+        for category, items_in_category in categorized_items.items():
+            await self._send_category_message(interaction, category, items_in_category, view.group_title)
+    
+    async def _send_category_message(self, interaction: discord.Interaction, category: str, items: list[dict], group_title: str):
+        """Send a separate ephemeral message for a specific category."""
+        # Collect all images for this category
+        category_images = []
+        for item in items:
+            if item.get("images"):
+                category_images.extend(item.get("images", []))
+            elif item.get("image"):
+                category_images.append(item["image"])
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_images = []
+        for img in category_images:
+            if img and img not in seen:
+                seen.add(img)
+                unique_images.append(img)
+        
+        # Create category embed
+        embed = discord.Embed(
+            title=f"📂 {category} ({len(items)} items)",
+            description=f"From: {group_title}\n\n" + 
+                        "\n".join(f"• **{item.get('title', 'Unknown')}**\n  💰 {item.get('price', 'N/A')}" for item in items),
+            color=discord.Color.blue()
+        )
+        
+        # Add images if available
+        if unique_images:
+            # If multiple images, create a description with image count
+            if len(unique_images) > 1:
+                embed.description += f"\n\n🖼️ **{len(unique_images)} images available** - Scroll down to see all"
+            
+            # Set first image as main embed image
+            embed.set_image(url=unique_images[0])
+            
+            # Create view with navigation for this category's images
+            view = CategoryImageView(unique_images, category, group_title)
+        else:
+            # No images available
+            embed.description += f"\n\n🖼️ No images available"
+            view = None
+        
+        # Send as follow-up ephemeral message
+        try:
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        except discord.HTTPException as e:
+            log.error("Failed to send category message: %s", e)
+            # Fallback: send without images if embed is too large
+            try:
+                fallback_embed = discord.Embed(
+                    title=f"📂 {category} ({len(items)} items)",
+                    description=f"From: {group_title}\n\n" + 
+                                "\n".join(f"• **{item.get('title', 'Unknown')}**" for item in items),
+                    color=discord.Color.blue()
+                )
+                await interaction.followup.send(embed=fallback_embed, ephemeral=True)
+            except:
+                # Final fallback: send text only
+                await interaction.followup.send(
+                    f"📂 **{category}** ({len(items)} items) from {group_title}:\n" +
+                    "\n".join(f"• {item.get('title', 'Unknown')}" for item in items),
+                    ephemeral=True
+                )
+
+
+class CategoryImageView(discord.ui.View):
+    """View for navigating images within a specific category."""
+    def __init__(self, images: list[str], category: str, group_title: str, timeout: float = 600.0):
+        super().__init__(timeout=timeout)
+        self.images = images
+        self.category = category
+        self.group_title = group_title
+        self.current_index = 0
+        
+        # Add navigation buttons
+        self.add_item(CategoryPrevButton(self))
+        self.add_item(CategoryNextButton(self))
+        self.add_item(ClosePaneButton())
+        
+        # Disable prev button if we're at the first image
+        self.children[0].disabled = (len(images) <= 1)
+        # Disable next button if we're at the last image
+        if len(self.children) > 1:
+            self.children[1].disabled = (len(images) <= 1)
+
+
+class CategoryPrevButton(discord.ui.Button):
+    """Button to show previous image in category view."""
+    def __init__(self, view: CategoryImageView):
+        self.view_ref = view
+        super().__init__(
+            label="◀️",
+            style=discord.ButtonStyle.primary,
+            custom_id="category_prev_image"
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view_ref
+        if view.current_index > 0:
+            view.current_index -= 1
+            
+            # Update button states
+            view.children[0].disabled = (view.current_index == 0)
+            view.children[1].disabled = (view.current_index == len(view.images) - 1)
+            
+            await interaction.response.edit_message(
+                embed=self._create_image_embed(),
+                view=view
+            )
+        else:
+            await interaction.response.defer()  # Already at first image
+    
+    def _create_image_embed(self) -> discord.Embed:
+        """Create embed for current image."""
+        current_image = self.view_ref.images[self.view_ref.current_index]
         
         embed = discord.Embed(
-            title=f"{item_title} - Image {index + 1}/{len(images)}",
-            description=f"Use ◀️/▶️ to navigate images{item_info}\nClick 'Close ▲' to hide this preview",
+            title=f"📂 {self.view_ref.category} - Image {self.view_ref.current_index + 1}/{len(self.view_ref.images)}",
+            description=f"From: {self.view_ref.group_title}\n\nUse ◀️/▶️ to navigate images\nClick 'Close ▲' to hide this preview",
+            color=discord.Color.blue()
+        )
+        embed.set_image(url=current_image)
+        return embed
+
+
+class CategoryNextButton(discord.ui.Button):
+    """Button to show next image in category view."""
+    def __init__(self, view: CategoryImageView):
+        self.view_ref = view
+        super().__init__(
+            label="▶️",
+            style=discord.ButtonStyle.primary,
+            custom_id="category_next_image"
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view_ref
+        if view.current_index < len(view.images) - 1:
+            view.current_index += 1
+            
+            # Update button states
+            view.children[0].disabled = (view.current_index == 0)
+            view.children[1].disabled = (view.current_index == len(view.images) - 1)
+            
+            await interaction.response.edit_message(
+                embed=self._create_image_embed(),
+                view=view
+            )
+        else:
+            await interaction.response.defer()  # Already at last image
+    
+    def _create_image_embed(self) -> discord.Embed:
+        """Create embed for current image."""
+        current_image = self.view_ref.images[self.view_ref.current_index]
+        
+        embed = discord.Embed(
+            title=f"📂 {self.view_ref.category} - Image {self.view_ref.current_index + 1}/{len(self.view_ref.images)}",
+            description=f"From: {self.view_ref.group_title}\n\nUse ◀️/▶️ to navigate images\nClick 'Close ▲' to hide this preview",
             color=discord.Color.blue()
         )
         embed.set_image(url=current_image)
