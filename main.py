@@ -627,13 +627,12 @@ async def create_grouped_embed(group_key: tuple[str, str], items: list[dict]) ->
         color=0xFF4500,
     )
     
-    # Use first item's image as thumbnail if available
-    if items and items[0].get("image"):
-        embed.set_thumbnail(url=items[0]["image"])
+    # NO thumbnail for grouped embeds (as requested)
+    # Only single-item posts get thumbnail images
     
     embed.set_footer(text=f"AQW Daily Gift - {len(items)} items grouped")
     
-    # Collect all images from all items for the ephemeral view
+    # Collect all images from all items for ephemeral view
     all_images = []
     for item in items:
         if item.get("images"):
@@ -649,7 +648,7 @@ async def create_grouped_embed(group_key: tuple[str, str], items: list[dict]) ->
             seen.add(img)
             unique_images.append(img)
     
-    # Create view with the first image (or None if no images)
+    # Create view with first image (or None if no images)
     view = None
     if unique_images:
         # Create a composite title for the group
