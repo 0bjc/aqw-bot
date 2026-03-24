@@ -2,4 +2,3 @@ discord.py
 requests
 beautifulsoup4
 aiosqlite
-Pillow
