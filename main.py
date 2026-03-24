@@ -8,102 +8,15 @@ import textwrap
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlparse, parse_qs
+from PIL import Image
 import io
 
 import aiosqlite
 import requests
 from bs4 import BeautifulSoup
-import json
-import hashlib
 
 import discord
 from discord.ext import commands, tasks
-
-# ---------------- WIKIDOT SESSION ----------------
-session = requests.Session()
-
-def wikidot_login(session: requests.Session) -> bool:
-    """Perform Wikidot login and store session cookies."""
-    # Debug: Check all environment variables
-    print("DEBUG: Checking environment variables...")
-    print(f"DEBUG: All env vars starting with WIKIDOT: {[k for k in os.environ.keys() if k.startswith('WIKIDOT')]}")
-    
-    email = os.getenv("WIKIDOT_EMAIL")
-    password = os.getenv("WIKIDOT_PASSWORD")
-    
-    # Debug: Print environment variables status
-    print(f"DEBUG: WIKIDOT_EMAIL found: {email is not None}")
-    print(f"DEBUG: WIKIDOT_PASSWORD found: {password is not None}")
-    print(f"DEBUG: WIKIDOT_EMAIL value (first 3 chars): {email[:3] if email else 'None'}")
-    print(f"DEBUG: WIKIDOT_PASSWORD length: {len(password) if password else 0}")
-    
-    if not email or not password:
-        print("ERROR: WIKIDOT_EMAIL or WIKIDOT_PASSWORD not found in environment variables")
-        print("Please set these environment variables in your deployment:")
-        print("- WIKIDOT_EMAIL: your Wikidot email")
-        print("- WIKIDOT_PASSWORD: your Wikidot password")
-        print("\nDEBUG: Available environment variables:")
-        for key in sorted(os.environ.keys()):
-            if 'TOKEN' in key or 'WIKIDOT' in key or 'CHANNEL' in key:
-                print(f"  {key}: {'*' * len(os.environ[key]) if os.environ[key] else 'None'}")
-        return False
-    
-    login_url = "https://www.wikidot.com/default--flow/login__LoginPopupScreen"
-    payload = {
-        "login": email,
-        "password": password,
-        "action": "Login"
-    }
-    
-    try:
-        response = session.post(login_url, data=payload, timeout=30)
-        
-        # Check if login was successful by looking for success indicators
-        # Wikidot typically redirects or sets specific cookies on successful login
-        if response.status_code == 200 and len(session.cookies) > 0:
-            # Verify we have the required Wikidot session cookies
-            wikidot_cookies = [c for c in session.cookies if 'wikidot' in c.name.lower()]
-            if wikidot_cookies:
-                print("Wikidot session active")
-                return True
-            else:
-                print("Wikidot login failed: No session cookies found")
-                return False
-        else:
-            print(f"Wikidot login failed: HTTP {response.status_code}")
-            return False
-            
-    except Exception as e:
-        print(f"Wikidot login failed: {e}")
-        return False
-
-
-def ensure_wikidot_session(session: requests.Session) -> bool:
-    """Ensure Wikidot session is active, re-login if necessary."""
-    # Check if we have session cookies
-    wikidot_cookies = [c for c in session.cookies if 'wikidot' in c.name.lower()]
-    
-    if not wikidot_cookies:
-        # No session cookies, need to login
-        return wikidot_login(session)
-    
-    # Test session by making a simple request
-    try:
-        test_url = f"{WIKI_BASE}/system:recent-changes"
-        response = session.get(test_url, timeout=10)
-        
-        # Check if we're redirected to login page or get auth errors
-        if (response.status_code in (403, 429) or 
-            'login' in response.url.lower() or 
-            'wikidot.com/default--flow/login' in response.text):
-            # Session expired, re-login
-            return wikidot_login(session)
-        
-        return True  # Session is active
-        
-    except Exception as e:
-        print(f"Session check failed: {e}")
-        return wikidot_login(session)
 
 # ---------------- CONFIG ----------------
 TOKEN = os.getenv("TOKEN")
@@ -130,957 +43,132 @@ log = logging.getLogger(__name__)
 
 
 # ---------------- DATABASE ----------------
-async def init_db() -> None:
-    """Initialize SQLite database with items, counters, and grouped_posts tables."""
+async def init_db():
+    """Initialize the SQLite database for tracking posted items with grouping."""
     async with aiosqlite.connect(DB) as db:
+        # Create items table for individual items
         await db.execute("""
             CREATE TABLE IF NOT EXISTS items (
                 id TEXT PRIMARY KEY,
-                url TEXT NOT NULL,
-                title TEXT NOT NULL,
+                url TEXT UNIQUE,
+                title TEXT,
                 content TEXT,
                 price TEXT,
                 rarity TEXT,
                 image TEXT,
-                images TEXT,
-                content_hash TEXT,
-                discord_message_id INTEGER,
-                discord_channel_id INTEGER,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                group_key TEXT,
+                created_at TIMESTAMP
             )
         """)
         
-        # Create counters table for daily gift numbering
+        # Create groups table for message tracking
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS counters (
-                name TEXT PRIMARY KEY,
-                value INTEGER NOT NULL DEFAULT 0,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Create grouped_posts table for tracking grouped posts and preventing duplicates
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS grouped_posts (
+            CREATE TABLE IF NOT EXISTS groups (
                 group_key TEXT PRIMARY KEY,
-                location TEXT NOT NULL,
-                price TEXT NOT NULL,
-                item_titles TEXT NOT NULL,
-                categories TEXT NOT NULL,
-                discord_message_id INTEGER,
-                discord_channel_id INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                message_id TEXT,
+                channel_id TEXT,
+                last_updated TIMESTAMP
             )
         """)
         
-        # Initialize daily gift counter if it doesn't exist
-        await db.execute("""
-            INSERT OR IGNORE INTO counters (name, value) VALUES ('daily_gift', 0)
-        """)
-        
         await db.commit()
 
 
-async def get_and_increment_counter(counter_name: str) -> int:
-    """Get current counter value and increment it atomically."""
-    async with aiosqlite.connect(DB) as db:
-        # Get current value and increment in one transaction
-        async with db.execute("SELECT value FROM counters WHERE name = ?", (counter_name,)) as cur:
-            result = await cur.fetchone()
-            if result is None:
-                # Counter doesn't exist, create it
-                await db.execute("INSERT INTO counters (name, value) VALUES (?, 1)", (counter_name,))
-                new_value = 1
-            else:
-                current_value = result[0]
-                new_value = current_value + 1
-                await db.execute("UPDATE counters SET value = ?, last_updated = CURRENT_TIMESTAMP WHERE name = ?", 
-                               (new_value, counter_name))
-        
-        await db.commit()
-        return new_value
-
-
-def generate_daily_gift_title(gift_number: int) -> str:
-    """Generate formatted daily gift title with weekday (no numbering)."""
-    from datetime import datetime
-    weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    current_weekday = weekday_names[datetime.now().weekday()]
+def make_group_key(item: dict) -> str:
+    """Generate group key from item fields for grouping."""
+    # Get normalized fields
+    loc = (item.get("content", "") or "").lower()
+    price = (item.get("price", "") or "").lower()
+    rarity = (item.get("rarity", "") or "").lower()
     
-    return f"🎁 __{current_weekday} Daily Gift__ 🎁"
-
-
-def extract_breadcrumb_category(html_content: str, page_url: str = "") -> str:
-    """Extract specific category or weapon type from Wikidot breadcrumb navigation and URL path."""
-    try:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html_content, "html.parser")
-        
-        # Define all possible categories including weapon types
-        weapon_types = [
-            "Axes", "Bows", "Daggers", "Gauntlets", "Guns", "HandGuns", 
-            "Maces", "Polearms", "Rifles", "Staffs", "Swords", "Wands", "Whips"
-        ]
-        
-        main_categories = ["Weapon", "Armor", "Helm", "Cape", "Pet"]
-        all_categories = main_categories + weapon_types
-        
-        # Method 1: Extract from URL path
-        url_category = extract_category_from_url(page_url, weapon_types, main_categories)
-        if url_category and url_category != "No category found":
-            log.debug("Category from URL: %s for %s", url_category, page_url)
-            return url_category
-        
-        # Method 2: Extract from breadcrumb navigation
-        breadcrumb_category = extract_from_breadcrumbs(soup, all_categories)
-        if breadcrumb_category and breadcrumb_category != "No category found":
-            log.debug("Category from breadcrumb: %s", breadcrumb_category)
-            return breadcrumb_category
-        
-        return "No category found"
-        
-    except Exception as e:
-        log.error("Error extracting breadcrumb category: %s", e)
-        return "No category found"
-
-
-def extract_category_from_url(page_url: str, weapon_types: list[str], main_categories: list[str]) -> str:
-    """Extract category from URL path."""
-    if not page_url:
-        return "No category found"
+    # Extract locations and normalize
+    loc_match = re.search(r"locations?\s*:?\s*(.+)", loc, re.IGNORECASE)
+    if loc_match:
+        locations = loc_match.group(1).strip()
+    else:
+        locations = ""
     
-    # Parse URL path
-    from urllib.parse import urlparse
-    parsed = urlparse(page_url)
-    path_parts = [part.lower() for part in parsed.path.split('/') if part]
+    # Build group key from normalized fields
+    key_parts = []
+    if locations and locations != "n/a":
+        key_parts.append(f"loc:{locations}")
+    if price and price != "n/a":
+        key_parts.append(f"price:{price}")
+    if rarity and rarity != "n/a":
+        key_parts.append(f"rarity:{rarity}")
     
-    # Check for weapon types in URL path
-    for weapon_type in weapon_types:
-        if weapon_type.lower() in path_parts:
-            return weapon_type
-    
-    # Check for main categories in URL path
-    for category in main_categories:
-        if category.lower() in path_parts:
-            return category
-    
-    return "No category found"
-
-
-def extract_from_breadcrumbs(soup: BeautifulSoup, all_categories: list[str]) -> str:
-    """Extract category from breadcrumb elements."""
-    # Look for breadcrumb navigation - common patterns on Wikidot
-    breadcrumb_selectors = [
-        "#breadcrumbs",  # Standard Wikidot breadcrumb ID
-        ".breadcrumbs",  # Alternative class
-        ".breadcrumb",   # Another common class
-        "#breadcrumb-container",  # Container
-        ".nav-path",     # Navigation path
-        ".page-path",    # Page path
-        ".site-path",    # Site path
-    ]
-    
-    breadcrumb_text = None
-    
-    for selector in breadcrumb_selectors:
-        breadcrumb_el = soup.select_one(selector)
-        if breadcrumb_el:
-            breadcrumb_text = breadcrumb_el.get_text(" ", strip=True)
-            break
-    
-    # If no structured breadcrumb found, try to find breadcrumb-like text
-    if not breadcrumb_text:
-        # Look for text patterns that look like breadcrumbs
-        # Common pattern: "Site » Category » Subcategory » Page"
-        for element in soup.find_all(text=True):
-            text = element.strip()
-            if "»" in text and len(text.split("»")) >= 3:
-                breadcrumb_text = text
-                break
-    
-    if not breadcrumb_text:
-        # Try to find navigation links that form a breadcrumb trail
-        nav_links = soup.select("a[href*='/']")
-        if len(nav_links) >= 3:
-            # Check if consecutive links might form a breadcrumb
-            breadcrumb_parts = []
-            for link in nav_links[:5]:  # Check first 5 links
-                link_text = link.get_text(strip=True)
-                if link_text and link_text not in breadcrumb_parts:
-                    breadcrumb_parts.append(link_text)
-            
-            if len(breadcrumb_parts) >= 3:
-                breadcrumb_text = " » ".join(breadcrumb_parts)
-    
-    if breadcrumb_text:
-        # Normalize breadcrumb text for comparison
-        breadcrumb_lower = breadcrumb_text.lower()
-        
-        # Check for specific weapon types first (more specific)
-        for category in all_categories:
-            if category.lower() in breadcrumb_lower:
-                return category
-        
-        # Check for plural forms and variations
-        variations = {
-            "Weapon": ["weapons"],
-            "Armor": ["armors", "armour"],
-            "Helm": ["helms", "helmets", "headgear"],
-            "Cape": ["capes", "cloaks", "mantles"],
-            "Pet": ["pets", "companions", "mounts"],
-            "Axes": ["axe"],
-            "Bows": ["bow"],
-            "Daggers": ["dagger"],
-            "Gauntlets": ["gauntlet"],
-            "Guns": ["gun"],
-            "HandGuns": ["handgun"],
-            "Maces": ["mace"],
-            "Polearms": ["polearm"],
-            "Rifles": ["rifle"],
-            "Staffs": ["staff"],
-            "Swords": ["sword"],
-            "Wands": ["wand"],
-            "Whips": ["whip"]
-        }
-        
-        for category, variants in variations.items():
-            for variant in variants:
-                if variant in breadcrumb_lower:
-                    return category
-        
-        # If no specific category found, return the breadcrumb for debugging
-        log.debug("Breadcrumb found but no category: %s", breadcrumb_text)
-        return "No category found"
-    
-    return "No category found"
+    return "|".join(sorted(key_parts))
 
 
 def categorize_item(item: dict) -> str:
-    """Categorize an item using breadcrumb data first, then fallback to keywords."""
-    # First, try to extract category from breadcrumb if we have the HTML
-    if "html_content" in item:
-        breadcrumb_category = extract_breadcrumb_category(item["html_content"], item.get("url", ""))
-        if breadcrumb_category != "No category found":
-            log.info("Category from breadcrumb: %s for %s", breadcrumb_category, item.get("title", "Unknown"))
-            return breadcrumb_category
-    
-    # Fallback to keyword-based categorization with specific weapon types
+    """Categorize an item using keyword-based detection."""
     title = item.get("title", "").lower()
     content = item.get("content", "").lower()
-    title_icons = item.get("title_icons", "").lower()
     
-    # Specific weapon type keywords
-    axe_keywords = ["axe", "hatchet", "battleaxe", "cleaver", "splitter"]
-    bow_keywords = ["bow", "archery", "crossbow", "longbow", "shortbow", "compound"]
-    dagger_keywords = ["dagger", "knife", "shiv", "stiletto", "blade", "dirk"]
-    gauntlet_keywords = ["gauntlet", "glove", "fist", "hand", "punch"]
-    gun_keywords = ["gun", "firearm", "pistol", "revolver", "shotgun"]
-    handgun_keywords = ["handgun", "pistol", "revolver", "sidearm"]
-    mace_keywords = ["mace", "club", "morningstar", "flail", "bludgeon"]
-    polearm_keywords = ["polearm", "spear", "lance", "pike", "halberd", "trident"]
-    rifle_keywords = ["rifle", "sniper", "carbine", "assault", "musket"]
-    staff_keywords = ["staff", "rod", "wand", "stick", "quarterstaff"]
-    sword_keywords = ["sword", "blade", "saber", "katana", "rapier", "scimitar", "claymore"]
-    wand_keywords = ["wand", "magic", "spell", "arcane", "mystic"]
-    whip_keywords = ["whip", "lash", "chain", "rope", "flail"]
-    
-    # Main category keywords (fallback)
-    armor_keywords = [
-        "armor", "armour", "plate", "mail", "chain", "scale", "leather", "cloth",
-        "robe", "tunic", "vest", "chest", "breastplate", "cuirass", "defense"
-    ]
-    
-    helm_keywords = [
-        "helm", "helmet", "hood", "mask", "crown", "tiara", "circlet", "hat",
-        "cap", "head", "skull", "visor", "coif", "headgear", "helmets"
-    ]
-    
-    cape_keywords = [
-        "cape", "cloak", "mantle", "shawl", "wrap", "scarf", "drape", "cover",
-        "back", "wings", "wing", "jetpack", "pack", "backpack"
-    ]
-    
-    pet_keywords = [
-        "pet", "companion", "familiar", "mount", "rider", "dragon", "wolf", "bear",
-        "cat", "dog", "bird", "eagle", "hawk", "phoenix", "lion", "tiger", "snake",
-        "summon", "minion", "ally", "creature", "beast", "animal"
-    ]
-    
-    # Check all sources for category indicators - specific weapon types first
-    
-    # Check title first (most reliable)
-    if any(keyword in title for keyword in axe_keywords):
-        return "Axes"
-    if any(keyword in title for keyword in bow_keywords):
-        return "Bows"
-    if any(keyword in title for keyword in dagger_keywords):
-        return "Daggers"
-    if any(keyword in title for keyword in gauntlet_keywords):
-        return "Gauntlets"
-    if any(keyword in title for keyword in gun_keywords):
-        return "Guns"
-    if any(keyword in title for keyword in handgun_keywords):
-        return "HandGuns"
-    if any(keyword in title for keyword in mace_keywords):
-        return "Maces"
-    if any(keyword in title for keyword in polearm_keywords):
-        return "Polearms"
-    if any(keyword in title for keyword in rifle_keywords):
-        return "Rifles"
-    if any(keyword in title for keyword in staff_keywords):
-        return "Staffs"
-    if any(keyword in title for keyword in sword_keywords):
-        return "Swords"
-    if any(keyword in title for keyword in wand_keywords):
-        return "Wands"
-    if any(keyword in title for keyword in whip_keywords):
-        return "Whips"
-    
-    # Check main categories as fallback
-    if any(keyword in title for keyword in armor_keywords):
-        return "Armor"
-    if any(keyword in title for keyword in helm_keywords):
-        return "Helm"
-    if any(keyword in title for keyword in cape_keywords):
-        return "Cape"
-    if any(keyword in title for keyword in pet_keywords):
-        return "Pet"
-    
-    # Check content if title doesn't match
-    if any(keyword in content for keyword in axe_keywords):
-        return "Axes"
-    if any(keyword in content for keyword in bow_keywords):
-        return "Bows"
-    if any(keyword in content for keyword in dagger_keywords):
-        return "Daggers"
-    if any(keyword in content for keyword in gauntlet_keywords):
-        return "Gauntlets"
-    if any(keyword in content for keyword in gun_keywords):
-        return "Guns"
-    if any(keyword in content for keyword in handgun_keywords):
-        return "HandGuns"
-    if any(keyword in content for keyword in mace_keywords):
-        return "Maces"
-    if any(keyword in content for keyword in polearm_keywords):
-        return "Polearms"
-    if any(keyword in content for keyword in rifle_keywords):
-        return "Rifles"
-    if any(keyword in content for keyword in staff_keywords):
-        return "Staffs"
-    if any(keyword in content for keyword in sword_keywords):
-        return "Swords"
-    if any(keyword in content for keyword in wand_keywords):
-        return "Wands"
-    if any(keyword in content for keyword in whip_keywords):
-        return "Whips"
-    
-    if any(keyword in content for keyword in armor_keywords):
-        return "Armor"
-    if any(keyword in content for keyword in helm_keywords):
-        return "Helm"
-    if any(keyword in content for keyword in cape_keywords):
-        return "Cape"
-    if any(keyword in content for keyword in pet_keywords):
-        return "Pet"
-    
-    # Check title icons (tags)
-    if any(keyword in title_icons for keyword in axe_keywords):
-        return "Axes"
-    if any(keyword in title_icons for keyword in bow_keywords):
-        return "Bows"
-    if any(keyword in title_icons for keyword in dagger_keywords):
-        return "Daggers"
-    if any(keyword in title_icons for keyword in gauntlet_keywords):
-        return "Gauntlets"
-    if any(keyword in title_icons for keyword in gun_keywords):
-        return "Guns"
-    if any(keyword in title_icons for keyword in handgun_keywords):
-        return "HandGuns"
-    if any(keyword in title_icons for keyword in mace_keywords):
-        return "Maces"
-    if any(keyword in title_icons for keyword in polearm_keywords):
-        return "Polearms"
-    if any(keyword in title_icons for keyword in rifle_keywords):
-        return "Rifles"
-    if any(keyword in title_icons for keyword in staff_keywords):
-        return "Staffs"
-    if any(keyword in title_icons for keyword in sword_keywords):
-        return "Swords"
-    if any(keyword in title_icons for keyword in wand_keywords):
-        return "Wands"
-    if any(keyword in title_icons for keyword in whip_keywords):
-        return "Whips"
-    
-    if any(keyword in title_icons for keyword in armor_keywords):
-        return "Armor"
-    if any(keyword in title_icons for keyword in helm_keywords):
-        return "Helm"
-    if any(keyword in title_icons for keyword in cape_keywords):
-        return "Cape"
-    if any(keyword in title_icons for keyword in pet_keywords):
-        return "Pet"
-    
-    return "Misc"
-
-
-def group_items_by_location_price(items: list[dict]) -> dict[tuple[str, str], list[dict]]:
-    """Group items by normalized Location and Price."""
-    groups = {}
-    
-    for item in items:
-        # Extract location and price from content
-        content = item.get("content", "")
-        location = "Unknown"
-        price = "Unknown"
+    # Define category mappings with proper singular/plural forms
+    category_mappings = {
+        # Weapon types (singular -> plural)
+        "axe": "axes",
+        "bow": "bows", 
+        "dagger": "daggers",
+        "gauntlet": "gauntlets",
+        "gun": "guns",
+        "handgun": "handguns",
+        "mace": "maces",
+        "polearm": "polearms",
+        "rifle": "rifles",
+        "staff": "staffs",
+        "sword": "swords",
+        "wand": "wands",
+        "whip": "whips",
         
-        # Parse location
-        loc_match = re.search(r"__\*\*Location:\*\*__\s*\n(.+?)(?=\n\n|\n__\*\*|$)", content, re.IGNORECASE | re.DOTALL)
-        if loc_match:
-            location = normalize_string(loc_match.group(1).strip())
-        
-        # Parse price
-        price_match = re.search(r"__\*\*Price:\*\*__\s*\n(.+?)(?=\n\n|\n__\*\*|$)", content, re.IGNORECASE | re.DOTALL)
-        if price_match:
-            price = normalize_string(price_match.group(1).strip())
-        
-        # Create group key with normalized values
-        group_key = (location, price)
-        
-        if group_key not in groups:
-            groups[group_key] = []
-        groups[group_key].append(item)
-    
-    return groups
-
-
-def create_categorized_item_list(items: list[dict]) -> str:
-    """Create a categorized list of items with clickable links including specific weapon types."""
-    # Define category order - weapon types first, then main categories
-    category_order = [
-        # Weapon Types (specific)
-        "Axes", "Bows", "Daggers", "Gauntlets", "Guns", "HandGuns", 
-        "Maces", "Polearms", "Rifles", "Staffs", "Swords", "Wands", "Whips",
-        # Main Categories
-        "Weapon", "Armor", "Helm", "Cape", "Pet", 
-        # Fallback
-        "Misc"
-    ]
-    
-    # Categorize items
-    categorized = {}
-    for item in items:
-        category = categorize_item(item)
-        if category not in categorized:
-            categorized[category] = []
-        categorized[category].append(item)
-    
-    # Build output in order
-    sections = []
-    for category in category_order:
-        if category in categorized and categorized[category]:
-            sections.append(f"__**{category}:**__")
-            for item in categorized[category]:
-                title = item.get("title", "Unknown")
-                url = item.get("url", "")
-                if url:
-                    sections.append(f"• [{title}]({url})")
-                else:
-                    sections.append(f"• {title}")
-            sections.append("")  # Empty line between categories
-    
-    # Remove trailing empty line and join
-    if sections and sections[-1] == "":
-        sections.pop()
-    
-    return "\n".join(sections)
-
-
-# ---------------- UI COMPONENTS ----------------
-# Move view classes here to avoid forward reference issues
-
-class PublicPaneView(discord.ui.View):
-    """View for public messages with Show Pane button."""
-    def __init__(self, image_url: str, item_title: str, timeout: float = None):
-        super().__init__(timeout=timeout)
-        self.image_url = image_url
-        self.item_title = item_title
-        self.add_item(ShowPaneButton(self))
-
-
-class GroupedPaneView(discord.ui.View):
-    """View for grouped messages with multi-image Show Pane button."""
-    def __init__(self, items: list[dict], group_title: str, timeout: float = None):
-        super().__init__(timeout=timeout)
-        self.items = items
-        self.group_title = group_title
-        self.current_image_index = 0
-        self.add_item(GroupedShowPaneButton(self))
-
-
-class ShowPaneButton(discord.ui.Button):
-    """Button to show ephemeral image pane."""
-    def __init__(self, view: PublicPaneView):
-        self.view_ref = view
-        super().__init__(
-            label="View ▼",
-            style=discord.ButtonStyle.secondary,
-            custom_id="show_pane"
-        )
-    
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view_ref
-        
-        # Create ephemeral embed with image
-        embed = discord.Embed(
-            title=f"{view.item_title} - Image Preview",
-            description="Click 'Close ▲' to hide this preview",
-            color=discord.Color.blue()
-        )
-        embed.set_image(url=view.image_url)
-        
-        # Create ephemeral message with close button
-        await interaction.response.send_message(
-            embed=embed,
-            view=EphemeralPaneView(),
-            ephemeral=True
-        )
-
-
-class GroupedShowPaneButton(discord.ui.Button):
-    """Button to show ephemeral category-separated messages for grouped items."""
-    def __init__(self, view: GroupedPaneView):
-        self.view_ref = view
-        super().__init__(
-            label="View ▼",
-            style=discord.ButtonStyle.secondary,
-            custom_id="show_grouped_pane"
-        )
-    
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view_ref
-        
-        # Categorize items first
-        categorized_items = {}
-        for item in view.items:
-            category = categorize_item(item)
-            if category not in categorized_items:
-                categorized_items[category] = []
-            categorized_items[category].append(item)
-        
-        if not categorized_items:
-            await interaction.response.send_message(
-                "No items available for this group.",
-                ephemeral=True
-            )
-            return
-        
-        # Defer the interaction to avoid timeout, but don't send initial message
-        await interaction.response.defer(ephemeral=True)
-        
-        # Send separate ephemeral message for each category
-        for category, items_in_category in categorized_items.items():
-            await self._send_category_message(interaction, category, items_in_category, view.group_title)
-    
-    async def _send_category_message(self, interaction: discord.Interaction, category: str, items: list[dict], group_title: str):
-        """Send a separate ephemeral message for a specific category."""
-        # Collect all images for this category
-        category_images = []
-        for item in items:
-            if item.get("images"):
-                category_images.extend(item.get("images", []))
-            elif item.get("image"):
-                category_images.append(item["image"])
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_images = []
-        for img in category_images:
-            if img and img not in seen:
-                seen.add(img)
-                unique_images.append(img)
-        
-        # Create category embed
-        embed = discord.Embed(
-            title=f"📂 {category} ({len(items)} items)",
-            description=f"From: {group_title}\n\n" + 
-                        "\n".join(f"• **{item.get('title', 'Unknown')}**\n  💰 {item.get('price', 'N/A')}" for item in items),
-            color=discord.Color.blue()
-        )
-        
-        # Add images if available
-        if unique_images:
-            # If multiple images, create a description with image count
-            if len(unique_images) > 1:
-                embed.description += f"\n\n🖼️ **{len(unique_images)} images available** - Scroll down to see all"
-            
-            # Set first image as main embed image
-            embed.set_image(url=unique_images[0])
-            
-            # Create view with navigation for this category's images
-            view = CategoryImageView(unique_images, category, group_title)
-        else:
-            # No images available
-            embed.description += f"\n\n🖼️ No images available"
-            view = None
-        
-        # Send as follow-up ephemeral message
-        try:
-            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-        except discord.HTTPException as e:
-            log.error("Failed to send category message: %s", e)
-            # Fallback: send without images if embed is too large
-            try:
-                fallback_embed = discord.Embed(
-                    title=f"📂 {category} ({len(items)} items)",
-                    description=f"From: {group_title}\n\n" + 
-                                "\n".join(f"• **{item.get('title', 'Unknown')}**" for item in items),
-                    color=discord.Color.blue()
-                )
-                await interaction.followup.send(embed=fallback_embed, ephemeral=True)
-            except:
-                # Final fallback: send text only
-                await interaction.followup.send(
-                    f"📂 **{category}** ({len(items)} items) from {group_title}:\n" +
-                    "\n".join(f"• {item.get('title', 'Unknown')}" for item in items),
-                    ephemeral=True
-                )
-
-
-class CategoryImageView(discord.ui.View):
-    """View for navigating images within a specific category."""
-    def __init__(self, images: list[str], category: str, group_title: str, timeout: float = 600.0):
-        super().__init__(timeout=timeout)
-        self.images = images
-        self.category = category
-        self.group_title = group_title
-        self.current_index = 0
-        
-        # Add navigation buttons
-        self.add_item(CategoryPrevButton(self))
-        self.add_item(CategoryNextButton(self))
-        self.add_item(ClosePaneButton())
-        
-        # Disable prev button if we're at the first image
-        self.children[0].disabled = (len(images) <= 1)
-        # Disable next button if we're at the last image
-        if len(self.children) > 1:
-            self.children[1].disabled = (len(images) <= 1)
-
-
-class CategoryPrevButton(discord.ui.Button):
-    """Button to show previous image in category view."""
-    def __init__(self, view: CategoryImageView):
-        self.view_ref = view
-        super().__init__(
-            label="◀️",
-            style=discord.ButtonStyle.primary,
-            custom_id="category_prev_image"
-        )
-    
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view_ref
-        if view.current_index > 0:
-            view.current_index -= 1
-            
-            # Update button states
-            view.children[0].disabled = (view.current_index == 0)
-            view.children[1].disabled = (view.current_index == len(view.images) - 1)
-            
-            await interaction.response.edit_message(
-                embed=self._create_image_embed(),
-                view=view
-            )
-        else:
-            await interaction.response.defer()  # Already at first image
-    
-    def _create_image_embed(self) -> discord.Embed:
-        """Create embed for current image."""
-        current_image = self.view_ref.images[self.view_ref.current_index]
-        
-        embed = discord.Embed(
-            title=f"📂 {self.view_ref.category} - Image {self.view_ref.current_index + 1}/{len(self.view_ref.images)}",
-            description=f"From: {self.view_ref.group_title}\n\nUse ◀️/▶️ to navigate images\nClick 'Close ▲' to hide this preview",
-            color=discord.Color.blue()
-        )
-        embed.set_image(url=current_image)
-        return embed
-
-
-class CategoryNextButton(discord.ui.Button):
-    """Button to show next image in category view."""
-    def __init__(self, view: CategoryImageView):
-        self.view_ref = view
-        super().__init__(
-            label="▶️",
-            style=discord.ButtonStyle.primary,
-            custom_id="category_next_image"
-        )
-    
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view_ref
-        if view.current_index < len(view.images) - 1:
-            view.current_index += 1
-            
-            # Update button states
-            view.children[0].disabled = (view.current_index == 0)
-            view.children[1].disabled = (view.current_index == len(view.images) - 1)
-            
-            await interaction.response.edit_message(
-                embed=self._create_image_embed(),
-                view=view
-            )
-        else:
-            await interaction.response.defer()  # Already at last image
-    
-    def _create_image_embed(self) -> discord.Embed:
-        """Create embed for current image."""
-        current_image = self.view_ref.images[self.view_ref.current_index]
-        
-        embed = discord.Embed(
-            title=f"📂 {self.view_ref.category} - Image {self.view_ref.current_index + 1}/{len(self.view_ref.images)}",
-            description=f"From: {self.view_ref.group_title}\n\nUse ◀️/▶️ to navigate images\nClick 'Close ▲' to hide this preview",
-            color=discord.Color.blue()
-        )
-        embed.set_image(url=current_image)
-        return embed
-
-
-class GroupedEphemeralPaneView(discord.ui.View):
-    """View for ephemeral grouped messages with navigation and close buttons."""
-    def __init__(self, images: list[str], group_title: str, timeout: float = 600.0):
-        super().__init__(timeout=timeout)
-        self.images = images
-        self.group_title = group_title
-        self.current_index = 0
-        
-        # Add navigation buttons
-        self.add_item(GroupedPrevButton(self))
-        self.add_item(GroupedNextButton(self))
-        self.add_item(ClosePaneButton())
-        
-        # Disable prev button if we're at the first image
-        self.children[0].disabled = (len(images) <= 1)
-        # Disable next button if we're at the last image
-        if len(self.children) > 1:
-            self.children[1].disabled = (len(images) <= 1)
-
-
-class GroupedPrevButton(discord.ui.Button):
-    """Button to show previous image in grouped ephemeral pane."""
-    def __init__(self, view: GroupedEphemeralPaneView):
-        self.view_ref = view
-        super().__init__(
-            label="◀️",
-            style=discord.ButtonStyle.primary,
-            custom_id="prev_image"
-        )
-    
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view_ref
-        if view.current_index > 0:
-            view.current_index -= 1
-            
-            # Update button states
-            view.children[0].disabled = (view.current_index == 0)
-            view.children[1].disabled = (view.current_index == len(view.images) - 1)
-            
-            await interaction.response.edit_message(
-                embed=self._create_image_embed(),
-                view=view
-            )
-        else:
-            await interaction.response.defer()  # Already at first image
-    
-    def _create_image_embed(self) -> discord.Embed:
-        """Create embed for current image."""
-        current_image = self.view_ref.images[self.view_ref.current_index]
-        
-        # Find which item this image belongs to
-        item_info = ""
-        # This would need access to the original items, but for now just show basic info
-        item_info = f"\n**Image:** {self.view_ref.current_index + 1}/{len(self.view_ref.images)}"
-        
-        embed = discord.Embed(
-            title=f"{self.view_ref.group_title} - Image {self.view_ref.current_index + 1}/{len(self.view_ref.images)}",
-            description=f"Use ◀️/▶️ to navigate images{item_info}\nClick 'Close ▲' to hide this preview",
-            color=discord.Color.blue()
-        )
-        embed.set_image(url=current_image)
-        return embed
-
-
-class GroupedNextButton(discord.ui.Button):
-    """Button to show next image in grouped ephemeral pane."""
-    def __init__(self, view: GroupedEphemeralPaneView):
-        self.view_ref = view
-        super().__init__(
-            label="▶️",
-            style=discord.ButtonStyle.primary,
-            custom_id="next_image"
-        )
-    
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view_ref
-        if view.current_index < len(view.images) - 1:
-            view.current_index += 1
-            
-            # Update button states
-            view.children[0].disabled = (view.current_index == 0)
-            view.children[1].disabled = (view.current_index == len(view.images) - 1)
-            
-            await interaction.response.edit_message(
-                embed=self._create_image_embed(),
-                view=view
-            )
-        else:
-            await interaction.response.defer()  # Already at last image
-    
-    def _create_image_embed(self) -> discord.Embed:
-        """Create embed for current image."""
-        current_image = self.view_ref.images[self.view_ref.current_index]
-        
-        # Find which item this image belongs to
-        item_info = f"\n**Image:** {self.view_ref.current_index + 1}/{len(self.view_ref.images)}"
-        
-        embed = discord.Embed(
-            title=f"{self.view_ref.group_title} - Image {self.view_ref.current_index + 1}/{len(self.view_ref.images)}",
-            description=f"Use ◀️/▶️ to navigate images{item_info}\nClick 'Close ▲' to hide this preview",
-            color=discord.Color.blue()
-        )
-        embed.set_image(url=current_image)
-        return embed
-
-
-class EphemeralPaneView(discord.ui.View):
-    """View for ephemeral messages with Close Pane button."""
-    def __init__(self, timeout: float = 600.0):  # 10 minutes timeout
-        super().__init__(timeout=timeout)
-        self.add_item(ClosePaneButton())
-
-
-class ClosePaneButton(discord.ui.Button):
-    """Button to close ephemeral pane."""
-    def __init__(self):
-        super().__init__(
-            label="Close ▲",
-            style=discord.ButtonStyle.danger,
-            custom_id="close_pane"
-        )
-    
-    async def callback(self, interaction: discord.Interaction):
-        # Dismiss the ephemeral message
-        await interaction.response.defer()  # Acknowledge the interaction
-        try:
-            await interaction.delete_original_response()  # Delete the original ephemeral message
-        except:
-            # If deletion fails, try editing to empty
-            await interaction.followup.edit_message(
-                content="",
-                embed=None,
-                view=None
-            )
-
-
-# ---------------- EMBED CREATION ----------------
-async def create_grouped_embed(group_key: tuple[str, str], items: list[dict]) -> tuple[discord.Embed, GroupedPaneView]:
-    """Create a grouped embed for items with same Location and Price with ephemeral images."""
-    location, price = group_key
-    
-    # Get daily gift number and generate title
-    gift_number = await get_and_increment_counter("daily_gift")
-    title = generate_daily_gift_title(gift_number)
-    
-    # Create categorized item list
-    item_list = create_categorized_item_list(items)
-    
-    # Build description
-    description_parts = [
-        f"**Location:** {location}",
-        f"**Price:** {price}",
-        "",
-        item_list
-    ]
-    
-    description = "\n".join(description_parts)
-    
-    # Truncate if needed (Discord embed limit is 4096)
-    if len(description) > 4096:
-        description = description[:4090] + "..."
-    
-    embed = discord.Embed(
-        title=title.upper(),
-        description=description,
-        color=0xFF4500,
-    )
-    
-    # NO thumbnail for grouped embeds (as requested)
-    # Only single-item posts get thumbnail images
-    
-    embed.set_footer(text=f"AQW Daily Gift - {len(items)} items grouped")
-    
-    # Collect all images from all items for ephemeral view
-    all_images = []
-    for item in items:
-        if item.get("images"):
-            all_images.extend(item.get("images", []))
-        elif item.get("image"):
-            all_images.append(item["image"])
-    
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_images = []
-    for img in all_images:
-        if img and img not in seen:
-            seen.add(img)
-            unique_images.append(img)
-    
-    # Create grouped view with all images (or None if no images)
-    view = None
-    if unique_images:
-        # Create a composite title for the group
-        group_title = f"{len(items)} Items from {location}"
-        view = GroupedPaneView(items, group_title)
-    
-    return embed, view
-
-
-async def delete_old_individual_messages(items: list[dict]):
-    """Delete old individual messages for items that are now grouped."""
-    for item in items:
-        pid = urlparse(item["url"]).path.strip("/").replace("/", "-") or item["url"]
-        stored_item = await get_stored_item(pid)
-        
-        if stored_item:
-            msg_id = stored_item.get("discord_message_id")
-            ch_id = stored_item.get("discord_channel_id")
-            
-            if msg_id and ch_id:
-                try:
-                    target_channel = bot.get_channel(ch_id)
-                    if target_channel:
-                        existing_msg = await target_channel.fetch_message(msg_id)
-                        await existing_msg.delete()
-                        log.info("Deleted old individual message for grouped item: %s", item["title"])
-                except discord.NotFound:
-                    log.debug("Old message not found (already deleted): %s", item["title"])
-                except discord.Forbidden:
-                    log.warning("No permission to delete old message: %s", item["title"])
-                except Exception as e:
-                    log.error("Failed to delete old message for %s: %s", item["title"], e)
-
-
-def generate_content_hash(item: dict) -> str:
-    """Generate hash for change detection."""
-    content_data = {
-        "title": item.get("title", ""),
-        "content": item.get("content", ""),
-        "price": item.get("price", ""),
-        "rarity": item.get("rarity", ""),
-        "images": sorted(item.get("images", []))  # Sort for consistent hashing
+        # Main categories (singular -> plural)
+        "weapon": "weapons",
+        "armor": "armors", 
+        "helm": "helms",
+        "cape": "capes",
+        "pet": "pets"
     }
-    content_str = json.dumps(content_data, sort_keys=True)
-    return hashlib.md5(content_str.encode()).hexdigest()
+    
+    # Check keywords in title and content
+    for singular, plural in category_mappings.items():
+        if singular in title or singular in content:
+            return plural
+    
+    # Fallback to misc
+    return "misc"
+
+
+def format_category_header(category: str, item_count: int) -> str:
+    """Format category header with proper singular/plural form."""
+    # Irregular plurals mapping (plural -> singular)
+    singular_forms = {
+        "axes": "axe",
+        "bows": "bow", 
+        "daggers": "dagger",
+        "gauntlets": "gauntlet",
+        "guns": "gun",
+        "handguns": "handgun",
+        "maces": "mace",
+        "polearms": "polearm",
+        "rifles": "rifle",
+        "staffs": "staff",
+        "swords": "sword",
+        "wands": "wand",
+        "whips": "whip",
+        "weapons": "weapon",
+        "armors": "armor",
+        "helms": "helm", 
+        "capes": "cape",
+        "pets": "pet",
+        "misc": "misc"
+    }
+    
+    # Use singular form for 1 item, plural for multiple
+    if item_count == 1:
+        return f"**{singular_forms.get(category, category)}:**"
+    else:
+        return f"**{category.capitalize()}:**"
 
 async def is_posted(pid: str) -> bool:
     """Check if item is already posted."""
@@ -1088,259 +176,14 @@ async def is_posted(pid: str) -> bool:
         async with db.execute("SELECT 1 FROM items WHERE id=?", (pid,)) as cur:
             return await cur.fetchone() is not None
 
-async def get_stored_item(pid: str) -> dict | None:
-    """Get stored item data for comparison."""
-    async with aiosqlite.connect(DB) as db:
-        async with db.execute("""
-            SELECT id, url, title, content, price, rarity, image, images, content_hash, discord_message_id, discord_channel_id 
-            FROM items WHERE id=?
-        """, (pid,)) as cur:
-            row = await cur.fetchone()
-            if row:
-                return {
-                    "id": row[0],
-                    "url": row[1], 
-                    "title": row[2],
-                    "content": row[3],
-                    "price": row[4],
-                    "rarity": row[5],
-                    "image": row[6],
-                    "images": json.loads(row[7]) if row[7] else [],
-                    "content_hash": row[8],
-                    "discord_message_id": row[9],
-                    "discord_channel_id": row[10]
-                }
-            return None
-
-async def has_item_changed(pid: str, new_item: dict) -> bool:
-    """Check if item has changed since last posting."""
-    stored = await get_stored_item(pid)
-    if not stored:
-        return True  # New item
-    
-    new_hash = generate_content_hash(new_item)
-    return stored["content_hash"] != new_hash
-
-async def update_stored_item(pid: str, item: dict):
-    """Update stored item data with changes."""
-    content_hash = generate_content_hash(item)
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            UPDATE items SET 
-                title=?, content=?, price=?, rarity=?, image=?, images=?, 
-                last_updated=datetime('now'), content_hash=?
-            WHERE id=?
-        """, (
-            item.get("title"), item.get("content"), item.get("price"), 
-            item.get("rarity"), item.get("image"), json.dumps(item.get("images", [])),
-            content_hash, pid
-        ))
-        await db.commit()
-
-async def mark_posted(pid: str, item: dict, message_id: int = None, channel_id: int = None):
+async def mark_posted(pid: str, item: dict):
     """Mark an item as posted to avoid duplicates."""
-    content_hash = generate_content_hash(item)
     async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            INSERT OR REPLACE INTO items 
-            (id, url, title, content, price, rarity, image, images, last_updated, content_hash, discord_message_id, discord_channel_id) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
-        """, (
-            pid, item.get("url"), item.get("title"), item.get("content"), 
-            item.get("price"), item.get("rarity"), item.get("image"), 
-            json.dumps(item.get("images", [])), content_hash, message_id, channel_id
-        ))
+        await db.execute("INSERT OR IGNORE INTO items (id, url, title, content, price, rarity, image, group_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))", 
+                          (pid, item.get("url"), item.get("title"), item.get("content"), 
+                           item.get("price"), item.get("rarity"), item.get("image"), 
+                           make_group_key(item)))
         await db.commit()
-
-
-async def update_discord_message_info(pid: str, message_id: int, channel_id: int):
-    """Update Discord message info for an existing item."""
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            UPDATE items SET discord_message_id=?, discord_channel_id=?, last_updated=datetime('now')
-            WHERE id=?
-        """, (message_id, channel_id, pid))
-        await db.commit()
-
-
-def normalize_string(s: str) -> str:
-    """Normalize string for consistent grouping and comparison with aggressive cleaning."""
-    if not s:
-        return ""
-    
-    # Convert to lowercase and strip whitespace
-    normalized = s.lower().strip()
-    
-    # Replace multiple whitespace with single space
-    normalized = re.sub(r'\s+', ' ', normalized)
-    
-    # Remove common Wikidot formatting artifacts
-    normalized = re.sub(r'__\*\*(.*?)\*\*__', r'\1', normalized)  # Remove bold formatting
-    normalized = re.sub(r'\*\*(.*?)\*\*', r'\1', normalized)     # Remove simple bold
-    normalized = re.sub(r'__(.*?)__', r'\1', normalized)         # Remove underline
-    normalized = re.sub(r'~~(.*?)~~', r'\1', normalized)         # Remove strikethrough
-    
-    # Remove extra punctuation but keep essential ones
-    normalized = re.sub(r'[^\w\s\-.,:()\/]', '', normalized)
-    
-    # Normalize common variations
-    normalized = re.sub(r'n/a', 'na', normalized)  # Normalize N/A variations
-    normalized = re.sub(r'ac\s*$', 'ac', normalized)  # Normalize AC currency
-    
-    # Strip again after regex operations
-    normalized = normalized.strip()
-    
-    return normalized
-
-
-def generate_group_key(location: str, price: str, items: list[dict]) -> str:
-    """Generate a stable unique key for a group of items with robust normalization."""
-    # Normalize location and price with aggressive cleaning
-    norm_location = normalize_string(location)
-    norm_price = normalize_string(price)
-    
-    # Create a more stable item signature
-    item_signatures = []
-    for item in items:
-        # Use multiple fields for stability
-        title = normalize_string(item.get("title", ""))
-        url = normalize_string(item.get("url", ""))
-        
-        # Create item signature from title and URL (URL is more stable than title)
-        item_sig = f"{title}|{url}"
-        item_signatures.append(item_sig)
-    
-    # Sort signatures for consistent ordering
-    item_signatures.sort()
-    
-    # Create combined string with separator that won't appear in normalized data
-    combined = f"{norm_location}||{norm_price}||{'||'.join(item_signatures)}"
-    
-    # Generate hash for unique key
-    import hashlib
-    return hashlib.md5(combined.encode('utf-8')).hexdigest()
-
-
-async def is_group_already_posted(group_key: str) -> bool:
-    """Check if a group has already been posted with atomic operation."""
-    async with aiosqlite.connect(DB) as db:
-        # Use immediate lock for atomic check
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            async with db.execute("SELECT 1 FROM grouped_posts WHERE group_key=?", (group_key,)) as cur:
-                exists = await cur.fetchone() is not None
-            await db.commit()
-            return exists
-        except Exception:
-            await db.rollback()
-            raise
-
-
-async def get_stored_group(group_key: str) -> dict | None:
-    """Get stored group data for comparison."""
-    async with aiosqlite.connect(DB) as db:
-        async with db.execute("""
-            SELECT group_key, location, price, item_titles, categories, discord_message_id, discord_channel_id 
-            FROM grouped_posts WHERE group_key=?
-        """, (group_key,)) as cur:
-            row = await cur.fetchone()
-            if row:
-                return {
-                    "group_key": row[0],
-                    "location": row[1],
-                    "price": row[2],
-                    "item_titles": json.loads(row[3]) if row[3] else [],
-                    "categories": json.loads(row[4]) if row[4] else [],
-                    "discord_message_id": row[5],
-                    "discord_channel_id": row[6]
-                }
-            return None
-
-
-async def mark_group_posted(group_key: str, location: str, price: str, items: list[dict], 
-                          message_id: int = None, channel_id: int = None):
-    """Mark a group as posted to avoid duplicates with atomic operation."""
-    # Extract item titles and categories
-    item_titles = [item.get("title", "") for item in items]
-    categories = list(set([categorize_item(item) for item in items]))  # Unique categories
-    
-    async with aiosqlite.connect(DB) as db:
-        # Use immediate lock for atomic operation
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            await db.execute("""
-                INSERT OR REPLACE INTO grouped_posts 
-                (group_key, location, price, item_titles, categories, discord_message_id, discord_channel_id, last_updated) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-            """, (
-                group_key, location, price, json.dumps(item_titles), json.dumps(categories),
-                message_id, channel_id
-            ))
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
-
-
-async def update_group_discord_message_info(group_key: str, message_id: int, channel_id: int):
-    """Update Discord message info for an existing group."""
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            UPDATE grouped_posts SET discord_message_id=?, discord_channel_id=?, last_updated=datetime('now')
-            WHERE group_key=?
-        """, (message_id, channel_id, group_key))
-        await db.commit()
-
-
-async def delete_group_post(group_key: str):
-    """Delete a group post record."""
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("DELETE FROM grouped_posts WHERE group_key=?", (group_key,))
-        await db.commit()
-
-
-async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_group: list[dict]) -> bool:
-    """Safely post a grouped embed with proper locking and duplicate prevention."""
-    global posting_lock
-    
-    async with posting_lock:  # Prevent race conditions
-        location, price = group_key
-        
-        # Generate stable group key
-        group_key_hash = generate_group_key(location, price, items_in_group)
-        
-        # Double-check if already posted (within lock)
-        if await is_group_already_posted(group_key_hash):
-            log.info("Group already posted (double-check), skipping: %s", group_key_hash[:8])
-            return False
-        
-        try:
-            # Delete old individual messages first
-            await delete_old_individual_messages(items_in_group)
-            
-            # Create and send grouped embed
-            grouped_embed, view = await create_grouped_embed(group_key, items_in_group)
-            grouped_msg = await channel.send(embed=grouped_embed, view=view)
-            
-            # Mark group as posted atomically
-            await mark_group_posted(group_key_hash, location, price, items_in_group, 
-                                  grouped_msg.id, channel.id)
-            
-            # Update all items in the group to reference the grouped message
-            for item in items_in_group:
-                pid = item["pid"]
-                await update_stored_item(pid, item)
-                await update_discord_message_info(pid, grouped_msg.id, channel.id)
-            
-            log.info("✅ Posted grouped embed with %d items (key: %s)", len(items_in_group), group_key_hash[:8])
-            return True
-            
-        except discord.HTTPException as e:
-            log.error("❌ Failed to send grouped message: %s", e)
-            return False
-        except Exception as e:
-            log.error("❌ Unexpected error posting group: %s", e)
-            return False
 
 
 # ---------------- HELPERS ----------------
@@ -1425,44 +268,83 @@ def _wrap_lines(text: str) -> str:
     """Wrap lines to Discord's 4096 character limit with word boundaries."""
     if not text:
         return ""
-    # Don't wrap - preserve original structure and spacing
-    return text
+    wrapped = textwrap.fill(text, width=WRAP_WIDTH, replace_whitespace=False, break_long_words=False)
+    return wrapped
 
 
-
-
-def _extract_all_images(content_el: BeautifulSoup) -> list[str]:
-    """Extract ALL item images from Wikidot tabview sections."""
-    images = []
+def generate_collage(image_urls: list[str]) -> bytes:
+    """Generate a collage from multiple item images."""
+    if not image_urls:
+        return None
     
-    # Find all images in the content
+    # Download images temporarily
+    images = []
+    for url in image_urls:
+        try:
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                img_data = io.BytesIO(response.content)
+                img = Image.open(img_data)
+                images.append(img)
+        except Exception as e:
+            log.warning(f"Failed to download image {url}: {e}")
+            continue
+    
+    if not images:
+        return None
+    
+    # Determine layout based on number of images
+    n = len(images)
+    if n == 1:
+        # Single image - use original
+        return io.BytesIO(response.content)
+    elif n == 2:
+        # Two images - side by side
+        width, height = max(img.width for img in images), max(img.height for img in images)
+        collage = Image.new('RGBA', (width * 2, height), (255, 255, 255, 0))
+        collage.paste(images[0], (0, 0))
+        collage.paste(images[1], (width, 0))
+    elif n <= 4:
+        # 3-4 images - 2x2 grid
+        width, height = max(img.width for img in images), max(img.height for img in images)
+        collage = Image.new('RGBA', (width * 2, height * 2), (255, 255, 255, 0))
+        for i, img in enumerate(images):
+            x = (i % 2) * width
+            y = (i // 2) * height
+            collage.paste(img, (x, y))
+    else:
+        # 5-9 images - square grid
+        size = int((300 * 300) ** 0.5)  # Approximate square layout
+        grid_size = int(size ** 0.5)
+        collage = Image.new('RGBA', (grid_size, grid_size), (255, 255, 255, 0))
+        img_size = size // len(images)
+        for i, img in enumerate(images):
+            x = (i % grid_size) * img_size
+            y = (i // grid_size) * img_size
+            # Resize images to uniform size
+            resized_img = img.resize((img_size, img_size), Image.Resampling.LANCZOS)
+            collage.paste(resized_img, (x, y))
+    
+    # Convert to bytes
+    img_bytes = io.BytesIO()
+    collage.save(img_bytes, format='PNG')
+    img_bytes.seek(0)
+    return img_bytes.getvalue()
+
+
+def _extract_imgur_image(content_el: BeautifulSoup) -> str | None:
+    # Prefer actual item image (usually i.imgur.com / imgur.com) but skip thumbnails/icons.
     for img in content_el.select("img[src]"):
         src = img.get("src")
         if not src:
             continue
-        
         s = src.lower()
-        # Skip thumbnails/icons/spacers
         if any(x in s for x in ("pixel", "spacer", "icon", "thumb")):
             continue
-            
-        # Include all valid images (imgur and others)
-        if any(x in s for x in ("imgur.com", "i.imgur.com", ".png", ".jpg", ".jpeg", ".gif")):
-            # Convert relative URLs to absolute
-            if not src.startswith(("http://", "https://")):
-                src = urljoin(WIKI_BASE, src)
-            images.append(src)
-    
-    return images
-
-def _extract_imgur_image(content_el: BeautifulSoup) -> str | None:
-    """Legacy function - returns first imgur image for backward compatibility."""
-    images = _extract_all_images(content_el)
-    # Return first imgur image for compatibility
-    for img in images:
-        if "imgur.com" in img.lower():
-            return img
-    return images[0] if images else None
+        full = _make_absolute(src, None)
+        if "imgur.com" in full.lower():
+            return full
+    return None
 
 
 def _extract_title_icons(soup: BeautifulSoup) -> str | None:
@@ -1527,63 +409,61 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    text = re.sub(
-        r"Also see\s*:?\s*.+?(?=(?:Notes?\s*:?)|(?:Thanks to\s*)|$)",
-        "",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    text = re.sub(
-        r"Thanks to\s*:?\s*.+?(?=(?:Notes?\s*:?)|$)",
-        "",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
 
     def _norm(val: str) -> str:
         val = re.sub(r"system:page-tags/tag/[^ \n]+", "", val, flags=re.IGNORECASE)
-        # Only clean up system tags, preserve original structure
+        # Keep newlines so multi-value fields (like multiple locations) can be listed.
+        val = re.sub(r"[ \t]+", " ", val)
+        val = re.sub(r"\n{3,}", "\n\n", val)
         val = val.strip()
         return val
 
     def _format_list(val: str) -> str:
         """
-        Preserve original line structure including dash connections.
+        Convert a multi-value field into Discord-friendly line items.
+        Preserves original formatting including dashes and line connections.
         """
         v = (val or "").strip()
         if not v or v.upper() == "N/A":
             return "N/A"
 
-        # Only normalize excessive spaces, preserve structure and dashes
+        # Normalize multiple spaces but preserve single spaces and original structure
         v = re.sub(r"[ \t]+", " ", v).strip()
         
-        # Handle dash connections - join lines where dash indicates continuation
-        lines = v.split("\n")
-        result_lines = []
-        current_line = ""
+        # Split by newlines first to preserve original line structure
+        lines = [ln.strip() for ln in v.split("\n") if ln.strip()]
         
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-                
-            if line == "-":
-                # Dash separator - connect to previous line
-                if current_line:
-                    current_line += " - "
-                continue
-            elif current_line and not current_line.endswith(" - "):
-                # Previous line complete, start new line
-                result_lines.append(current_line)
-                current_line = line
-            else:
-                # Continue current line or start new line
-                current_line += line if current_line.endswith(" - ") else f" {line}"
-        
-        if current_line:
-            result_lines.append(current_line)
-        
-        return "\n".join(result_lines)
+        if len(lines) > 1:
+            # Join lines with spaces to preserve connections like "Phlegethon Arena Trophies - Phlegethon Arena"
+            # but keep different location groups on separate lines
+            formatted_lines = []
+            current_line = ""
+            
+            for line in lines:
+                if line == "-":
+                    # Dash separator, join with previous line
+                    if current_line:
+                        current_line += " - "
+                    continue
+                elif current_line and not current_line.endswith(" - "):
+                    # Previous line was complete, start new line
+                    formatted_lines.append(current_line)
+                    current_line = line
+                else:
+                    # Continue current line (after dash or first line)
+                    current_line += line if current_line.endswith(" - ") else f" {line}"
+            
+            if current_line:
+                formatted_lines.append(current_line)
+            
+            return "\n".join(formatted_lines)
+
+        # Fallback: comma-separated values
+        if "," in v:
+            parts = [p.strip() for p in v.split(",") if p.strip()]
+            return "\n".join(parts) if parts else v
+
+        return v
 
     # Capture only the important fields
     loc = "N/A"
@@ -1595,7 +475,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Location field
     m_loc = re.search(
-        r"Locations?\s*:?\s*(?P<val>.+?)\s*(?=(?:Price\s*:?)|(?:Dropped by\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|$)",
+        r"Locations?\s*:?\s*(?P<val>.+?)\s*(?=(?:Price\s*:?)|(?:Dropped by\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -1604,19 +484,16 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Price field
     m_price = re.search(
-        r"Price\s*:?\s*(?P<val>[\s\S]*?)(?=\s*Rarity\s*:|\s*Dropped by\s*:|\s*Notes?\s*:|\s*Also see\s*:|\s*Thanks to\s*:|$)",
+        r"Price\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Dropped by\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
-        flags=re.IGNORECASE,
+        flags=re.IGNORECASE | re.DOTALL,
     )
     if m_price:
-        price_raw = m_price.group("val")
-        # Clean up price formatting but preserve quest text structure and parentheses
-        price = re.sub(r"\s+", " ", price_raw.strip())
-        price = price.strip()
+        price = _norm(m_price.group("val"))
 
     # Dropped by field (when Price is N/A)
     m_dropped = re.search(
-        r"Dropped by\s*:?\s*(?P<val>.+?)\s*(?=(?:Merge the following\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|$)",
+        r"Dropped by\s*:?\s*(?P<val>.+?)\s*(?=(?:Merge the following\s*:?)|(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -1627,7 +504,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Merge the following field
     m_merge = re.search(
-        r"Merge the following\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|$)",
+        r"Merge the following\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity\s*:?)|(?:Notes\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|$)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -1638,7 +515,7 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Rarity field - more specific to stop at Note field
     m_rarity = re.search(
-        r"Rarity\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity Description\s*:?)|(?:Notes?\s*:?)|(?:Also see\s*:?)|\Z)",
+        r"Rarity\s*:?\s*(?P<val>.+?)\s*(?=(?:Rarity Description\s*:?)|(?:Notes?\s*:?)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|\Z)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
@@ -1647,21 +524,20 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Note field - capture only the first Note: occurrence
     m_note = re.search(
-        r"Notes?\s*:?\s*(?P<val>.+?)(?=(?:\n\s*Notes?\s*:)|\Z)",
+        r"Notes?\s*:?\s*(?P<val>.+?)(?=(?:\n\s*Notes?\s*:)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|\Z)",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
     if not m_note:
         # Try singular "Note:" pattern
         m_note = re.search(
-            r"Note\s*:?\s*(?P<val>.+?)(?=(?:\n\s*Note\s*:)|\Z)",
+            r"Note\s*:?\s*(?P<val>.+?)(?=(?:\n\s*Note\s*:)|(?:Also see\s*:?)|(?:Thanks to\s*:?)|\Z)",
             text,
             flags=re.IGNORECASE | re.DOTALL,
         )
     if m_note:
         candidate = _norm(m_note.group("val"))
-        # Skip note if it only contains "Also see:" content
-        if candidate and candidate.lower() not in {"n/a", "na"} and not re.search(r'^\s*(?:also see\s*:?.*|see\s*:?.*)\s*$', candidate, re.IGNORECASE):
+        if candidate and candidate.lower() not in {"n/a", "na"}:
             note = candidate
 
     def _price_is_na(p: str) -> bool:
@@ -1670,25 +546,25 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Assemble only the important fields
     parts: list[str] = [
-        f"__**Location:**__\n{_format_list(loc)}",
+        f"**Location:**\n{_format_list(loc)}",
     ]
 
     if _price_is_na(price):
         # When Price is N/A, show Dropped by / Merge the following
         if dropped_by:
-            parts.append(f"__**Dropped by:**__\n{_format_list(dropped_by)}")
+            parts.append(f"**Dropped by:**\n{_format_list(dropped_by)}")
         if merge_following:
-            parts.append(f"__**Merge the following:**__\n{_format_list(merge_following)}")
+            parts.append(f"**Merge the following:**\n{_format_list(merge_following)}")
         # Fallback if neither exists
         if not dropped_by and not merge_following:
-            parts.append(f"__**Price:**__\n{_format_list(price)}")
+            parts.append(f"**Price:**\n{_format_list(price)}")
     else:
-        parts.append(f"__**Price:**__\n{_format_list(price)}")
+        parts.append(f"**Price:**\n{_format_list(price)}")
 
-    parts.append(f"__**Rarity:**__\n{_format_list(rarity)}")
+    parts.append(f"**Rarity:**\n{_format_list(rarity)}")
 
     if note:
-        parts.append(f"__**Note:**__\n{_format_list(note)}")
+        parts.append(f"**Note:**\n{_format_list(note)}")
         log.info("Found note field: %s", note)
 
     structured = "\n\n".join(parts).strip()
@@ -1697,12 +573,8 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
 
 def extract_item_details(page_url: str) -> dict | None:
-    # Ensure we have an active session before making requests
-    if not ensure_wikidot_session(session):
-        return None
-        
     try:
-        r = session.get(
+        r = requests.get(
             page_url,
             timeout=8,  # Reduced timeout
             headers={"User-Agent": "aqw-wiki-bot/1.0"},
@@ -1769,9 +641,7 @@ def extract_item_details(page_url: str) -> dict | None:
         # Never break scraping due to debug-only logging.
         pass
 
-    # Extract ALL images for collage generation
-    img_urls = _extract_all_images(content_el)
-    img_url = _extract_imgur_image(content_el)  # Keep for backward compatibility
+    img_url = _extract_imgur_image(content_el)
 
     if len(cleaned) > MAX_DESC_LENGTH:
         cleaned = cleaned[: MAX_DESC_LENGTH - 3] + "..."
@@ -1781,10 +651,8 @@ def extract_item_details(page_url: str) -> dict | None:
         "content": cleaned or "No item info available.",
         "price": price,
         "image": img_url,
-        "images": img_urls,  # All images for collage
         "url": page_url,
         "title_icons": title_icons,
-        "html_content": r.text,  # Include full HTML for breadcrumb parsing
     }
 
 
@@ -1799,11 +667,7 @@ def _extract_recent_changes_entries() -> dict[str, datetime]:
     log.info("Starting recent changes extraction, cutoff: %s", cutoff)
 
     try:
-        # Ensure we have an active session before making requests
-        if not ensure_wikidot_session(session):
-            return page_times
-            
-        res = session.get(RECENT_URL_HTTP, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
+        res = requests.get(RECENT_URL_HTTP, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
         res.raise_for_status()
         soup = BeautifulSoup(res.text, "html.parser")
         log.info("Fetching page: %s", RECENT_URL_HTTP)
@@ -1857,11 +721,7 @@ def _extract_related_item_links(page_url: str, max_links: int = 25) -> list[str]
     Skips system pages and returns absolute URLs.
     """
     try:
-        # Ensure we have an active session before making requests
-        if not ensure_wikidot_session(session):
-            return []
-            
-        r = session.get(page_url, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
+        r = requests.get(page_url, timeout=15, headers={"User-Agent": "aqw-wiki-bot/1.0"})
         r.raise_for_status()
     except Exception as e:
         log.warning("Failed to fetch page content for links %s: %s", page_url, e)
@@ -1986,7 +846,6 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
     return results
 
 
-
 def create_embed(post: dict) -> discord.Embed:
     wrapped_content = _wrap_lines(post["content"])
     # Remove title_icons to eliminate aegift hyperlink below item name
@@ -2000,89 +859,14 @@ def create_embed(post: dict) -> discord.Embed:
         url=post["url"],
         color=0xFF4500,
     )
-    # Note: Image will be handled by ShowPaneView, not set here initially
+    if post.get("image"):
+        embed.set_image(url=post["image"])
     embed.set_footer(text="AQW Daily Gift")
     return embed
 
-async def create_pane_embed(post: dict) -> tuple[discord.Embed, PublicPaneView]:
-    """Create an embed with Show Pane functionality for images."""
-    wrapped_content = _wrap_lines(post["content"])
-    # Remove title_icons to eliminate aegift hyperlink below item name
-    desc = f"{wrapped_content}\n\n[View on Wiki]({post['url']})"
-    if len(desc) > 4096:
-        desc = desc[:4090] + "..."
-
-    # Get daily gift number and generate title
-    gift_number = await get_and_increment_counter("daily_gift")
-    title = generate_daily_gift_title(gift_number)
-
-    embed = discord.Embed(
-        title=title.upper(),
-        description=f"⠀\n**[{post['title']}]({post['url']})**\n\n{desc}",
-        color=0xFF4500,
-    )
-    # Note: Image will be shown in ephemeral message only
-    embed.set_footer(text="AQW Daily Gift")
-    
-    # Create view with image URL if available
-    view = None
-    if post.get("image"):
-        view = PublicPaneView(post["image"], post["title"])
-    
-    return embed, view
-
-
-# ---------------- SMART POLLING STATE ----------------
-class SmartPolling:
-    def __init__(self):
-        self.current_interval = 60.0  # Default idle mode
-        self.last_change_timestamp = None
-        self.burst_mode = False
-        self.no_change_count = 0  # Track consecutive no-change cycles
-        
-    def update_interval(self, has_new_changes: bool, has_error: bool = False):
-        if has_error:
-            # Error backoff mode
-            self.current_interval = 90.0
-            log.info("SMART POLLING: Error backoff (90s)")
-            return
-            
-        if has_new_changes:
-            # Activity detected - enter burst mode
-            if not self.burst_mode:
-                self.burst_mode = True
-                self.current_interval = 15.0
-                log.info("SMART POLLING: Burst mode (15s)")
-            self.last_change_timestamp = datetime.now(timezone.utc)
-            self.no_change_count = 0
-        else:
-            # No changes detected
-            self.no_change_count += 1
-            
-            if self.burst_mode:
-                # Check if we should exit burst mode (3 minutes of no changes)
-                time_since_change = (datetime.now(timezone.utc) - self.last_change_timestamp).total_seconds() if self.last_change_timestamp else float('inf')
-                
-                if time_since_change > 180:  # 3 minutes
-                    self.burst_mode = False
-                    self.current_interval = 60.0
-                    log.info("SMART POLLING: Cooldown → Idle")
-                    self.no_change_count = 0
-            elif self.no_change_count >= 3 and not self.burst_mode:
-                # Safety: if we've had no changes for 3+ cycles, ensure idle mode
-                self.current_interval = 60.0
-                log.info("SMART POLLING: Idle (60s)")
-        
-        return self.current_interval
-
-# Global smart polling instance
-smart_polling = SmartPolling()
-
-# Global posting lock to prevent race conditions
-posting_lock = asyncio.Lock()
 
 # ---------------- LOOP ----------------
-@tasks.loop(seconds=1)  # Base loop, interval managed dynamically
+@tasks.loop(seconds=30)
 async def check_posts():
     await bot.wait_until_ready()
 
@@ -2090,123 +874,199 @@ async def check_posts():
     if not channel:
         log.warning("Channel %s not found", CHANNEL_ID)
         return
+
+    posts = await asyncio.to_thread(fetch_recent_aegifts, limit=10)  # Check more pages for background
+    if not posts:
+        return
     
-    # Add delay between messages to avoid rate limiting
-    message_delay = 2.0  # 2 seconds between messages
+    # Group items by their origin fields
+    groups = {}
+    for post in posts:
+        group_key = make_group_key(post)
+        if group_key not in groups:
+            groups[group_key] = []
+        groups[group_key].append(post)
     
-    while True:
-        try:
-            posts = await asyncio.to_thread(fetch_recent_aegifts, limit=10)
+    # Process each group
+    for group_key, group_posts in groups.items():
+        if not group_posts:
+            continue
             
-            if posts is None:
-                # Request failed
-                smart_polling.update_interval(has_new_changes=False, has_error=True)
-                await asyncio.sleep(smart_polling.current_interval)
-                continue
-            
-            # Check for new changes and collect changed items
-            has_new_changes = False
-            changed_items = []
-            
-            for post in posts:
-                pid = urlparse(post["url"]).path.strip("/").replace("/", "-") or post["url"]
-                
-                if await has_item_changed(pid, post):
-                    has_new_changes = True
-                    # Store the item data for grouping
-                    post["pid"] = pid
-                    changed_items.append(post)
-            
-            if changed_items:
-                # Group changed items by Location and Price
-                groups = group_items_by_location_price(changed_items)
-                
-                # Process each group
-                for group_key, items_in_group in groups.items():
-                    location, price = group_key
-                    
-                    if len(items_in_group) >= 2:
-                        # GROUPED POST: 2+ items with same Location + Price
-                        log.info("Processing group: %d items with Location='%s', Price='%s'", 
-                                len(items_in_group), location, price)
-                        
-                        # Use safe posting with proper locking and duplicate prevention
-                        success = await safe_post_grouped_embed(channel, group_key, items_in_group)
-                        
-                        if success:
-                            await asyncio.sleep(message_delay)  # Rate limiting
-                        else:
-                            await asyncio.sleep(5)  # Longer delay on error
-                    
-                    else:
-                        # SINGLE ITEM: No grouping, treat as normal individual post
-                        item = items_in_group[0]
-                        pid = item["pid"]
-                        stored_item = await get_stored_item(pid)
-                        
-                        if stored_item:
-                            # Existing item changed - update it
-                            await update_stored_item(pid, item)
-                            log.info("Item changed: %s", item["title"])
-                            
-                            # Try to edit existing Discord message
-                            try:
-                                embed, view = await create_pane_embed(item)
-                                
-                                # Get stored message info
-                                msg_id = stored_item.get("discord_message_id")
-                                ch_id = stored_item.get("discord_channel_id")
-                                
-                                if msg_id and ch_id:
-                                    # Try to edit existing message
-                                    target_channel = bot.get_channel(ch_id)
-                                    if target_channel:
-                                        try:
-                                            existing_msg = await target_channel.fetch_message(msg_id)
-                                            embed.set_footer(text="AQW Daily Gift - Updated")
-                                            await existing_msg.edit(embed=embed, view=view)
-                                            log.info("Updated existing message for: %s", item["title"])
-                                            await asyncio.sleep(message_delay)
-                                            continue
-                                        except discord.NotFound:
-                                            log.info("Original message not found, creating new one for: %s", item["title"])
-                                        except discord.Forbidden:
-                                            log.error("No permission to edit message for: %s", item["title"])
-                                        except Exception as e:
-                                            log.error("Failed to edit message for %s: %s", item["title"], e)
-                                
-                                # Fallback: create new message
-                                new_msg = await channel.send(embed=embed, view=view)
-                                await update_discord_message_info(pid, new_msg.id, channel.id)
-                                log.info("Created new message for changed item: %s", item["title"])
-                                await asyncio.sleep(message_delay)
-                                
-                            except discord.HTTPException as e:
-                                log.error("Failed to update message: %s", e)
-                                await asyncio.sleep(5)  # Longer delay on error
-                        else:
-                            # New single item
-                            try:
-                                embed, view = await create_pane_embed(item)
-                                new_msg = await channel.send(embed=embed, view=view)
-                                await mark_posted(pid, item, new_msg.id, channel.id)
-                                log.info("New item: %s", item["title"])
-                                await asyncio.sleep(message_delay)
-                            except discord.HTTPException as e:
-                                log.error("Failed to send new message: %s", e)
-                                await asyncio.sleep(5)  # Longer delay on error
-            
-            # Update polling interval based on whether we found changes
-            smart_polling.update_interval(has_new_changes=has_new_changes, has_error=False)
-            
-        except Exception as e:
-            log.error("Error in check_posts loop: %s", e)
-            smart_polling.update_interval(has_new_changes=False, has_error=True)
+        # Check if this group was already posted with improved error handling
+        existing_message = None
+        stored_message_id = None
+        stored_channel_id = None
         
-        # Sleep for the dynamically determined interval
-        await asyncio.sleep(smart_polling.current_interval)
+        async with aiosqlite.connect(DB) as db:
+            # Use immediate lock to prevent race conditions
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                async with db.execute("""
+                    SELECT message_id, channel_id FROM groups 
+                    WHERE group_key = ? 
+                    ORDER BY last_updated DESC 
+                    LIMIT 1
+                """, (group_key,)) as cur:
+                    result = await cur.fetchone()
+                    if result:
+                        stored_message_id = result[0]
+                        stored_channel_id = result[1]
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        
+        # Try to fetch existing message if we have stored details
+        if stored_message_id and stored_channel_id:
+            try:
+                target_channel = bot.get_channel(stored_channel_id)
+                if target_channel:
+                    existing_message = await target_channel.fetch_message(stored_message_id)
+                    log.info("Found existing grouped message for group key %s: %s", group_key[:8], stored_message_id)
+            except discord.NotFound:
+                log.warning("Stored message %s not found, will create new one", stored_message_id)
+                existing_message = None
+            except discord.Forbidden:
+                log.warning("No permission to fetch message %s", stored_message_id)
+                existing_message = None
+            except Exception as e:
+                log.error("Error fetching existing message %s: %s", stored_message_id, e)
+                existing_message = None
+        
+        if existing_message:
+            # Update existing message
+            log.info("Updating existing grouped message for group key %s with %d items", group_key[:8], len(group_posts))
+            await update_group_message(channel, existing_message, group_posts)
+        else:
+            # Create new message
+            log.info("Creating new grouped message for group key %s with %d items", group_key[:8], len(group_posts))
+            await create_new_group_message(channel, group_key, group_posts)
 
 
+# ---------------- MESSAGE HELPERS ----------------
+async def update_group_message(channel: discord.TextChannel, message: discord.Message, posts: list[dict]):
+    """Update an existing group message with new items."""
+    if not posts:
+        return
+    
+    # Generate collage if multiple items
+    collage_bytes = None
+    if len(posts) > 1:
+        image_urls = [post.get("image") for post in posts if post.get("image")]
+        collage_bytes = await asyncio.to_thread(generate_collage, image_urls)
+    
+    # Build updated embed with categorized items
+    titles = [post["title"] for post in posts]
+    title = f"{titles[0]} ({len(titles)} Variants Found)" if len(titles) > 1 else titles[0]
+    
+    # Categorize items and build content by category
+    categorized_items = {}
+    for post in posts:
+        category = categorize_item(post)
+        if category not in categorized_items:
+            categorized_items[category] = []
+        categorized_items[category].append(post)
+    
+    # Build content with proper category headers
+    content_parts = []
+    for category, items_in_cat in categorized_items.items():
+        category_header = format_category_header(category, len(items_in_cat))
+        content_parts.append(category_header)
+        
+        for i, post in enumerate(items_in_cat):
+            content_parts.append(f"• **{post['title']}**")
+            if post.get('price') and post.get('price') != 'N/A':
+                content_parts.append(f"  💰 {post.get('price')}")
+            if post.get('rarity') and post.get('rarity') != 'N/A':
+                content_parts.append(f"  ⭐ {post.get('rarity')}")
+        
+        content_parts.append("")  # Empty line between categories
+    
+    updated_content = "\n".join(content_parts).strip()
+    
+    embed = discord.Embed(
+        title=title,
+        description=updated_content,
+        color=0xFF4500,
+        url=posts[0]["url"]
+    )
+    
+    # Add collage as attachment if generated
+    files = []
+    if collage_bytes:
+        files.append(discord.File(io.BytesIO(collage_bytes), "collage.png"))
+    
+    await message.edit(embed=embed, attachments=files)
+    
+    # Update database
+    group_key = make_group_key(posts[0])
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("""
+            UPDATE groups SET last_updated = datetime('now') 
+            WHERE group_key = ?
+        """, (group_key,))
+        await db.commit()
+
+async def create_new_group_message(channel: discord.TextChannel, group_key: str, posts: list[dict]):
+    """Create a new group message with collage."""
+    if not posts:
+        return
+    
+    # Generate collage
+    image_urls = [post.get("image") for post in posts if post.get("image")]
+    collage_bytes = await asyncio.to_thread(generate_collage, image_urls)
+    
+    # Build embed with categorized items
+    titles = [post["title"] for post in posts]
+    title = f"{titles[0]} ({len(titles)} Variants Found)" if len(titles) > 1 else titles[0]
+    
+    # Categorize items and build content by category
+    categorized_items = {}
+    for post in posts:
+        category = categorize_item(post)
+        if category not in categorized_items:
+            categorized_items[category] = []
+        categorized_items[category].append(post)
+    
+    # Build content with proper category headers
+    content_parts = []
+    for category, items_in_cat in categorized_items.items():
+        category_header = format_category_header(category, len(items_in_cat))
+        content_parts.append(category_header)
+        
+        for i, post in enumerate(items_in_cat):
+            content_parts.append(f"• **{post['title']}**")
+            if post.get('price') and post.get('price') != 'N/A':
+                content_parts.append(f"  💰 {post.get('price')}")
+            if post.get('rarity') and post.get('rarity') != 'N/A':
+                content_parts.append(f"  ⭐ {post.get('rarity')}")
+        
+        content_parts.append("")  # Empty line between categories
+    
+    updated_content = "\n".join(content_parts).strip()
+    
+    embed = discord.Embed(
+        title=title,
+        description=updated_content,
+        color=0xFF4500,
+        url=posts[0]["url"]
+    )
+    
+    # Add collage as attachment
+    files = []
+    if collage_bytes:
+        files.append(discord.File(io.BytesIO(collage_bytes), "collage.png"))
+    
+    message = await channel.send(embed=embed, attachments=files)
+    
+    # Save to database with proper message ID
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("""
+            INSERT INTO groups (group_key, message_id, channel_id, last_updated) 
+            VALUES (?, ?, ?, datetime('now'))
+        """, (group_key, message.id, channel.id))
+        await db.commit()
+        log.info("Stored new grouped message ID %s for group key %s", message.id, group_key[:8])
 
 # ---------------- COMMAND ----------------
 @bot.tree.command(name="latestdrops", description="Check latest AE gift pages")
@@ -2220,15 +1080,14 @@ async def latestdrops(interaction: discord.Interaction):
     try:
         # Check the main page only
         posts = await asyncio.wait_for(
-            asyncio.to_thread(fetch_recent_aegifts, 1, True),
+            asyncio.to_thread(fetch_recent_aegifts_fast, 1, True),
             timeout=15  # Shorter timeout for single page
         )
         if not posts:
             await interaction.followup.send("No recent AE gifts found in the last 30 pages.")
             return
 
-        embed, view = await create_pane_embed(posts[0])
-        await interaction.followup.send(embed=embed, view=view)
+        await interaction.followup.send(embed=create_embed(posts[0]))
     except asyncio.TimeoutError:
         await interaction.followup.send("Timed out fetching latest drops. Please try again in a few seconds.")
     except Exception as e:
@@ -2299,11 +1158,6 @@ async def ping(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
     log.info("Logged in as %s", bot.user)
-    
-    # Perform Wikidot login once at startup
-    if not wikidot_login(session):
-        log.error("Wikidot login failed, bot will continue without authentication")
-    
     await init_db()
     if not check_posts.is_running():
         check_posts.start()
