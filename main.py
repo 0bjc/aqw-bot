@@ -196,6 +196,216 @@ def generate_daily_gift_title(gift_number: int) -> str:
     return f"🎁 __{current_weekday} Daily Gift__ 🎁"
 
 
+def categorize_item(item: dict) -> str:
+    """Categorize an item based on title, tags, or content."""
+    title = item.get("title", "").lower()
+    content = item.get("content", "").lower()
+    title_icons = item.get("title_icons", "").lower()
+    
+    # Weapon keywords
+    weapon_keywords = [
+        "sword", "blade", "axe", "hammer", "mace", "dagger", "staff", "wand", 
+        "bow", "crossbow", "spear", "lance", "scythe", "rapier", "katana",
+        "gun", "pistol", "rifle", "cannon", "flamethrower", "laser", "plasma",
+        "weapon", "damage", "attack", "strike", "slash", "pierce", "crush"
+    ]
+    
+    # Armor keywords
+    armor_keywords = [
+        "armor", "armour", "plate", "mail", "chain", "scale", "leather", "cloth",
+        "robe", "tunic", "vest", "chest", "breastplate", "cuirass", "defense"
+    ]
+    
+    # Helm keywords
+    helm_keywords = [
+        "helm", "helmet", "hood", "mask", "crown", "tiara", "circlet", "hat",
+        "cap", "head", "skull", "visor", "coif", "headgear", "helmets"
+    ]
+    
+    # Cape keywords
+    cape_keywords = [
+        "cape", "cloak", "mantle", "shawl", "wrap", "scarf", "drape", "cover",
+        "back", "wings", "wing", "jetpack", "pack", "backpack"
+    ]
+    
+    # Pet keywords
+    pet_keywords = [
+        "pet", "companion", "familiar", "mount", "rider", "dragon", "wolf", "bear",
+        "cat", "dog", "bird", "eagle", "hawk", "phoenix", "lion", "tiger", "snake",
+        "summon", "minion", "ally", "creature", "beast", "animal"
+    ]
+    
+    # Check all sources for category indicators
+    
+    # Check title first (most reliable)
+    if any(keyword in title for keyword in weapon_keywords):
+        return "Weapon"
+    if any(keyword in title for keyword in armor_keywords):
+        return "Armor"
+    if any(keyword in title for keyword in helm_keywords):
+        return "Helm"
+    if any(keyword in title for keyword in cape_keywords):
+        return "Cape"
+    if any(keyword in title for keyword in pet_keywords):
+        return "Pet"
+    
+    # Check content if title doesn't match
+    if any(keyword in content for keyword in weapon_keywords):
+        return "Weapon"
+    if any(keyword in content for keyword in armor_keywords):
+        return "Armor"
+    if any(keyword in content for keyword in helm_keywords):
+        return "Helm"
+    if any(keyword in content for keyword in cape_keywords):
+        return "Cape"
+    if any(keyword in content for keyword in pet_keywords):
+        return "Pet"
+    
+    # Check title icons (tags)
+    if any(keyword in title_icons for keyword in weapon_keywords):
+        return "Weapon"
+    if any(keyword in title_icons for keyword in armor_keywords):
+        return "Armor"
+    if any(keyword in title_icons for keyword in helm_keywords):
+        return "Helm"
+    if any(keyword in title_icons for keyword in cape_keywords):
+        return "Cape"
+    if any(keyword in title_icons for keyword in pet_keywords):
+        return "Pet"
+    
+    return "Misc"
+
+
+def group_items_by_location_price(items: list[dict]) -> dict[tuple[str, str], list[dict]]:
+    """Group items by Location and Price."""
+    groups = {}
+    
+    for item in items:
+        # Extract location and price from content
+        content = item.get("content", "")
+        location = "Unknown"
+        price = "Unknown"
+        
+        # Parse location
+        import re
+        loc_match = re.search(r"__\*\*Location:\*\*__\s*\n(.+?)(?=\n\n|\n__\*\*|$)", content, re.IGNORECASE | re.DOTALL)
+        if loc_match:
+            location = loc_match.group(1).strip()
+        
+        # Parse price
+        price_match = re.search(r"__\*\*Price:\*\*__\s*\n(.+?)(?=\n\n|\n__\*\*|$)", content, re.IGNORECASE | re.DOTALL)
+        if price_match:
+            price = price_match.group(1).strip()
+        
+        # Create group key
+        group_key = (location, price)
+        
+        if group_key not in groups:
+            groups[group_key] = []
+        groups[group_key].append(item)
+    
+    return groups
+
+
+def create_categorized_item_list(items: list[dict]) -> str:
+    """Create a categorized list of items with clickable links."""
+    # Define category order
+    category_order = ["Weapon", "Armor", "Helm", "Cape", "Pet", "Misc"]
+    
+    # Categorize items
+    categorized = {}
+    for item in items:
+        category = categorize_item(item)
+        if category not in categorized:
+            categorized[category] = []
+        categorized[category].append(item)
+    
+    # Build output in order
+    sections = []
+    for category in category_order:
+        if category in categorized and categorized[category]:
+            sections.append(f"__**{category}:**__")
+            for item in categorized[category]:
+                title = item.get("title", "Unknown")
+                url = item.get("url", "")
+                if url:
+                    sections.append(f"• [{title}]({url})")
+                else:
+                    sections.append(f"• {title}")
+            sections.append("")  # Empty line between categories
+    
+    # Remove trailing empty line and join
+    if sections and sections[-1] == "":
+        sections.pop()
+    
+    return "\n".join(sections)
+
+
+async def create_grouped_embed(group_key: tuple[str, str], items: list[dict]) -> discord.Embed:
+    """Create a grouped embed for items with same Location and Price."""
+    location, price = group_key
+    
+    # Get daily gift number and generate title
+    gift_number = await get_and_increment_counter("daily_gift")
+    title = generate_daily_gift_title(gift_number)
+    
+    # Create categorized item list
+    item_list = create_categorized_item_list(items)
+    
+    # Build description
+    description_parts = [
+        f"**Location:** {location}",
+        f"**Price:** {price}",
+        "",
+        item_list
+    ]
+    
+    description = "\n".join(description_parts)
+    
+    # Truncate if needed (Discord embed limit is 4096)
+    if len(description) > 4096:
+        description = description[:4090] + "..."
+    
+    embed = discord.Embed(
+        title=title.upper(),
+        description=description,
+        color=0xFF4500,
+    )
+    
+    # Use first item's image as thumbnail if available
+    if items and items[0].get("image"):
+        embed.set_thumbnail(url=items[0]["image"])
+    
+    embed.set_footer(text=f"AQW Daily Gift - {len(items)} items grouped")
+    
+    return embed
+
+
+async def delete_old_individual_messages(items: list[dict]):
+    """Delete old individual messages for items that are now grouped."""
+    for item in items:
+        pid = urlparse(item["url"]).path.strip("/").replace("/", "-") or item["url"]
+        stored_item = await get_stored_item(pid)
+        
+        if stored_item:
+            msg_id = stored_item.get("discord_message_id")
+            ch_id = stored_item.get("discord_channel_id")
+            
+            if msg_id and ch_id:
+                try:
+                    target_channel = bot.get_channel(ch_id)
+                    if target_channel:
+                        existing_msg = await target_channel.fetch_message(msg_id)
+                        await existing_msg.delete()
+                        log.info("Deleted old individual message for grouped item: %s", item["title"])
+                except discord.NotFound:
+                    log.debug("Old message not found (already deleted): %s", item["title"])
+                except discord.Forbidden:
+                    log.warning("No permission to delete old message: %s", item["title"])
+                except Exception as e:
+                    log.error("Failed to delete old message for %s: %s", item["title"], e)
+
+
 def generate_content_hash(item: dict) -> str:
     """Generate hash for change detection."""
     content_data = {
@@ -1110,66 +1320,110 @@ async def check_posts():
                 await asyncio.sleep(smart_polling.current_interval)
                 continue
             
-            # Check for new changes
+            # Check for new changes and collect changed items
             has_new_changes = False
+            changed_items = []
+            
             for post in posts:
                 pid = urlparse(post["url"]).path.strip("/").replace("/", "-") or post["url"]
                 
                 if await has_item_changed(pid, post):
                     has_new_changes = True
-                    stored_item = await get_stored_item(pid)
+                    # Store the item data for grouping
+                    post["pid"] = pid
+                    changed_items.append(post)
+            
+            if changed_items:
+                # Group changed items by Location and Price
+                groups = group_items_by_location_price(changed_items)
+                
+                # Process each group
+                for group_key, items_in_group in groups.items():
+                    location, price = group_key
                     
-                    if stored_item:
-                        # Existing item changed - update it
-                        await update_stored_item(pid, post)
-                        log.info("Item changed: %s", post["title"])
+                    if len(items_in_group) >= 2:
+                        # GROUPED POST: 2+ items with same Location + Price
+                        log.info("Creating grouped post: %d items with Location='%s', Price='%s'", 
+                                len(items_in_group), location, price)
                         
-                        # Try to edit existing Discord message
+                        # Delete old individual messages
+                        await delete_old_individual_messages(items_in_group)
+                        
+                        # Create and send grouped embed
                         try:
-                            embed, view = await create_pane_embed(post)
+                            grouped_embed = await create_grouped_embed(group_key, items_in_group)
+                            grouped_msg = await channel.send(embed=grouped_embed)
                             
-                            # Get stored message info
-                            msg_id = stored_item.get("discord_message_id")
-                            ch_id = stored_item.get("discord_channel_id")
-                            
-                            if msg_id and ch_id:
-                                # Try to edit existing message
-                                target_channel = bot.get_channel(ch_id)
-                                if target_channel:
-                                    try:
-                                        existing_msg = await target_channel.fetch_message(msg_id)
-                                        embed.set_footer(text="AQW Daily Gift - Updated")
-                                        await existing_msg.edit(embed=embed, view=view)
-                                        log.info("Updated existing message for: %s", post["title"])
-                                        await asyncio.sleep(message_delay)
-                                        continue
-                                    except discord.NotFound:
-                                        log.info("Original message not found, creating new one for: %s", post["title"])
-                                    except discord.Forbidden:
-                                        log.error("No permission to edit message for: %s", post["title"])
-                                    except Exception as e:
-                                        log.error("Failed to edit message for %s: %s", post["title"], e)
-                            
-                            # Fallback: create new message
-                            new_msg = await channel.send(embed=embed, view=view)
-                            await update_discord_message_info(pid, new_msg.id, channel.id)
-                            log.info("Created new message for changed item: %s", post["title"])
+                            # Update all items in the group to reference the grouped message
+                            for item in items_in_group:
+                                pid = item["pid"]
+                                await update_stored_item(pid, item)
+                                await update_discord_message_info(pid, grouped_msg.id, channel.id)
+                                
+                            log.info("Posted grouped embed with %d items", len(items_in_group))
                             await asyncio.sleep(message_delay)
                             
                         except discord.HTTPException as e:
-                            log.error("Failed to update message: %s", e)
+                            log.error("Failed to send grouped message: %s", e)
                             await asyncio.sleep(5)  # Longer delay on error
+                    
                     else:
-                        # New item
-                        try:
-                            embed, view = await create_pane_embed(post)
-                            new_msg = await channel.send(embed=embed, view=view)
-                            await mark_posted(pid, post, new_msg.id, channel.id)
-                            log.info("New item: %s", post["title"])
-                            await asyncio.sleep(message_delay)
-                        except discord.HTTPException as e:
-                            log.error("Failed to send new message: %s", e)
-                            await asyncio.sleep(5)  # Longer delay on error
+                        # SINGLE ITEM: No grouping, treat as normal individual post
+                        item = items_in_group[0]
+                        pid = item["pid"]
+                        stored_item = await get_stored_item(pid)
+                        
+                        if stored_item:
+                            # Existing item changed - update it
+                            await update_stored_item(pid, item)
+                            log.info("Item changed: %s", item["title"])
+                            
+                            # Try to edit existing Discord message
+                            try:
+                                embed, view = await create_pane_embed(item)
+                                
+                                # Get stored message info
+                                msg_id = stored_item.get("discord_message_id")
+                                ch_id = stored_item.get("discord_channel_id")
+                                
+                                if msg_id and ch_id:
+                                    # Try to edit existing message
+                                    target_channel = bot.get_channel(ch_id)
+                                    if target_channel:
+                                        try:
+                                            existing_msg = await target_channel.fetch_message(msg_id)
+                                            embed.set_footer(text="AQW Daily Gift - Updated")
+                                            await existing_msg.edit(embed=embed, view=view)
+                                            log.info("Updated existing message for: %s", item["title"])
+                                            await asyncio.sleep(message_delay)
+                                            continue
+                                        except discord.NotFound:
+                                            log.info("Original message not found, creating new one for: %s", item["title"])
+                                        except discord.Forbidden:
+                                            log.error("No permission to edit message for: %s", item["title"])
+                                        except Exception as e:
+                                            log.error("Failed to edit message for %s: %s", item["title"], e)
+                                
+                                # Fallback: create new message
+                                new_msg = await channel.send(embed=embed, view=view)
+                                await update_discord_message_info(pid, new_msg.id, channel.id)
+                                log.info("Created new message for changed item: %s", item["title"])
+                                await asyncio.sleep(message_delay)
+                                
+                            except discord.HTTPException as e:
+                                log.error("Failed to update message: %s", e)
+                                await asyncio.sleep(5)  # Longer delay on error
+                        else:
+                            # New single item
+                            try:
+                                embed, view = await create_pane_embed(item)
+                                new_msg = await channel.send(embed=embed, view=view)
+                                await mark_posted(pid, item, new_msg.id, channel.id)
+                                log.info("New item: %s", item["title"])
+                                await asyncio.sleep(message_delay)
+                            except discord.HTTPException as e:
+                                log.error("Failed to send new message: %s", e)
+                                await asyncio.sleep(5)  # Longer delay on error
             
             # Update polling interval based on whether we found changes
             smart_polling.update_interval(has_new_changes=has_new_changes, has_error=False)
