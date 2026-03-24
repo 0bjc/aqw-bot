@@ -196,8 +196,110 @@ def generate_daily_gift_title(gift_number: int) -> str:
     return f"🎁 __{current_weekday} Daily Gift__ 🎁"
 
 
+def extract_breadcrumb_category(html_content: str) -> str:
+    """Extract category from Wikidot breadcrumb navigation."""
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_content, "html.parser")
+        
+        # Look for breadcrumb navigation - common patterns on Wikidot
+        breadcrumb_selectors = [
+            "#breadcrumbs",  # Standard Wikidot breadcrumb ID
+            ".breadcrumbs",  # Alternative class
+            ".breadcrumb",   # Another common class
+            "#breadcrumb-container",  # Container
+            ".nav-path",     # Navigation path
+            ".page-path",    # Page path
+            ".site-path",    # Site path
+        ]
+        
+        breadcrumb_text = None
+        
+        for selector in breadcrumb_selectors:
+            breadcrumb_el = soup.select_one(selector)
+            if breadcrumb_el:
+                breadcrumb_text = breadcrumb_el.get_text(" ", strip=True)
+                break
+        
+        # If no structured breadcrumb found, try to find breadcrumb-like text
+        if not breadcrumb_text:
+            # Look for text patterns that look like breadcrumbs
+            # Common pattern: "Site » Category » Subcategory » Page"
+            for element in soup.find_all(text=True):
+                text = element.strip()
+                if "»" in text and len(text.split("»")) >= 3:
+                    breadcrumb_text = text
+                    break
+        
+        if not breadcrumb_text:
+            # Try to find navigation links that form a breadcrumb trail
+            nav_links = soup.select("a[href*='/']")
+            if len(nav_links) >= 3:
+                # Check if consecutive links might form a breadcrumb
+                breadcrumb_parts = []
+                for link in nav_links[:5]:  # Check first 5 links
+                    link_text = link.get_text(strip=True)
+                    if link_text and link_text not in breadcrumb_parts:
+                        breadcrumb_parts.append(link_text)
+                
+                if len(breadcrumb_parts) >= 3:
+                    breadcrumb_text = " » ".join(breadcrumb_parts)
+        
+        if breadcrumb_text:
+            # Define target categories
+            target_categories = ["Weapon", "Armor", "Helm", "Cape", "Pet"]
+            
+            # Normalize breadcrumb text for comparison
+            breadcrumb_lower = breadcrumb_text.lower()
+            
+            # Find categories in breadcrumb
+            found_categories = []
+            for category in target_categories:
+                if category.lower() in breadcrumb_lower:
+                    found_categories.append(category)
+            
+            if found_categories:
+                # Return the first/most relevant category found
+                # If multiple found, return the first one in our priority order
+                for category in target_categories:
+                    if category in found_categories:
+                        return category
+            
+            # Check for plural forms and variations
+            variations = {
+                "Weapon": ["weapons"],
+                "Armor": ["armors", "armour"],
+                "Helm": ["helms", "helmets", "headgear"],
+                "Cape": ["capes", "cloaks", "mantles"],
+                "Pet": ["pets", "companions", "mounts"]
+            }
+            
+            for category, variants in variations.items():
+                for variant in variants:
+                    if variant in breadcrumb_lower:
+                        return category
+            
+            # If no specific category found, return the breadcrumb for debugging
+            log.debug("Breadcrumb found but no category: %s", breadcrumb_text)
+            return "No category found"
+        
+        return "No category found"
+        
+    except Exception as e:
+        log.error("Error extracting breadcrumb category: %s", e)
+        return "No category found"
+
+
 def categorize_item(item: dict) -> str:
-    """Categorize an item based on title, tags, or content."""
+    """Categorize an item using breadcrumb data first, then fallback to keywords."""
+    # First, try to extract category from breadcrumb if we have the HTML
+    if "html_content" in item:
+        breadcrumb_category = extract_breadcrumb_category(item["html_content"])
+        if breadcrumb_category != "No category found":
+            log.info("Category from breadcrumb: %s for %s", breadcrumb_category, item.get("title", "Unknown"))
+            return breadcrumb_category
+    
+    # Fallback to keyword-based categorization
     title = item.get("title", "").lower()
     content = item.get("content", "").lower()
     title_icons = item.get("title_icons", "").lower()
@@ -940,6 +1042,7 @@ def extract_item_details(page_url: str) -> dict | None:
         "images": img_urls,  # All images for collage
         "url": page_url,
         "title_icons": title_icons,
+        "html_content": r.text,  # Include full HTML for breadcrumb parsing
     }
 
 
