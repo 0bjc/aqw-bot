@@ -675,11 +675,8 @@ class GroupedShowPaneButton(discord.ui.Button):
             )
             return
         
-        # Respond to the initial interaction
-        await interaction.response.send_message(
-            f"📦 Showing {len(categorized_items)} categories from {view.group_title}...",
-            ephemeral=True
-        )
+        # Defer the interaction to avoid timeout, but don't send initial message
+        await interaction.response.defer(ephemeral=True)
         
         # Send separate ephemeral message for each category
         for category, items_in_category in categorized_items.items():
