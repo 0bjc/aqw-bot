@@ -211,92 +211,32 @@ def generate_daily_gift_title(gift_number: int) -> str:
     return f"🎁 __{current_weekday} Daily Gift__ 🎁"
 
 
-def extract_breadcrumb_category(html_content: str) -> str:
-    """Extract category from Wikidot breadcrumb navigation."""
+def extract_breadcrumb_category(html_content: str, page_url: str = "") -> str:
+    """Extract specific category or weapon type from Wikidot breadcrumb navigation and URL path."""
     try:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html_content, "html.parser")
         
-        # Look for breadcrumb navigation - common patterns on Wikidot
-        breadcrumb_selectors = [
-            "#breadcrumbs",  # Standard Wikidot breadcrumb ID
-            ".breadcrumbs",  # Alternative class
-            ".breadcrumb",   # Another common class
-            "#breadcrumb-container",  # Container
-            ".nav-path",     # Navigation path
-            ".page-path",    # Page path
-            ".site-path",    # Site path
+        # Define all possible categories including weapon types
+        weapon_types = [
+            "Axes", "Bows", "Daggers", "Gauntlets", "Guns", "HandGuns", 
+            "Maces", "Polearms", "Rifles", "Staffs", "Swords", "Wands", "Whips"
         ]
         
-        breadcrumb_text = None
+        main_categories = ["Weapon", "Armor", "Helm", "Cape", "Pet"]
+        all_categories = main_categories + weapon_types
         
-        for selector in breadcrumb_selectors:
-            breadcrumb_el = soup.select_one(selector)
-            if breadcrumb_el:
-                breadcrumb_text = breadcrumb_el.get_text(" ", strip=True)
-                break
+        # Method 1: Extract from URL path
+        url_category = extract_category_from_url(page_url, weapon_types, main_categories)
+        if url_category and url_category != "No category found":
+            log.debug("Category from URL: %s for %s", url_category, page_url)
+            return url_category
         
-        # If no structured breadcrumb found, try to find breadcrumb-like text
-        if not breadcrumb_text:
-            # Look for text patterns that look like breadcrumbs
-            # Common pattern: "Site » Category » Subcategory » Page"
-            for element in soup.find_all(text=True):
-                text = element.strip()
-                if "»" in text and len(text.split("»")) >= 3:
-                    breadcrumb_text = text
-                    break
-        
-        if not breadcrumb_text:
-            # Try to find navigation links that form a breadcrumb trail
-            nav_links = soup.select("a[href*='/']")
-            if len(nav_links) >= 3:
-                # Check if consecutive links might form a breadcrumb
-                breadcrumb_parts = []
-                for link in nav_links[:5]:  # Check first 5 links
-                    link_text = link.get_text(strip=True)
-                    if link_text and link_text not in breadcrumb_parts:
-                        breadcrumb_parts.append(link_text)
-                
-                if len(breadcrumb_parts) >= 3:
-                    breadcrumb_text = " » ".join(breadcrumb_parts)
-        
-        if breadcrumb_text:
-            # Define target categories
-            target_categories = ["Weapon", "Armor", "Helm", "Cape", "Pet"]
-            
-            # Normalize breadcrumb text for comparison
-            breadcrumb_lower = breadcrumb_text.lower()
-            
-            # Find categories in breadcrumb
-            found_categories = []
-            for category in target_categories:
-                if category.lower() in breadcrumb_lower:
-                    found_categories.append(category)
-            
-            if found_categories:
-                # Return the first/most relevant category found
-                # If multiple found, return the first one in our priority order
-                for category in target_categories:
-                    if category in found_categories:
-                        return category
-            
-            # Check for plural forms and variations
-            variations = {
-                "Weapon": ["weapons"],
-                "Armor": ["armors", "armour"],
-                "Helm": ["helms", "helmets", "headgear"],
-                "Cape": ["capes", "cloaks", "mantles"],
-                "Pet": ["pets", "companions", "mounts"]
-            }
-            
-            for category, variants in variations.items():
-                for variant in variants:
-                    if variant in breadcrumb_lower:
-                        return category
-            
-            # If no specific category found, return the breadcrumb for debugging
-            log.debug("Breadcrumb found but no category: %s", breadcrumb_text)
-            return "No category found"
+        # Method 2: Extract from breadcrumb navigation
+        breadcrumb_category = extract_from_breadcrumbs(soup, all_categories)
+        if breadcrumb_category and breadcrumb_category != "No category found":
+            log.debug("Category from breadcrumb: %s", breadcrumb_category)
+            return breadcrumb_category
         
         return "No category found"
         
@@ -305,58 +245,199 @@ def extract_breadcrumb_category(html_content: str) -> str:
         return "No category found"
 
 
+def extract_category_from_url(page_url: str, weapon_types: list[str], main_categories: list[str]) -> str:
+    """Extract category from URL path."""
+    if not page_url:
+        return "No category found"
+    
+    # Parse URL path
+    from urllib.parse import urlparse
+    parsed = urlparse(page_url)
+    path_parts = [part.lower() for part in parsed.path.split('/') if part]
+    
+    # Check for weapon types in URL path
+    for weapon_type in weapon_types:
+        if weapon_type.lower() in path_parts:
+            return weapon_type
+    
+    # Check for main categories in URL path
+    for category in main_categories:
+        if category.lower() in path_parts:
+            return category
+    
+    return "No category found"
+
+
+def extract_from_breadcrumbs(soup: BeautifulSoup, all_categories: list[str]) -> str:
+    """Extract category from breadcrumb elements."""
+    # Look for breadcrumb navigation - common patterns on Wikidot
+    breadcrumb_selectors = [
+        "#breadcrumbs",  # Standard Wikidot breadcrumb ID
+        ".breadcrumbs",  # Alternative class
+        ".breadcrumb",   # Another common class
+        "#breadcrumb-container",  # Container
+        ".nav-path",     # Navigation path
+        ".page-path",    # Page path
+        ".site-path",    # Site path
+    ]
+    
+    breadcrumb_text = None
+    
+    for selector in breadcrumb_selectors:
+        breadcrumb_el = soup.select_one(selector)
+        if breadcrumb_el:
+            breadcrumb_text = breadcrumb_el.get_text(" ", strip=True)
+            break
+    
+    # If no structured breadcrumb found, try to find breadcrumb-like text
+    if not breadcrumb_text:
+        # Look for text patterns that look like breadcrumbs
+        # Common pattern: "Site » Category » Subcategory » Page"
+        for element in soup.find_all(text=True):
+            text = element.strip()
+            if "»" in text and len(text.split("»")) >= 3:
+                breadcrumb_text = text
+                break
+    
+    if not breadcrumb_text:
+        # Try to find navigation links that form a breadcrumb trail
+        nav_links = soup.select("a[href*='/']")
+        if len(nav_links) >= 3:
+            # Check if consecutive links might form a breadcrumb
+            breadcrumb_parts = []
+            for link in nav_links[:5]:  # Check first 5 links
+                link_text = link.get_text(strip=True)
+                if link_text and link_text not in breadcrumb_parts:
+                    breadcrumb_parts.append(link_text)
+            
+            if len(breadcrumb_parts) >= 3:
+                breadcrumb_text = " » ".join(breadcrumb_parts)
+    
+    if breadcrumb_text:
+        # Normalize breadcrumb text for comparison
+        breadcrumb_lower = breadcrumb_text.lower()
+        
+        # Check for specific weapon types first (more specific)
+        for category in all_categories:
+            if category.lower() in breadcrumb_lower:
+                return category
+        
+        # Check for plural forms and variations
+        variations = {
+            "Weapon": ["weapons"],
+            "Armor": ["armors", "armour"],
+            "Helm": ["helms", "helmets", "headgear"],
+            "Cape": ["capes", "cloaks", "mantles"],
+            "Pet": ["pets", "companions", "mounts"],
+            "Axes": ["axe"],
+            "Bows": ["bow"],
+            "Daggers": ["dagger"],
+            "Gauntlets": ["gauntlet"],
+            "Guns": ["gun"],
+            "HandGuns": ["handgun"],
+            "Maces": ["mace"],
+            "Polearms": ["polearm"],
+            "Rifles": ["rifle"],
+            "Staffs": ["staff"],
+            "Swords": ["sword"],
+            "Wands": ["wand"],
+            "Whips": ["whip"]
+        }
+        
+        for category, variants in variations.items():
+            for variant in variants:
+                if variant in breadcrumb_lower:
+                    return category
+        
+        # If no specific category found, return the breadcrumb for debugging
+        log.debug("Breadcrumb found but no category: %s", breadcrumb_text)
+        return "No category found"
+    
+    return "No category found"
+
+
 def categorize_item(item: dict) -> str:
     """Categorize an item using breadcrumb data first, then fallback to keywords."""
     # First, try to extract category from breadcrumb if we have the HTML
     if "html_content" in item:
-        breadcrumb_category = extract_breadcrumb_category(item["html_content"])
+        breadcrumb_category = extract_breadcrumb_category(item["html_content"], item.get("url", ""))
         if breadcrumb_category != "No category found":
             log.info("Category from breadcrumb: %s for %s", breadcrumb_category, item.get("title", "Unknown"))
             return breadcrumb_category
     
-    # Fallback to keyword-based categorization
+    # Fallback to keyword-based categorization with specific weapon types
     title = item.get("title", "").lower()
     content = item.get("content", "").lower()
     title_icons = item.get("title_icons", "").lower()
     
-    # Weapon keywords
-    weapon_keywords = [
-        "sword", "blade", "axe", "hammer", "mace", "dagger", "staff", "wand", 
-        "bow", "crossbow", "spear", "lance", "scythe", "rapier", "katana",
-        "gun", "pistol", "rifle", "cannon", "flamethrower", "laser", "plasma",
-        "weapon", "damage", "attack", "strike", "slash", "pierce", "crush"
-    ]
+    # Specific weapon type keywords
+    axe_keywords = ["axe", "hatchet", "battleaxe", "cleaver", "splitter"]
+    bow_keywords = ["bow", "archery", "crossbow", "longbow", "shortbow", "compound"]
+    dagger_keywords = ["dagger", "knife", "shiv", "stiletto", "blade", "dirk"]
+    gauntlet_keywords = ["gauntlet", "glove", "fist", "hand", "punch"]
+    gun_keywords = ["gun", "firearm", "pistol", "revolver", "shotgun"]
+    handgun_keywords = ["handgun", "pistol", "revolver", "sidearm"]
+    mace_keywords = ["mace", "club", "morningstar", "flail", "bludgeon"]
+    polearm_keywords = ["polearm", "spear", "lance", "pike", "halberd", "trident"]
+    rifle_keywords = ["rifle", "sniper", "carbine", "assault", "musket"]
+    staff_keywords = ["staff", "rod", "wand", "stick", "quarterstaff"]
+    sword_keywords = ["sword", "blade", "saber", "katana", "rapier", "scimitar", "claymore"]
+    wand_keywords = ["wand", "magic", "spell", "arcane", "mystic"]
+    whip_keywords = ["whip", "lash", "chain", "rope", "flail"]
     
-    # Armor keywords
+    # Main category keywords (fallback)
     armor_keywords = [
         "armor", "armour", "plate", "mail", "chain", "scale", "leather", "cloth",
         "robe", "tunic", "vest", "chest", "breastplate", "cuirass", "defense"
     ]
     
-    # Helm keywords
     helm_keywords = [
         "helm", "helmet", "hood", "mask", "crown", "tiara", "circlet", "hat",
         "cap", "head", "skull", "visor", "coif", "headgear", "helmets"
     ]
     
-    # Cape keywords
     cape_keywords = [
         "cape", "cloak", "mantle", "shawl", "wrap", "scarf", "drape", "cover",
         "back", "wings", "wing", "jetpack", "pack", "backpack"
     ]
     
-    # Pet keywords
     pet_keywords = [
         "pet", "companion", "familiar", "mount", "rider", "dragon", "wolf", "bear",
         "cat", "dog", "bird", "eagle", "hawk", "phoenix", "lion", "tiger", "snake",
         "summon", "minion", "ally", "creature", "beast", "animal"
     ]
     
-    # Check all sources for category indicators
+    # Check all sources for category indicators - specific weapon types first
     
     # Check title first (most reliable)
-    if any(keyword in title for keyword in weapon_keywords):
-        return "Weapon"
+    if any(keyword in title for keyword in axe_keywords):
+        return "Axes"
+    if any(keyword in title for keyword in bow_keywords):
+        return "Bows"
+    if any(keyword in title for keyword in dagger_keywords):
+        return "Daggers"
+    if any(keyword in title for keyword in gauntlet_keywords):
+        return "Gauntlets"
+    if any(keyword in title for keyword in gun_keywords):
+        return "Guns"
+    if any(keyword in title for keyword in handgun_keywords):
+        return "HandGuns"
+    if any(keyword in title for keyword in mace_keywords):
+        return "Maces"
+    if any(keyword in title for keyword in polearm_keywords):
+        return "Polearms"
+    if any(keyword in title for keyword in rifle_keywords):
+        return "Rifles"
+    if any(keyword in title for keyword in staff_keywords):
+        return "Staffs"
+    if any(keyword in title for keyword in sword_keywords):
+        return "Swords"
+    if any(keyword in title for keyword in wand_keywords):
+        return "Wands"
+    if any(keyword in title for keyword in whip_keywords):
+        return "Whips"
+    
+    # Check main categories as fallback
     if any(keyword in title for keyword in armor_keywords):
         return "Armor"
     if any(keyword in title for keyword in helm_keywords):
@@ -367,8 +448,33 @@ def categorize_item(item: dict) -> str:
         return "Pet"
     
     # Check content if title doesn't match
-    if any(keyword in content for keyword in weapon_keywords):
-        return "Weapon"
+    if any(keyword in content for keyword in axe_keywords):
+        return "Axes"
+    if any(keyword in content for keyword in bow_keywords):
+        return "Bows"
+    if any(keyword in content for keyword in dagger_keywords):
+        return "Daggers"
+    if any(keyword in content for keyword in gauntlet_keywords):
+        return "Gauntlets"
+    if any(keyword in content for keyword in gun_keywords):
+        return "Guns"
+    if any(keyword in content for keyword in handgun_keywords):
+        return "HandGuns"
+    if any(keyword in content for keyword in mace_keywords):
+        return "Maces"
+    if any(keyword in content for keyword in polearm_keywords):
+        return "Polearms"
+    if any(keyword in content for keyword in rifle_keywords):
+        return "Rifles"
+    if any(keyword in content for keyword in staff_keywords):
+        return "Staffs"
+    if any(keyword in content for keyword in sword_keywords):
+        return "Swords"
+    if any(keyword in content for keyword in wand_keywords):
+        return "Wands"
+    if any(keyword in content for keyword in whip_keywords):
+        return "Whips"
+    
     if any(keyword in content for keyword in armor_keywords):
         return "Armor"
     if any(keyword in content for keyword in helm_keywords):
@@ -379,8 +485,33 @@ def categorize_item(item: dict) -> str:
         return "Pet"
     
     # Check title icons (tags)
-    if any(keyword in title_icons for keyword in weapon_keywords):
-        return "Weapon"
+    if any(keyword in title_icons for keyword in axe_keywords):
+        return "Axes"
+    if any(keyword in title_icons for keyword in bow_keywords):
+        return "Bows"
+    if any(keyword in title_icons for keyword in dagger_keywords):
+        return "Daggers"
+    if any(keyword in title_icons for keyword in gauntlet_keywords):
+        return "Gauntlets"
+    if any(keyword in title_icons for keyword in gun_keywords):
+        return "Guns"
+    if any(keyword in title_icons for keyword in handgun_keywords):
+        return "HandGuns"
+    if any(keyword in title_icons for keyword in mace_keywords):
+        return "Maces"
+    if any(keyword in title_icons for keyword in polearm_keywords):
+        return "Polearms"
+    if any(keyword in title_icons for keyword in rifle_keywords):
+        return "Rifles"
+    if any(keyword in title_icons for keyword in staff_keywords):
+        return "Staffs"
+    if any(keyword in title_icons for keyword in sword_keywords):
+        return "Swords"
+    if any(keyword in title_icons for keyword in wand_keywords):
+        return "Wands"
+    if any(keyword in title_icons for keyword in whip_keywords):
+        return "Whips"
+    
     if any(keyword in title_icons for keyword in armor_keywords):
         return "Armor"
     if any(keyword in title_icons for keyword in helm_keywords):
@@ -424,9 +555,17 @@ def group_items_by_location_price(items: list[dict]) -> dict[tuple[str, str], li
 
 
 def create_categorized_item_list(items: list[dict]) -> str:
-    """Create a categorized list of items with clickable links."""
-    # Define category order
-    category_order = ["Weapon", "Armor", "Helm", "Cape", "Pet", "Misc"]
+    """Create a categorized list of items with clickable links including specific weapon types."""
+    # Define category order - weapon types first, then main categories
+    category_order = [
+        # Weapon Types (specific)
+        "Axes", "Bows", "Daggers", "Gauntlets", "Guns", "HandGuns", 
+        "Maces", "Polearms", "Rifles", "Staffs", "Swords", "Wands", "Whips",
+        # Main Categories
+        "Weapon", "Armor", "Helm", "Cape", "Pet", 
+        # Fallback
+        "Misc"
+    ]
     
     # Categorize items
     categorized = {}
