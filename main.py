@@ -750,34 +750,116 @@ def validate_and_normalize_item_data(item: dict) -> dict:
     return normalized_item
 
 
-def group_items_by_location_price(items: list[dict]) -> dict[str, list[dict]]:
-    """
-    Group items by normalized Location and Price using robust extraction and validation.
+def deduplicate_items(items: list[dict]) -> list[dict]:
+    """Remove duplicate items based on URL, keeping the most complete version.
     
-    This function provides comprehensive logging and handles edge cases for reliable grouping.
+    This function deduplicates items by URL, preferring items with more complete data.
+    If multiple items have the same URL, the one with the most non-empty fields is kept.
+    
+    Args:
+        items (list[dict]): List of items to deduplicate
+        
+    Returns:
+        list[dict]: Deduplicated list of items
+        
+    Example:
+        >>> items = [
+        ...     {'url': 'http://test.com/item', 'title': 'Item', 'content': ''},
+        ...     {'url': 'http://test.com/item', 'title': 'Item', 'content': 'Full content'}
+        ... ]
+        >>> deduped = deduplicate_items(items)
+        >>> len(deduped)
+        1
+        >>> deduped[0]['content']
+        'Full content'
+    """
+    log.info("Deduplicating %d items", len(items))
+    
+    # Group items by URL
+    url_groups = {}
+    for item in items:
+        url = item.get("url", "").strip()
+        if not url:
+            log.warning("Item without URL: %s", item.get("title", "Unknown"))
+            continue
+            
+        if url not in url_groups:
+            url_groups[url] = []
+        url_groups[url].append(item)
+    
+    # Select best item for each URL
+    deduplicated = []
+    duplicates_removed = 0
+    
+    for url, duplicate_items in url_groups.items():
+        if len(duplicate_items) == 1:
+            deduplicated.append(duplicate_items[0])
+        else:
+            # Find the most complete item (most non-empty fields)
+            best_item = max(duplicate_items, key=lambda x: sum(1 for v in x.values() if v and str(v).strip()))
+            deduplicated.append(best_item)
+            duplicates_removed += len(duplicate_items) - 1
+            
+            log.debug("Deduplicated URL '%s': kept item with %d fields, discarded %d items", 
+                     url[:50], sum(1 for v in best_item.values() if v and str(v).strip()), 
+                     len(duplicate_items) - 1)
+    
+    log.info("Deduplication complete: %d items -> %d items (removed %d duplicates)", 
+             len(items), len(deduplicated), duplicates_removed)
+    
+    return deduplicated
+
+
+def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[dict]]:
+    """Improved grouping function with deduplication and stable hash generation.
+    
+    This function provides enhanced reliability by:
+    1. Deduplicating items before grouping
+    2. Using stable hash generation for consistent keys
+    3. Providing comprehensive logging and statistics
+    4. Handling edge cases gracefully
     
     Args:
         items (list[dict]): List of items to group
         
     Returns:
-        dict[str, list[dict]]: Dictionary with hash keys as keys and lists of items as values
+        dict[str, list[dict]]: Dictionary with stable hash keys as keys and lists of items as values
+        
+    Example:
+        >>> groups = improved_group_items_by_location_price(items)
+        >>> print(f"Created {len(groups)} groups")
+        Created 3 groups
     """
-    log.info("Starting grouping of %d items", len(items))
+    log.info("Starting improved grouping of %d items", len(items))
     
-    # Validate and normalize all items first
+    # Step 1: Deduplicate items first
+    deduplicated_items = deduplicate_items(items)
+    
+    # Step 2: Validate and normalize all items
     validated_items = []
-    for i, item in enumerate(items):
+    validation_stats = {
+        'total': len(deduplicated_items),
+        'valid': 0,
+        'invalid': 0,
+        'missing_url': 0,
+        'missing_content': 0
+    }
+    
+    for i, item in enumerate(deduplicated_items):
         try:
             validated_item = validate_and_normalize_item_data(item)
             validated_items.append(validated_item)
+            validation_stats['valid'] += 1
             log.debug("Validated item %d: %s", i + 1, validated_item['title'])
         except Exception as e:
+            validation_stats['invalid'] += 1
             log.error("Failed to validate item %d: %s", i + 1, e)
             continue
     
-    log.info("Successfully validated %d out of %d items", len(validated_items), len(items))
+    log.info("Validation results: %d valid, %d invalid out of %d items", 
+             validation_stats['valid'], validation_stats['invalid'], validation_stats['total'])
     
-    # Extract location and price for all validated items
+    # Step 3: Extract location and price with comprehensive logging
     item_data = []
     extraction_stats = {
         'location_success': 0,
@@ -824,19 +906,16 @@ def group_items_by_location_price(items: list[dict]) -> dict[str, list[dict]]:
             'item': item,
             'location': location,
             'price': price,
-            'original_location': location,  # Keep original for debugging
+            'original_location': location,
             'original_price': price
         })
-        
-        log.debug("Item %d processed: Location='%s', Price='%s'", 
-                 i + 1, location, price)
     
     # Log extraction statistics
     log.info("Extraction results - Location: %d success, %d failed | Price: %d success, %d failed",
              extraction_stats['location_success'], extraction_stats['location_failed'],
              extraction_stats['price_success'], extraction_stats['price_failed'])
     
-    # Group items by location and price
+    # Step 4: Group items by location and price
     groups_by_location_price = {}
     grouping_stats = {
         'total_groups': 0,
@@ -876,7 +955,7 @@ def group_items_by_location_price(items: list[dict]) -> dict[str, list[dict]]:
              grouping_stats['total_groups'], grouping_stats['items_grouped'], 
              grouping_stats['unknown_groups'])
     
-    # Generate hash keys for each group
+    # Step 5: Generate stable hash keys for each group
     final_groups = {}
     hash_generation_stats = {
         'successful': 0,
@@ -885,12 +964,12 @@ def group_items_by_location_price(items: list[dict]) -> dict[str, list[dict]]:
     
     for (location, price), items_in_group in groups_by_location_price.items():
         try:
-            # Generate hash key for the entire group
-            group_key_hash = generate_group_key(location, price, items_in_group)
+            # Generate stable hash key for the entire group
+            group_key_hash = generate_stable_group_key(location, price, items_in_group)
             final_groups[group_key_hash] = items_in_group
             hash_generation_stats['successful'] += 1
             
-            log.debug("✓ Generated hash key for group: Location='%s', Price='%s', Items=%d, Hash=%s",
+            log.debug("✓ Generated stable hash key for group: Location='%s', Price='%s', Items=%d, Hash=%s",
                      location, price, len(items_in_group), group_key_hash[:8])
             
             # Log item titles in this group for debugging
@@ -905,15 +984,8 @@ def group_items_by_location_price(items: list[dict]) -> dict[str, list[dict]]:
     # Log final statistics
     log.info("Final grouping results - Hash keys generated: %d successful, %d failed",
              hash_generation_stats['successful'], hash_generation_stats['failed'])
-    log.info("Total groups created: %d", len(final_groups))
-    
-    # Detailed group summary
-    for group_key_hash, items_in_group in final_groups.items():
-        location = items_in_group[0].get('location', 'Unknown') if items_in_group else 'Unknown'
-        price = items_in_group[0].get('price', 'Unknown') if items_in_group else 'Unknown'
-        item_titles = [item['title'] for item in items_in_group]
-        log.info("Group %s: Location='%s', Price='%s', Items=%d, Titles=%s",
-                group_key_hash[:8], location, price, len(items_in_group), item_titles)
+    log.info("Total groups created: %d from %d deduplicated items", 
+             len(final_groups), len(deduplicated_items))
     
     return final_groups
 
@@ -2157,44 +2229,201 @@ def normalize_string(s: str) -> str:
     return normalized
 
 
-def generate_group_key(location: str, price: str, items: list[dict]) -> str:
-    """Generate a stable unique key for a group of items with robust normalization."""
-    # Normalize location and price with aggressive cleaning
-    norm_location = normalize_string(location)
-    norm_price = normalize_string(price)
+def generate_stable_group_key(location: str, price: str, items: list[dict]) -> str:
+    """Generate a highly stable and consistent hash key for a group of items.
     
-    # Create a more stable item signature using only URLs (most stable identifier)
-    item_urls = []
+    This function creates a deterministic hash that will be identical for the same
+    group of items regardless of order, using multiple normalization layers.
+    
+    Args:
+        location (str): The normalized location string
+        price (str): The normalized price string  
+        items (list[dict]): List of items in the group
+        
+    Returns:
+        str: Stable MD5 hash key for the group
+        
+    Example:
+        >>> items = [{'url': 'http://test.com/item1'}, {'url': 'http://test.com/item2'}]
+        >>> key = generate_stable_group_key('Location A', '100 AC', items)
+        >>> len(key)  # Always 32 characters (MD5)
+        32
+    """
+    log.debug("Generating stable group key for %d items", len(items))
+    
+    # Multi-layer normalization for maximum stability
+    norm_location = normalize_string(location).strip()
+    norm_price = normalize_string(price).strip()
+    
+    # Extract and normalize the most stable item identifiers
+    item_identifiers = []
     for item in items:
-        url = normalize_string(item.get("url", ""))
-        if url:  # Only include non-empty URLs
-            item_urls.append(url)
+        url = item.get("url", "").strip()
+        if url:
+            # Normalize URL to remove common variations
+            norm_url = normalize_string(url).strip()
+            # Remove trailing slashes for consistency
+            norm_url = norm_url.rstrip('/')
+            if norm_url:
+                item_identifiers.append(norm_url)
+        else:
+            log.warning("Item missing URL: %s", item.get("title", "Unknown"))
     
-    # Sort URLs for consistent ordering
-    item_urls.sort()
+    # Sort identifiers for consistent ordering regardless of input order
+    item_identifiers.sort()
     
-    # Create combined string with separator that won't appear in normalized data
-    # Use count of items + sorted URLs for stability
-    combined = f"{norm_location}||{norm_price}||{len(items)}||{'||'.join(item_urls)}"
+    # Create deterministic string with clear separators
+    # Format: location|price|count|url1|url2|url3...
+    components = [norm_location, norm_price, str(len(items))] + item_identifiers
+    combined_string = "|".join(components)
     
-    # Generate hash for unique key
+    # Generate hash
     import hashlib
-    return hashlib.md5(combined.encode('utf-8')).hexdigest()
+    hash_key = hashlib.md5(combined_string.encode('utf-8')).hexdigest()
+    
+    log.debug("Generated group key: %s (from %d items)", hash_key[:8], len(items))
+    return hash_key
 
 
-async def is_group_already_posted(group_key: str) -> bool:
-    """Check if a group has already been posted with atomic operation."""
+async def atomic_check_and_store_group(group_key: str, location: str, price: str, items: list[dict], 
+                                      message_id: int = None, channel_id: int = None) -> tuple[bool, str]:
+    """Atomically check if group exists and store/update it in a single transaction.
+    
+    This function ensures thread-safe operations by using database locks and transactions.
+    It returns whether the operation was successful and the action taken.
+    
+    Args:
+        group_key (str): The stable hash key for the group
+        location (str): Group location
+        price (str): Group price
+        items (list[dict]): Items in the group
+        message_id (int, optional): Discord message ID
+        channel_id (int, optional): Discord channel ID
+        
+    Returns:
+        tuple[bool, str]: (success, action_taken) where action_taken is 'new', 'updated', or 'exists'
+        
+    Example:
+        >>> success, action = await atomic_check_and_store_group(
+        ...     'abc123', 'Location A', '100 AC', items, 12345, 67890
+        ... )
+        >>> print(f"Group {action} successfully")
+        Group new successfully
+    """
+    log.debug("Starting atomic group operation for key: %s", group_key[:8])
+    
+    # Extract item data for storage
+    item_titles = [item.get("title", "") for item in items]
+    categories = list(set([categorize_item(item) for item in items]))  # Unique categories
+    
+    # Generate content hash for change detection
+    content_hash = generate_group_content_hash(items)
+    categories_with_hash = [f"hash:{content_hash}"] + categories
+    
     async with aiosqlite.connect(DB) as db:
-        # Use immediate lock for atomic check
+        # Use immediate lock for atomic operation
         await db.execute("BEGIN IMMEDIATE")
         try:
-            async with db.execute("SELECT 1 FROM grouped_posts WHERE group_key=?", (group_key,)) as cur:
-                exists = await cur.fetchone() is not None
-            await db.commit()
-            return exists
-        except Exception:
+            # Check if group exists
+            async with db.execute(
+                "SELECT group_key, item_titles, categories FROM grouped_posts WHERE group_key=?", 
+                (group_key,)
+            ) as cur:
+                existing_row = await cur.fetchone()
+            
+            if existing_row:
+                # Group exists - check if it changed
+                stored_titles = json.loads(existing_row[1]) if existing_row[1] else []
+                stored_categories = json.loads(existing_row[2]) if existing_row[2] else []
+                
+                # Extract stored hash if present
+                stored_hash = None
+                for category in stored_categories:
+                    if category.startswith("hash:"):
+                        stored_hash = category[5:]  # Remove "hash:" prefix
+                        break
+                
+                # Check for changes
+                titles_changed = set(stored_titles) != set(item_titles)
+                hash_changed = stored_hash != content_hash
+                
+                if titles_changed or hash_changed:
+                    # Update existing group
+                    await db.execute("""
+                        UPDATE grouped_posts 
+                        SET item_titles=?, categories=?, discord_message_id=?, discord_channel_id=?, last_updated=datetime('now')
+                        WHERE group_key=?
+                    """, (
+                        json.dumps(item_titles), json.dumps(categories_with_hash),
+                        message_id, channel_id, group_key
+                    ))
+                    
+                    await db.commit()
+                    log.info("✅ Updated existing group %s: titles_changed=%s, hash_changed=%s", 
+                            group_key[:8], titles_changed, hash_changed)
+                    return True, "updated"
+                else:
+                    # No changes needed
+                    await db.commit()
+                    log.debug("Group %s already exists and unchanged", group_key[:8])
+                    return True, "exists"
+            else:
+                # New group - insert it
+                await db.execute("""
+                    INSERT INTO grouped_posts 
+                    (group_key, location, price, item_titles, categories, discord_message_id, discord_channel_id, last_updated) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                """, (
+                    group_key, location, price, json.dumps(item_titles), json.dumps(categories_with_hash),
+                    message_id, channel_id
+                ))
+                
+                await db.commit()
+                log.info("✅ Created new group %s with %d items", group_key[:8], len(items))
+                return True, "new"
+                
+        except Exception as e:
             await db.rollback()
+            log.error("❌ Atomic group operation failed for key %s: %s", group_key[:8], e)
             raise
+
+
+async def get_group_change_details(group_key: str, current_items: list[dict]) -> dict | None:
+    """Get detailed information about what changed in a group.
+    
+    This function compares the current items with stored group data to provide
+    detailed change information for logging and debugging.
+    
+    Args:
+        group_key (str): The group hash key
+        current_items (list[dict]): Current items in the group
+        
+    Returns:
+        dict | None: Detailed change information or None if group not found
+        
+    Example:
+        >>> changes = await get_group_change_details('abc123', items)
+        >>> if changes:
+        ...     print(f"Added: {changes['added']}, Removed: {changes['removed']}")
+    """
+    stored_group = await get_stored_group(group_key)
+    if not stored_group:
+        return None
+    
+    current_titles = set(item.get("title", "") for item in current_items)
+    stored_titles = set(stored_group.get("item_titles", []))
+    
+    added_titles = current_titles - stored_titles
+    removed_titles = stored_titles - current_titles
+    
+    return {
+        'group_key': group_key,
+        'stored_count': len(stored_titles),
+        'current_count': len(current_titles),
+        'added': sorted(list(added_titles)),
+        'removed': sorted(list(removed_titles)),
+        'total_changes': len(added_titles) + len(removed_titles)
+    }
 
 
 async def get_stored_group(group_key: str) -> dict | None:
@@ -3244,8 +3473,8 @@ async def check_posts():
                     changed_items.append(post)
             
             if changed_items:
-                # Group changed items by Location and Price
-                groups = group_items_by_location_price(changed_items)
+                # Group changed items by Location and Price using improved function
+                groups = improved_group_items_by_location_price(changed_items)
                 
                 # Process each group
                 for group_key_hash, items_in_group in groups.items():
@@ -3627,7 +3856,7 @@ async def testgrouping(interaction: discord.Interaction):
     log.info("Testing improved grouping function with %d items", len(test_items))
     
     try:
-        groups = group_items_by_location_price(test_items)
+        groups = improved_group_items_by_location_price(test_items)
         
         embed = discord.Embed(
             title="🧪 Improved Grouping Test Results",
