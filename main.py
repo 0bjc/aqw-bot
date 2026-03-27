@@ -179,24 +179,6 @@ async def init_db() -> None:
             INSERT OR IGNORE INTO counters (name, value) VALUES ('daily_gift', 0)
         """)
         
-        # Clean up orphaned group posts (groups with no corresponding items)
-        await db.execute("""
-            DELETE FROM grouped_posts 
-            WHERE group_key NOT IN (
-                SELECT DISTINCT group_key FROM (
-                    SELECT DISTINCT 
-                        CASE 
-                            WHEN COUNT(*) OVER (PARTITION BY location, price) >= 2 THEN 
-                                (SELECT group_key FROM grouped_posts gp 
-                                 WHERE gp.location = items.location AND gp.price = items.price 
-                                 LIMIT 1)
-                        END as group_key
-                    FROM items
-                    WHERE location IS NOT NULL AND price IS NOT NULL
-                ) WHERE group_key IS NOT NULL
-            )
-        """)
-        
         await db.commit()
 
 
