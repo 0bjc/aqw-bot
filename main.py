@@ -717,7 +717,7 @@ def validate_and_normalize_item_data(item: dict) -> dict:
     """
     log.debug("Validating item: %s", item.get("title", "Unknown"))
     
-    # Ensure required fields exist
+    # Ensure required fields exist, preserving all original fields including pid
     normalized_item = {
         'title': item.get("title", "Unknown Item"),
         'url': item.get("url", ""),
@@ -728,6 +728,10 @@ def validate_and_normalize_item_data(item: dict) -> dict:
         'images': item.get("images", []),
         'html_content': item.get("html_content", "")
     }
+    
+    # Preserve the pid field if it exists
+    if 'pid' in item:
+        normalized_item['pid'] = item['pid']
     
     # Validate title
     if not normalized_item['title'] or normalized_item['title'].strip() == "Unknown":
@@ -939,8 +943,9 @@ def create_categorized_item_list(items: list[dict]) -> str:
     sections = []
     for category in category_order:
         if category in categorized and categorized[category]:
-            sections.append(f"__**{pluralize_category(category)}:**__")
-            for item in categorized[category]:
+            category_items = categorized[category]
+            sections.append(f"__**{get_category_form(category, len(category_items))}:**__")
+            for item in category_items:
                 title = item.get("title", "Unknown")
                 url = item.get("url", "")
                 if url:
@@ -1387,7 +1392,7 @@ class CategoryButton(discord.ui.Button):
         emoji = emoji_map.get(category, "📦")
         
         super().__init__(
-            label=f"{pluralize_category(category)} ({len(items)})",
+            label=f"{get_category_form(category, len(items))} ({len(items)})",
             style=style,
             emoji=emoji,
             custom_id=f"category_{category.lower().replace(' ', '_')}"
@@ -1400,14 +1405,14 @@ class CategoryButton(discord.ui.Button):
         
         if not category_items:
             await interaction.response.send_message(
-                f"No items found in {pluralize_category(self.category)} category.",
+                f"No items found in {get_category_form(self.category, len(category_items))} category.",
                 ephemeral=True
             )
             return
         
         # Create embed for this category
         embed = discord.Embed(
-            title=f"📂 {pluralize_category(self.category)} ({len(category_items)} items)",
+            title=f"📂 {get_category_form(self.category, len(category_items))} ({len(category_items)} items)",
             description=f"**Location:** {self.category_view.location}\n**Price:** {self.category_view.price}\n\n",
             color=discord.Color.blue()
         )
@@ -1505,34 +1510,189 @@ class EphemeralCategoryView(CategoryButtonsView):
 
 
 # ---------------- CATEGORY PLURALIZATION ----------------
-def pluralize_category(category: str) -> str:
+def get_category_form(category: str, count: int = 1) -> str:
     """
-    Convert category names to their proper plural forms with comprehensive coverage.
+    Get the correct singular or plural form of a category based on item count.
     
-    This function handles both irregular and regular English pluralization rules
-    specifically optimized for AQW item categories and gaming terminology.
+    This function dynamically returns the appropriate form (singular or plural)
+    based on the number of items, handling irregular forms and edge cases.
     
     Args:
-        category (str): The singular category name to pluralize
+        category (str): The base category name (usually singular form)
+        count (int): Number of items in the category (default: 1)
         
     Returns:
-        str: The properly pluralized category name
+        str: The correctly formatted category name (singular or plural)
         
     Examples:
-        >>> pluralize_category("Weapon")
+        >>> get_category_form("Weapon", 1)
+        'Weapon'
+        >>> get_category_form("Weapon", 3)
         'Weapons'
-        >>> pluralize_category("Helm") 
+        >>> get_category_form("Helm", 1)
+        'Helm'
+        >>> get_category_form("Helm", 2)
         'Helms'
-        >>> pluralize_category("Pet")
+        >>> get_category_form("Pet", 1)
+        'Pet'
+        >>> get_category_form("Pet", 5)
         'Pets'
-        >>> pluralize_category("Misc")
+        >>> get_category_form("Misc", 1)
         'Miscellaneous'
-        >>> pluralize_category("Axe")
-        'Axes'
-        >>> pluralize_category("Knife")
-        'Knives'
-        >>> pluralize_category("Box")
-        'Boxes'
+        >>> get_category_form("Misc", 3)
+        'Miscellaneous'
+    """
+    # Handle count-based singular/plural logic
+    if count == 1:
+        return get_singular_form(category)
+    else:
+        return get_plural_form(category)
+
+
+def get_singular_form(category: str) -> str:
+    """
+    Get the singular form of a category name.
+    
+    This function converts plural categories back to their singular form,
+    handling irregular forms and edge cases.
+    
+    Args:
+        category (str): The category name (could be singular or plural)
+        
+    Returns:
+        str: The singular form of the category
+    """
+    # Dictionary of plural-to-singular mappings for irregular forms
+    plural_to_singular = {
+        # Main categories
+        "Weapons": "Weapon",
+        "Armors": "Armor", 
+        "Helms": "Helm", 
+        "Capes": "Cape",
+        "Pets": "Pet",
+        "Miscellaneous": "Misc",  # Special case: keep as "Misc"
+        
+        # Weapon types (plural to singular)
+        "Axes": "Axe",
+        "Bows": "Bow",  
+        "Daggers": "Dagger",
+        "Gauntlets": "Gauntlet",
+        "Guns": "Gun",
+        "HandGuns": "HandGun",
+        "Maces": "Mace",
+        "Polearms": "Polearm",
+        "Rifles": "Rifle",
+        "Staffs": "Staff",
+        "Swords": "Sword",
+        "Wands": "Wand",
+        "Whips": "Whip",
+        
+        # Armor & equipment
+        "Shields": "Shield",
+        "Gloves": "Glove",
+        "Helmets": "Helmet",
+        "Pauldrons": "Pauldron",
+        "Greaves": "Greave",
+        "Bracers": "Bracer",
+        
+        # Accessories
+        "Rings": "Ring",
+        "Amulets": "Amulet",
+        "Necklaces": "Necklace",
+        "Earrings": "Earring",
+        "Belts": "Belt",
+        "Cloaks": "Cloak",
+        "Robes": "Robe",
+        
+        # Consumables
+        "Potions": "Potion",
+        "Scrolls": "Scroll",
+        "Foods": "Food",
+        "Drinks": "Drink",
+        
+        # Common English irregulars
+        "Knives": "Knife",
+        "Wolves": "Wolf",
+        "Leaves": "Leaf",
+        "Lives": "Life",
+        "Wives": "Wife",
+        "Thieves": "Thief",
+        "Elves": "Elf",
+        "Selves": "Self",
+        "Shelves": "Shelf",
+        "Loaves": "Loaf",
+        "Halves": "Half",
+        "Calves": "Calf",
+        
+        # Compound words
+        "Footmen": "Footman",
+        "Policemen": "Policeman",
+        "Gentlemen": "Gentleman",
+        "Women": "Woman",
+        "Men": "Man",
+        "Children": "Child",
+        "People": "Person",
+        "Mice": "Mouse",
+        "Lice": "Louse",
+        "Geese": "Goose",
+        "Teeth": "Tooth",
+        "Feet": "Foot",
+        
+        # Latin-derived plurals
+        "Foci": "Focus",
+        "Nuclei": "Nucleus",
+        "Radii": "Radius",
+        "Cacti": "Cactus",
+        "Fungi": "Fungus",
+        "Alumni": "Alumnus",
+        "Syllabi": "Syllabus",
+        "Analyses": "Analysis",
+        "Theses": "Thesis",
+        "Crises": "Crisis",
+        "Phenomena": "Phenomenon",
+        "Criteria": "Criterion",
+        "Data": "Datum",
+        "Media": "Medium",
+        "Bacteria": "Bacterium",
+        "Curricula": "Curriculum",
+        "Memoranda": "Memorandum",
+        "Millennia": "Millennium"
+    }
+    
+    # Check if we have a direct mapping
+    if category in plural_to_singular:
+        return plural_to_singular[category]
+    
+    # Apply regular singularization rules for unknown categories
+    if category.endswith('ies') and len(category) > 3:
+        # Words ending in 'ies' often come from 'y' (cities → city)
+        return category[:-3] + 'y'
+    elif category.endswith('ves') and len(category) > 3:
+        # Words ending in 'ves' often come from 'f' or 'fe' (wolves → wolf)
+        return category[:-3] + 'f'
+    elif category.endswith('es') and len(category) > 2:
+        # Words ending in 'es' often come from simple nouns (boxes → box)
+        return category[:-2]
+    elif category.endswith('s') and len(category) > 1:
+        # Simple plural: remove 's' (cats → cat)
+        return category[:-1]
+    
+    # If no规则 applies, return as-is (might already be singular)
+    return category
+
+
+def get_plural_form(category: str) -> str:
+    """
+    Get the plural form of a category name.
+    
+    This function converts singular categories to their plural form,
+    handling irregular forms and edge cases.
+    
+    Args:
+        category (str): The singular category name
+        
+    Returns:
+        str: The plural form of the category
     """
     # Comprehensive dictionary of irregular plurals for AQW and gaming categories
     # This is checked first for performance (O(1) lookup)
@@ -1580,7 +1740,6 @@ def pluralize_category(category: str) -> str:
         "Boots": "Boots",         # Already plural
         "Glove": "Gloves",
         "Gloves": "Gloves",       # Already plural
-        "Helm": "Helms",
         "Helmet": "Helmets",
         "Pauldron": "Pauldrons",
         "Greaves": "Greaves",     # Already plural
@@ -1594,7 +1753,6 @@ def pluralize_category(category: str) -> str:
         "Necklace": "Necklaces",
         "Earring": "Earrings",
         "Belt": "Belts",
-        "Cape": "Capes",
         "Cloak": "Cloaks",
         "Robe": "Robes",
         
@@ -1616,7 +1774,6 @@ def pluralize_category(category: str) -> str:
         "Shelf": "Shelves",
         "Loaf": "Loaves",
         "Half": "Halves",
-        "Calves": "Calves",       # Already plural
         "Calf": "Calves",
         
         # === SPECIAL CASES ===
@@ -1732,13 +1889,48 @@ def pluralize_category(category: str) -> str:
         return category + 's'
 
 
-def get_category_display_name(category: str, plural: bool = True) -> str:
+# Backward compatibility function
+def pluralize_category(category: str) -> str:
     """
-    Get the display name for a category, with optional pluralization.
+    Legacy function for backward compatibility.
+    
+    This function always returns the plural form of the category.
+    For new code, use get_category_form(category, count) instead.
+    
+    Args:
+        category (str): The category name to pluralize
+        
+    Returns:
+        str: The plural form of the category
     """
-    if plural:
-        return pluralize_category(category)
-    return category
+    return get_plural_form(category)
+
+
+def get_category_display_name(category: str, count: int = 1) -> str:
+    """
+    Get the display name for a category based on item count.
+    
+    This is the recommended function to use for displaying category names
+    with correct singular/plural forms.
+    
+    Args:
+        category (str): The base category name (usually singular form)
+        count (int): Number of items in the category (default: 1)
+        
+    Returns:
+        str: The correctly formatted category name (singular or plural)
+        
+    Examples:
+        >>> get_category_display_name("Weapon", 1)
+        'Weapon'
+        >>> get_category_display_name("Weapon", 3)
+        'Weapons'
+        >>> get_category_display_name("Pet", 1)
+        'Pet'
+        >>> get_category_display_name("Pet", 5)
+        'Pets'
+    """
+    return get_category_form(category, count)
 
 
 # ---------------- CATEGORY HELPER FUNCTIONS ----------------
@@ -2256,7 +2448,13 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
             
             # Update all items in the group to reference the grouped message
             for item in items_in_group:
-                pid = item["pid"]
+                # Generate pid if not present
+                if "pid" not in item:
+                    pid = urlparse(item["url"]).path.strip("/").replace("/", "-") or item["url"]
+                    item["pid"] = pid
+                else:
+                    pid = item["pid"]
+                
                 await update_stored_item(pid, item)
                 await update_discord_message_info(pid, grouped_msg.id, channel.id)
             
@@ -3289,68 +3487,90 @@ async def testcategories(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed, view=view)
 
 
-@bot.tree.command(name="testpluralization", description="Test category pluralization")
+@bot.tree.command(name="testpluralization", description="Test dynamic category pluralization")
 async def testpluralization(interaction: discord.Interaction):
-    """Test command to demonstrate comprehensive category pluralization."""
+    """Test command to demonstrate dynamic singular/plural category forms."""
     try:
         await interaction.response.defer(thinking=True)
     except discord.NotFound:
         return
 
-    # Test comprehensive categories including all edge cases
-    test_categories = [
-        # Main categories (irregular plurals)
-        "Weapon", "Armor", "Helm", "Cape", "Pet", "Misc",
-        
-        # Already plural weapon types (shouldn't change)
-        "Axes", "Bows", "Daggers", "Swords", "Staffs", "Wands",
-        
-        # Singular weapon types (should be pluralized)
-        "Axe", "Bow", "Dagger", "Sword", "Staff", "Wand",
-        
-        # Other potential categories
-        "Shield", "Boots", "Glove", "Ring", "Amulet", "Scroll", "Potion",
-        
-        # Edge cases for regular rules
-        "Knife", "Wolf", "City", "Party", "Box", "Hero"
+    # Test categories with different item counts
+    test_scenarios = [
+        # (category, count, expected_behavior)
+        ("Weapon", 1, "Should be singular"),
+        ("Weapon", 3, "Should be plural"),
+        ("Pet", 1, "Should be singular"),
+        ("Pet", 5, "Should be plural"),
+        ("Helm", 1, "Should be singular"),
+        ("Helm", 2, "Should be plural"),
+        ("Misc", 1, "Should always be 'Miscellaneous'"),
+        ("Misc", 10, "Should always be 'Miscellaneous'"),
+        ("Axe", 1, "Should be singular"),
+        ("Axe", 4, "Should be plural"),
+        ("Knife", 1, "Should be singular (irregular)"),
+        ("Knife", 3, "Should be 'Knives' (irregular)"),
+        ("Box", 1, "Should be singular"),
+        ("Box", 2, "Should be 'Boxes' (regular rule)"),
+        ("City", 1, "Should be singular"),
+        ("City", 3, "Should be 'Cities' (y→ies rule)"),
+        ("Wolf", 1, "Should be singular"),
+        ("Wolf", 2, "Should be 'Wolves' (f→ves rule)"),
     ]
     
     embed = discord.Embed(
-        title="🔤 Comprehensive Category Pluralization Test",
-        description="Demonstrating proper pluralization of all category types:",
+        title="🔤 Dynamic Category Pluralization Test",
+        description="Demonstrating singular/plural forms based on item count:",
         color=discord.Color.gold()
     )
     
-    # Group by category type for better organization
-    main_categories = ["Weapon", "Armor", "Helm", "Cape", "Pet", "Misc"]
-    already_plural = ["Axes", "Bows", "Daggers", "Swords", "Staffs", "Wands"]
-    singular_weapons = ["Axe", "Bow", "Dagger", "Sword", "Staff", "Wand"]
-    other_items = ["Shield", "Boots", "Glove", "Ring", "Amulet", "Scroll", "Potion"]
-    edge_cases = ["Knife", "Wolf", "City", "Party", "Box", "Hero"]
+    # Create sections for different types of categories
+    main_categories = []
+    weapon_types = []
+    irregular_forms = []
+    regular_rules = []
+    special_cases = []
     
-    # Add sections for each category type
+    for category, count, behavior in test_scenarios:
+        result = get_category_form(category, count)
+        scenario = f"**{category}** ({count} item{'s' if count != 1 else ''}) → **{result}**\n*{behavior}*"
+        
+        if category in ["Weapon", "Armor", "Helm", "Cape", "Pet"]:
+            main_categories.append(scenario)
+        elif category in ["Axe", "Sword", "Bow", "Dagger"]:
+            weapon_types.append(scenario)
+        elif category in ["Knife", "Wolf"]:
+            irregular_forms.append(scenario)
+        elif category in ["Box", "City"]:
+            regular_rules.append(scenario)
+        elif category in ["Misc"]:
+            special_cases.append(scenario)
+    
+    # Add sections
     sections = [
         ("📋 Main Categories", main_categories),
-        ("🔄 Already Plural", already_plural),
-        ("⚔️ Singular Weapons", singular_weapons),
-        ("💎 Other Items", other_items),
-        ("🎯 Edge Cases", edge_cases)
+        ("⚔️ Weapon Types", weapon_types),
+        ("🎯 Irregular Forms", irregular_forms),
+        ("📝 Regular Rules", regular_rules),
+        ("⭐ Special Cases", special_cases)
     ]
     
-    for section_name, categories in sections:
-        field_value = ""
-        for category in categories:
-            plural = pluralize_category(category)
-            indicator = "✅" if category != plural else "➡️"
-            field_value += f"{indicator} `{category}` → **{plural}**\n"
-        
-        embed.add_field(
-            name=section_name,
-            value=field_value,
-            inline=True
-        )
+    for section_name, scenarios in sections:
+        if scenarios:
+            embed.add_field(
+                name=section_name,
+                value="\n\n".join(scenarios),
+                inline=False
+            )
     
-    embed.set_footer(text="AQW Daily Gift - Comprehensive Pluralization Test")
+    # Add usage examples
+    embed.add_field(
+        name="💡 Usage Examples",
+        value="```python\n# Get correct form based on item count\ncategory_name = get_category_form('Weapon', item_count)\n\n# In your code:\nbutton_label = f'{get_category_form('Sword', len(swords))} ({len(swords)})'\n# Results: 'Sword (1)' or 'Swords (5)'\n\nembed_title = f'{get_category_form('Pet', len(pets))} Collection'\n# Results: 'Pet Collection' or 'Pets Collection'\n```",
+        inline=False
+    )
+    
+    embed.set_footer(text="AQW Daily Gift - Dynamic Pluralization Test")
     
     await interaction.followup.send(embed=embed)
 
