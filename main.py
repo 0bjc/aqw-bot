@@ -592,7 +592,7 @@ def create_categorized_item_list(items: list[dict]) -> str:
     sections = []
     for category in category_order:
         if category in categorized and categorized[category]:
-            sections.append(f"__**{category}:**__")
+            sections.append(f"__**{pluralize_category(category)}:**__")
             for item in categorized[category]:
                 title = item.get("title", "Unknown")
                 url = item.get("url", "")
@@ -1040,7 +1040,7 @@ class CategoryButton(discord.ui.Button):
         emoji = emoji_map.get(category, "📦")
         
         super().__init__(
-            label=f"{category} ({len(items)})",
+            label=f"{pluralize_category(category)} ({len(items)})",
             style=style,
             emoji=emoji,
             custom_id=f"category_{category.lower().replace(' ', '_')}"
@@ -1053,14 +1053,14 @@ class CategoryButton(discord.ui.Button):
         
         if not category_items:
             await interaction.response.send_message(
-                f"No items found in {self.category} category.",
+                f"No items found in {pluralize_category(self.category)} category.",
                 ephemeral=True
             )
             return
         
         # Create embed for this category
         embed = discord.Embed(
-            title=f"📂 {self.category} ({len(category_items)} items)",
+            title=f"📂 {pluralize_category(self.category)} ({len(category_items)} items)",
             description=f"**Location:** {self.category_view.location}\n**Price:** {self.category_view.price}\n\n",
             color=discord.Color.blue()
         )
@@ -1147,6 +1147,72 @@ class CategoryButtonsView(discord.ui.View):
         
         # Add close button at the end
         self.add_item(ClosePaneButton())
+
+
+# ---------------- CATEGORY PLURALIZATION ----------------
+def pluralize_category(category: str) -> str:
+    """
+    Convert category names to their proper plural forms.
+    Handles both regular and irregular pluralization.
+    """
+    # Define irregular plural forms
+    irregular_plurals = {
+        # Weapon types that don't change or have special forms
+        "Axes": "Axes",           # Already plural
+        "Bows": "Bows",           # Already plural  
+        "Daggers": "Daggers",     # Already plural
+        "Gauntlets": "Gauntlets", # Already plural
+        "Guns": "Guns",           # Already plural
+        "HandGuns": "HandGuns",   # Already plural
+        "Maces": "Maces",         # Already plural
+        "Polearms": "Polearms",   # Already plural
+        "Rifles": "Rifles",       # Already plural
+        "Staffs": "Staffs",       # Already plural
+        "Swords": "Swords",       # Already plural
+        "Wands": "Wands",         # Already plural
+        "Whips": "Whips",         # Already plural
+        
+        # Main categories with irregular plurals
+        "Weapon": "Weapons",
+        "Armor": "Armors",
+        "Helm": "Helms", 
+        "Cape": "Capes",
+        "Pet": "Pets",
+        "Misc": "Miscellaneous"
+    }
+    
+    # Check if category has an irregular plural
+    if category in irregular_plurals:
+        return irregular_plurals[category]
+    
+    # Handle regular pluralization rules
+    if category.endswith(('s', 'ss', 'sh', 'ch', 'x', 'z')):
+        # Words ending in s, ss, sh, ch, x, z add 'es'
+        return category + 'es'
+    elif category.endswith('y') and len(category) > 1:
+        # Words ending in 'y' (not just 'y') change 'y' to 'ies'
+        if category[-2] not in 'aeiou':
+            return category[:-1] + 'ies'
+        else:
+            return category + 's'
+    elif category.endswith('f'):
+        # Words ending in 'f' change 'f' to 'ves'
+        return category[:-1] + 'ves'
+    elif category.endswith('fe'):
+        # Words ending in 'fe' change 'fe' to 'ves'
+        return category[:-2] + 'ves'
+    else:
+        # Default: add 's'
+        return category + 's'
+
+
+def get_category_display_name(category: str, plural: bool = True) -> str:
+    """
+    Get the display name for a category, with optional pluralization.
+    """
+    if plural:
+        return pluralize_category(category)
+    return category
 
 
 # ---------------- CATEGORY HELPER FUNCTIONS ----------------
@@ -1476,6 +1542,141 @@ async def delete_group_post(group_key: str):
         await db.commit()
 
 
+def generate_group_content_hash(items: list[dict]) -> str:
+    """Generate a hash for the entire group's content to detect changes."""
+    # Sort items by URL for consistent hashing
+    sorted_items = sorted(items, key=lambda x: x.get("url", ""))
+    
+    # Create a list of item hashes
+    item_hashes = []
+    for item in sorted_items:
+        item_hash = generate_content_hash(item)
+        item_hashes.append(item_hash)
+    
+    # Create combined hash
+    combined = "|".join(item_hashes)
+    return hashlib.md5(combined.encode('utf-8')).hexdigest()
+
+
+async def has_group_changed(group_key: str, current_items: list[dict]) -> tuple[bool, dict | None]:
+    """
+    Check if a group has changed since last posting.
+    Returns (has_changed, stored_group_data)
+    """
+    stored_group = await get_stored_group(group_key)
+    if not stored_group:
+        return True, None  # New group
+    
+    # Generate hash for current items
+    current_hash = generate_group_content_hash(current_items)
+    
+    # Compare with stored data (we'll store the hash in the categories field for comparison)
+    stored_categories = stored_group.get("categories", [])
+    if stored_categories and len(stored_categories) > 0:
+        # Check if the first category entry contains our hash
+        stored_hash = stored_categories[0] if isinstance(stored_categories[0], str) else None
+        if stored_hash and stored_hash.startswith("hash:"):
+            stored_hash = stored_hash[5:]  # Remove "hash:" prefix
+            return current_hash != stored_hash, stored_group
+    
+    # Fallback: compare item titles and URLs
+    stored_titles = set(stored_group.get("item_titles", []))
+    current_titles = set([item.get("title", "") for item in current_items])
+    
+    titles_changed = stored_titles != current_titles
+    return titles_changed, stored_group
+
+
+async def update_stored_group_data(group_key: str, location: str, price: str, items: list[dict], 
+                                 message_id: int = None, channel_id: int = None):
+    """
+    Update stored group data with current items and message info.
+    Stores the content hash for future change detection.
+    """
+    # Extract item titles and categories
+    item_titles = [item.get("title", "") for item in items]
+    categories = list(set([categorize_item(item) for item in items]))  # Unique categories
+    
+    # Generate and store content hash
+    content_hash = generate_group_content_hash(items)
+    # Store hash as first category entry with "hash:" prefix
+    categories_with_hash = [f"hash:{content_hash}"] + categories
+    
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("""
+            INSERT OR REPLACE INTO grouped_posts 
+            (group_key, location, price, item_titles, categories, discord_message_id, discord_channel_id, last_updated) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        """, (
+            group_key, location, price, json.dumps(item_titles), json.dumps(categories_with_hash),
+            message_id, channel_id
+        ))
+        await db.commit()
+
+
+async def edit_existing_group_message(channel, stored_group: dict, group_key: tuple[str, str], 
+                                    current_items: list[dict]) -> bool:
+    """
+    Edit an existing grouped message with updated items.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        # Get stored message info
+        msg_id = stored_group.get("discord_message_id")
+        ch_id = stored_group.get("discord_channel_id")
+        
+        if not msg_id or not ch_id:
+            log.warning("Missing message info for stored group %s", group_key[0][:8])
+            return False
+        
+        # Get the target channel
+        target_channel = bot.get_channel(ch_id)
+        if not target_channel:
+            log.warning("Channel %s not found for updating group message", ch_id)
+            return False
+        
+        # Fetch the existing message
+        try:
+            existing_msg = await target_channel.fetch_message(msg_id)
+        except discord.NotFound:
+            log.warning("Existing message %s not found for group %s", msg_id, group_key[0][:8])
+            return False
+        except discord.Forbidden:
+            log.error("No permission to fetch message %s", msg_id)
+            return False
+        
+        # Create updated embed and view
+        location, price = group_key
+        updated_embed, updated_view = await create_grouped_embed(group_key, current_items)
+        
+        # Add "Updated" indicator to footer
+        updated_embed.set_footer(text=f"AQW Daily Gift - Updated • {len(current_items)} items")
+        
+        # Edit the message
+        await existing_msg.edit(embed=updated_embed, view=updated_view)
+        
+        # Update stored data
+        group_key_hash = generate_group_key(location, price, current_items)
+        await update_stored_group_data(group_key_hash, location, price, current_items, msg_id, ch_id)
+        
+        # Update all items in the group to reference the updated message
+        for item in current_items:
+            pid = urlparse(item["url"]).path.strip("/").replace("/", "-") or item["url"]
+            await update_stored_item(pid, item)
+            await update_discord_message_info(pid, msg_id, ch_id)
+        
+        log.info("✅ Updated existing grouped message: %s (key: %s)", 
+                location, group_key_hash[:8])
+        return True
+        
+    except discord.HTTPException as e:
+        log.error("❌ Failed to edit grouped message: %s", e)
+        return False
+    except Exception as e:
+        log.error("❌ Unexpected error editing group message: %s", e)
+        return False
+
+
 async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_group: list[dict]) -> bool:
     """Safely post a grouped embed with proper locking and duplicate prevention."""
     global posting_lock
@@ -1491,11 +1692,30 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
         log.info("Checking group: %s | Location: '%s' | Price: '%s' | Items: %s", 
                 group_key_hash[:8], location, price, item_titles)
         
-        # Double-check if already posted (within lock)
-        if await is_group_already_posted(group_key_hash):
-            log.info("Group already posted (double-check), skipping: %s", group_key_hash[:8])
+        # Check if group already exists and if it has changed
+        has_changed, stored_group = await has_group_changed(group_key_hash, items_in_group)
+        
+        if not has_changed and stored_group:
+            log.info("Group unchanged, skipping: %s", group_key_hash[:8])
             return False
         
+        if stored_group:
+            # Group exists but has changed - update existing message
+            log.info("Group changed, updating existing message: %s", group_key_hash[:8])
+            
+            # Delete old individual messages first
+            await delete_old_individual_messages(items_in_group)
+            
+            # Edit existing message
+            success = await edit_existing_group_message(channel, stored_group, group_key, items_in_group)
+            if success:
+                log.info("✅ Successfully updated grouped message: %s", group_key_hash[:8])
+                return True
+            else:
+                log.error("❌ Failed to update grouped message, will create new one")
+                # Fall through to create new message if update failed
+        
+        # New group or update failed - create new message
         try:
             # Delete old individual messages first
             await delete_old_individual_messages(items_in_group)
@@ -1504,9 +1724,9 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
             grouped_embed, view = await create_grouped_embed(group_key, items_in_group)
             grouped_msg = await channel.send(embed=grouped_embed, view=view)
             
-            # Mark group as posted atomically
-            await mark_group_posted(group_key_hash, location, price, items_in_group, 
-                                  grouped_msg.id, channel.id)
+            # Mark group as posted atomically with updated data storage
+            await update_stored_group_data(group_key_hash, location, price, items_in_group, 
+                                          grouped_msg.id, channel.id)
             
             # Update all items in the group to reference the grouped message
             for item in items_in_group:
@@ -1514,7 +1734,7 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
                 await update_stored_item(pid, item)
                 await update_discord_message_info(pid, grouped_msg.id, channel.id)
             
-            log.info("✅ Posted grouped embed with %d items (key: %s)", len(items_in_group), group_key_hash[:8])
+            log.info("✅ Posted new grouped embed with %d items (key: %s)", len(items_in_group), group_key_hash[:8])
             return True
             
         except discord.HTTPException as e:
@@ -2524,10 +2744,13 @@ async def testcategories(interaction: discord.Interaction):
         }
     ]
 
-    # Create test embed
+    # Create test embed with pluralized categories
+    categories = get_categories_from_items(sample_items)
+    category_list = ", ".join([f"{pluralize_category(cat)} ({len(items)})" for cat, items in categories.items()])
+    
     embed = discord.Embed(
         title="🧪 Category Buttons Test",
-        description="This is a test of the dynamic category buttons system.\n\nClick any category button below to see items from that category!",
+        description=f"This is a test of the dynamic category buttons system with proper pluralization.\n\n**Available Categories:** {category_list}\n\nClick any category button below to see items from that category!",
         color=discord.Color.purple()
     )
     
@@ -2538,6 +2761,127 @@ async def testcategories(interaction: discord.Interaction):
     view = CategoryButtonsView(sample_items, "Dragon Lair", "1000 AC")
     
     await interaction.followup.send(embed=embed, view=view)
+
+
+@bot.tree.command(name="testpluralization", description="Test category pluralization")
+async def testpluralization(interaction: discord.Interaction):
+    """Test command to demonstrate category pluralization."""
+    try:
+        await interaction.response.defer(thinking=True)
+    except discord.NotFound:
+        return
+
+    # Test various categories
+    test_categories = [
+        "Weapon", "Armor", "Helm", "Cape", "Pet", "Misc",
+        "Sword", "Axe", "Bow", "Staff", "Wand"
+    ]
+    
+    embed = discord.Embed(
+        title="🔤 Category Pluralization Test",
+        description="Demonstrating proper pluralization of category names:",
+        color=discord.Color.gold()
+    )
+    
+    for category in test_categories:
+        plural = pluralize_category(category)
+        embed.add_field(
+            name=f"Singular: {category}",
+            value=f"Plural: **{plural}**",
+            inline=True
+        )
+    
+    embed.set_footer(text="AQW Daily Gift - Pluralization Test")
+    
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="testgroupupdate", description="Test group update functionality")
+async def testgroupupdate(interaction: discord.Interaction):
+    """Test command to demonstrate group update detection and editing."""
+    try:
+        await interaction.response.defer(thinking=True)
+    except discord.NotFound:
+        return
+
+    # Create initial sample items
+    initial_items = [
+        {
+            "title": "Test Sword",
+            "url": "https://example.com/test-sword",
+            "price": "500 AC",
+            "content": "__**Location:**__\nTest Area\n\n__**Price:**__\n500 AC\n\n__**Rarity:**__\nRare",
+            "images": ["https://i.imgur.com/sword1.jpg"]
+        },
+        {
+            "title": "Test Shield", 
+            "url": "https://example.com/test-shield",
+            "price": "500 AC",
+            "content": "__**Location:**__\nTest Area\n\n__**Price:**__\n500 AC\n\n__**Rarity:**__\nRare",
+            "images": ["https://i.imgur.com/shield1.jpg"]
+        }
+    ]
+
+    # Create initial group message
+    embed = discord.Embed(
+        title="🧪 Group Update Test - Initial",
+        description="This is the initial group message. Use the command again to see updates!",
+        color=discord.Color.blue()
+    )
+    
+    view = CategoryButtonsView(initial_items, "Test Area", "500 AC")
+    
+    await interaction.followup.send(embed=embed, view=view)
+    
+    # Log for demonstration
+    log.info("Test group created - run command again to test updates")
+
+
+@bot.tree.command(name="simulategroupchange", description="Simulate a change in existing group items")
+async def simulategroupchange(interaction: discord.Interaction):
+    """Simulate changing items in a group to test update detection."""
+    try:
+        await interaction.response.defer(thinking=True)
+    except discord.NotFound:
+        return
+
+    # Modified items (simulating changes)
+    changed_items = [
+        {
+            "title": "Test Sword",  # Same title
+            "url": "https://example.com/test-sword",
+            "price": "600 AC",  # Changed price
+            "content": "__**Location:**__\nTest Area\n\n__**Price:**__\n600 AC\n\n__**Rarity:**__\nEpic",  # Changed rarity
+            "images": ["https://i.imgur.com/sword2.jpg"]  # Changed image
+        },
+        {
+            "title": "Test Shield",
+            "url": "https://example.com/test-shield", 
+            "price": "600 AC",  # Changed price
+            "content": "__**Location:**__\nTest Area\n\n__**Price:**__\n600 AC\n\n__**Rarity:**__\nEpic",  # Changed rarity
+            "images": ["https://i.imgur.com/shield2.jpg"]  # Changed image
+        },
+        {
+            "title": "Test Helmet",  # New item added
+            "url": "https://example.com/test-helmet",
+            "price": "600 AC",
+            "content": "__**Location:**__\nTest Area\n\n__**Price:**__\n600 AC\n\n__**Rarity:**__\nEpic",
+            "images": ["https://i.imgur.com/helmet1.jpg"]
+        }
+    ]
+
+    embed = discord.Embed(
+        title="🔄 Simulated Group Changes",
+        description="Simulating changes to existing group:\n\n• Price changed: 500 AC → 600 AC\n• Rarity changed: Rare → Epic\n• Images updated\n• New item added: Test Helmet",
+        color=discord.Color.orange()
+    )
+    
+    embed.add_field(name="Changes Detected", value="The bot should now update the existing group message instead of creating a new one.", inline=False)
+    
+    await interaction.followup.send(embed=embed)
+    
+    # Log for demonstration
+    log.info("Simulated group changes - bot should update existing message on next check")
 
 
 # ---------------- READY ----------------
