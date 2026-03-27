@@ -1118,7 +1118,8 @@ class CategoryButton(discord.ui.Button):
 
 class CategoryButtonsView(discord.ui.View):
     """Dynamic view with category buttons for grouped items."""
-    def __init__(self, items: list[dict], location: str, price: str, timeout: float = 600.0):
+    def __init__(self, items: list[dict], location: str, price: str, timeout: float = 600.0, 
+                 include_close_button: bool = False):
         super().__init__(timeout=timeout)
         self.items = items
         self.location = location
@@ -1145,19 +1146,44 @@ class CategoryButtonsView(discord.ui.View):
                 button = CategoryButton(category, categories[category], self)
                 self.add_item(button)
         
-        # Add close button at the end
-        self.add_item(ClosePaneButton())
+        # Add close button only if explicitly requested (for ephemeral messages)
+        if include_close_button:
+            self.add_item(ClosePaneButton())
+
+
+class EphemeralCategoryView(CategoryButtonsView):
+    """View for ephemeral category messages with close button."""
+    def __init__(self, items: list[dict], location: str, price: str, timeout: float = 600.0):
+        super().__init__(items, location, price, timeout, include_close_button=True)
 
 
 # ---------------- CATEGORY PLURALIZATION ----------------
 def pluralize_category(category: str) -> str:
     """
     Convert category names to their proper plural forms.
-    Handles both regular and irregular pluralization.
+    Handles both regular and irregular pluralization for AQW item categories.
+    
+    Args:
+        category (str): The singular category name to pluralize
+        
+    Returns:
+        str: The properly pluralized category name
+        
+    Examples:
+        >>> pluralize_category("Weapon")
+        "Weapons"
+        >>> pluralize_category("Helm") 
+        "Helms"
+        >>> pluralize_category("Pet")
+        "Pets"
+        >>> pluralize_category("Misc")
+        "Miscellaneous"
+        >>> pluralize_category("Axe")
+        "Axes"
     """
-    # Define irregular plural forms
+    # Define comprehensive irregular plural forms for AQW categories
     irregular_plurals = {
-        # Weapon types that don't change or have special forms
+        # Weapon types that are already plural (don't change)
         "Axes": "Axes",           # Already plural
         "Bows": "Bows",           # Already plural  
         "Daggers": "Daggers",     # Already plural
@@ -1174,35 +1200,75 @@ def pluralize_category(category: str) -> str:
         
         # Main categories with irregular plurals
         "Weapon": "Weapons",
-        "Armor": "Armors",
+        "Armor": "Armors", 
         "Helm": "Helms", 
         "Cape": "Capes",
         "Pet": "Pets",
-        "Misc": "Miscellaneous"
+        "Misc": "Miscellaneous",
+        
+        # Common singular weapon types that need pluralization
+        "Axe": "Axes",
+        "Bow": "Bows",
+        "Dagger": "Daggers",
+        "Gauntlet": "Gauntlets",
+        "Gun": "Guns",
+        "HandGun": "HandGuns",
+        "Mace": "Maces",
+        "Polearm": "Polearms",
+        "Rifle": "Rifles",
+        "Staff": "Staffs",
+        "Sword": "Swords",
+        "Wand": "Wands",
+        "Whip": "Whips",
+        
+        # Other potential categories
+        "Shield": "Shields",
+        "Boots": "Boots",         # Already plural
+        "Glove": "Gloves",
+        "Ring": "Rings",
+        "Amulet": "Amulets",
+        "Scroll": "Scrolls",
+        "Potion": "Potions",
+        "Miscellaneous": "Miscellaneous"  # Already plural
     }
     
-    # Check if category has an irregular plural
+    # First check if category has an irregular plural (most common case)
     if category in irregular_plurals:
         return irregular_plurals[category]
     
-    # Handle regular pluralization rules
+    # Handle regular English pluralization rules for any unknown categories
     if category.endswith(('s', 'ss', 'sh', 'ch', 'x', 'z')):
         # Words ending in s, ss, sh, ch, x, z add 'es'
+        # Examples: class -> classes, box -> boxes, buzz -> buzzes
         return category + 'es'
     elif category.endswith('y') and len(category) > 1:
-        # Words ending in 'y' (not just 'y') change 'y' to 'ies'
+        # Words ending in 'y' (not just 'y') change 'y' to 'ies' if preceded by consonant
         if category[-2] not in 'aeiou':
+            # Examples: city -> cities, party -> parties
             return category[:-1] + 'ies'
         else:
+            # Examples: boy -> boys, toy -> toys (vowel + y just adds 's')
             return category + 's'
     elif category.endswith('f'):
         # Words ending in 'f' change 'f' to 'ves'
+        # Examples: wolf -> wolves, leaf -> leaves
         return category[:-1] + 'ves'
     elif category.endswith('fe'):
         # Words ending in 'fe' change 'fe' to 'ves'
+        # Examples: knife -> knives, life -> lives
         return category[:-2] + 'ves'
+    elif category.endswith('o'):
+        # Words ending in 'o' often add 'es' (but not always)
+        # Examples: potato -> potatoes, tomato -> tomatoes
+        # But: photo -> photos, piano -> pianos
+        # We'll use 'es' for consistency in gaming terms
+        if len(category) > 1 and category[-2] not in 'aeiou':
+            return category + 'es'
+        else:
+            return category + 's'
     else:
-        # Default: add 's'
+        # Default: add 's' for most regular nouns
+        # Examples: cat -> cats, dog -> dogs, item -> items
         return category + 's'
 
 
@@ -2765,33 +2831,66 @@ async def testcategories(interaction: discord.Interaction):
 
 @bot.tree.command(name="testpluralization", description="Test category pluralization")
 async def testpluralization(interaction: discord.Interaction):
-    """Test command to demonstrate category pluralization."""
+    """Test command to demonstrate comprehensive category pluralization."""
     try:
         await interaction.response.defer(thinking=True)
     except discord.NotFound:
         return
 
-    # Test various categories
+    # Test comprehensive categories including all edge cases
     test_categories = [
+        # Main categories (irregular plurals)
         "Weapon", "Armor", "Helm", "Cape", "Pet", "Misc",
-        "Sword", "Axe", "Bow", "Staff", "Wand"
+        
+        # Already plural weapon types (shouldn't change)
+        "Axes", "Bows", "Daggers", "Swords", "Staffs", "Wands",
+        
+        # Singular weapon types (should be pluralized)
+        "Axe", "Bow", "Dagger", "Sword", "Staff", "Wand",
+        
+        # Other potential categories
+        "Shield", "Boots", "Glove", "Ring", "Amulet", "Scroll", "Potion",
+        
+        # Edge cases for regular rules
+        "Knife", "Wolf", "City", "Party", "Box", "Hero"
     ]
     
     embed = discord.Embed(
-        title="🔤 Category Pluralization Test",
-        description="Demonstrating proper pluralization of category names:",
+        title="🔤 Comprehensive Category Pluralization Test",
+        description="Demonstrating proper pluralization of all category types:",
         color=discord.Color.gold()
     )
     
-    for category in test_categories:
-        plural = pluralize_category(category)
+    # Group by category type for better organization
+    main_categories = ["Weapon", "Armor", "Helm", "Cape", "Pet", "Misc"]
+    already_plural = ["Axes", "Bows", "Daggers", "Swords", "Staffs", "Wands"]
+    singular_weapons = ["Axe", "Bow", "Dagger", "Sword", "Staff", "Wand"]
+    other_items = ["Shield", "Boots", "Glove", "Ring", "Amulet", "Scroll", "Potion"]
+    edge_cases = ["Knife", "Wolf", "City", "Party", "Box", "Hero"]
+    
+    # Add sections for each category type
+    sections = [
+        ("📋 Main Categories", main_categories),
+        ("🔄 Already Plural", already_plural),
+        ("⚔️ Singular Weapons", singular_weapons),
+        ("💎 Other Items", other_items),
+        ("🎯 Edge Cases", edge_cases)
+    ]
+    
+    for section_name, categories in sections:
+        field_value = ""
+        for category in categories:
+            plural = pluralize_category(category)
+            indicator = "✅" if category != plural else "➡️"
+            field_value += f"{indicator} `{category}` → **{plural}**\n"
+        
         embed.add_field(
-            name=f"Singular: {category}",
-            value=f"Plural: **{plural}**",
+            name=section_name,
+            value=field_value,
             inline=True
         )
     
-    embed.set_footer(text="AQW Daily Gift - Pluralization Test")
+    embed.set_footer(text="AQW Daily Gift - Comprehensive Pluralization Test")
     
     await interaction.followup.send(embed=embed)
 
@@ -2882,6 +2981,66 @@ async def simulategroupchange(interaction: discord.Interaction):
     
     # Log for demonstration
     log.info("Simulated group changes - bot should update existing message on next check")
+
+
+@bot.tree.command(name="dismiss", description="Dismiss the most recent grouped message in this channel")
+@commands.has_permissions(manage_messages=True)
+async def dismiss(interaction: discord.Interaction):
+    """Dismiss (delete) the most recent grouped message in the channel."""
+    try:
+        await interaction.response.defer(thinking=True)
+    except discord.NotFound:
+        return
+    
+    channel = interaction.channel
+    if not channel:
+        await interaction.followup.send("Channel not found.", ephemeral=True)
+        return
+    
+    # Get recent messages from the channel
+    try:
+        messages = [msg async for msg in channel.history(limit=20)]
+        
+        # Find the most recent message that looks like a grouped post
+        grouped_message = None
+        for message in messages:
+            # Skip messages from bots that aren't our bot
+            if message.author.bot and message.author.id != bot.user.id:
+                continue
+                
+            # Check if this looks like a grouped message
+            if (message.embeds and 
+                message.embeds[0].title and 
+                ("Daily Gift" in message.embeds[0].title or "Location:" in str(message.embeds[0].description))):
+                grouped_message = message
+                break
+        
+        if not grouped_message:
+            await interaction.followup.send("No recent grouped message found to dismiss.", ephemeral=True)
+            return
+        
+        # Delete the message
+        await grouped_message.delete()
+        
+        # Log the action
+        log.info("Dismissed grouped message in channel %s by %s", channel.name, interaction.user.name)
+        
+        await interaction.followup.send("✅ Grouped message dismissed successfully.", ephemeral=True)
+        
+    except discord.Forbidden:
+        await interaction.followup.send("❌ I don't have permission to delete messages in this channel.", ephemeral=True)
+    except Exception as e:
+        log.error("Error dismissing message: %s", e)
+        await interaction.followup.send(f"❌ Error dismissing message: {e}", ephemeral=True)
+
+
+@dismiss.error
+async def dismiss_error(interaction: discord.Interaction, error):
+    """Handle errors for the dismiss command."""
+    if isinstance(error, commands.MissingPermissions):
+        await interaction.response.send_message("❌ You need 'Manage Messages' permission to use this command.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"❌ An error occurred: {error}", ephemeral=True)
 
 
 # ---------------- READY ----------------
