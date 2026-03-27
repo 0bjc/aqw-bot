@@ -2230,15 +2230,23 @@ def normalize_string(s: str) -> str:
 
 
 def generate_stable_group_key(location: str, price: str, items: list[dict]) -> str:
-    """Generate a highly stable and consistent hash key for a group of items.
+    """
+    Generate a highly stable and consistent hash key for a group of items.
+    This key should be identical for the same logical group regardless of item order
+    or minor variations in the items themselves.
     
-    This function creates a deterministic hash that will be identical for the same
-    group of items regardless of order, using multiple normalization layers.
+    The key is generated based on:
+    1. Normalized location
+    2. Normalized price
+    
+    Note: We DON'T include items in the key generation because we want the same
+    group key to be used for updates when items are added/removed from the group.
+    Change detection is handled separately by content hashing.
     
     Args:
         location (str): The normalized location string
         price (str): The normalized price string  
-        items (list[dict]): List of items in the group
+        items (list[dict]): List of items in the group (not used for key generation)
         
     Returns:
         str: Stable MD5 hash key for the group
@@ -2249,39 +2257,21 @@ def generate_stable_group_key(location: str, price: str, items: list[dict]) -> s
         >>> len(key)  # Always 32 characters (MD5)
         32
     """
-    log.debug("Generating stable group key for %d items", len(items))
+    log.debug("Generating stable group key for location='%s', price='%s'", location, price)
     
     # Multi-layer normalization for maximum stability
     norm_location = normalize_string(location).strip()
     norm_price = normalize_string(price).strip()
     
-    # Extract and normalize the most stable item identifiers
-    item_identifiers = []
-    for item in items:
-        url = item.get("url", "").strip()
-        if url:
-            # Normalize URL to remove common variations
-            norm_url = normalize_string(url).strip()
-            # Remove trailing slashes for consistency
-            norm_url = norm_url.rstrip('/')
-            if norm_url:
-                item_identifiers.append(norm_url)
-        else:
-            log.warning("Item missing URL: %s", item.get("title", "Unknown"))
-    
-    # Sort identifiers for consistent ordering regardless of input order
-    item_identifiers.sort()
-    
     # Create deterministic string with clear separators
-    # Format: location|price|count|url1|url2|url3...
-    components = [norm_location, norm_price, str(len(items))] + item_identifiers
-    combined_string = "|".join(components)
+    # Format: location|price
+    combined_string = f"{norm_location}|{norm_price}"
     
     # Generate hash
     import hashlib
     hash_key = hashlib.md5(combined_string.encode('utf-8')).hexdigest()
     
-    log.debug("Generated group key: %s (from %d items)", hash_key[:8], len(items))
+    log.debug("Generated group key: %s (location='%s', price='%s')", hash_key[:8], location, price)
     return hash_key
 
 
@@ -2643,12 +2633,15 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
         has_changed, stored_group = await has_group_changed(group_key_hash, items_in_group)
         
         if not has_changed and stored_group:
-            log.info("Group unchanged, skipping: %s", group_key_hash[:8])
+            log.info("Group unchanged, skipping: %s (%d items)", group_key_hash[:8], len(items_in_group))
             return False
+        elif stored_group:
+            log.info("Group changed, updating existing: %s (%d items)", group_key_hash[:8], len(items_in_group))
+        else:
+            log.info("New group, creating: %s (%d items)", group_key_hash[:8], len(items_in_group))
         
         if stored_group:
             # Group exists but has changed - update existing message
-            log.info("Group changed, updating existing message: %s", group_key_hash[:8])
             
             # Delete old individual messages first
             await delete_old_individual_messages(items_in_group)
