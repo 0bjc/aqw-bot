@@ -179,6 +179,24 @@ async def init_db() -> None:
             INSERT OR IGNORE INTO counters (name, value) VALUES ('daily_gift', 0)
         """)
         
+        # Clean up orphaned group posts (groups with no corresponding items)
+        await db.execute("""
+            DELETE FROM grouped_posts 
+            WHERE group_key NOT IN (
+                SELECT DISTINCT group_key FROM (
+                    SELECT DISTINCT 
+                        CASE 
+                            WHEN COUNT(*) OVER (PARTITION BY location, price) >= 2 THEN 
+                                (SELECT group_key FROM grouped_posts gp 
+                                 WHERE gp.location = items.location AND gp.price = items.price 
+                                 LIMIT 1)
+                        END as group_key
+                    FROM items
+                    WHERE location IS NOT NULL AND price IS NOT NULL
+                ) WHERE group_key IS NOT NULL
+            )
+        """)
+        
         await db.commit()
 
 
@@ -524,12 +542,11 @@ def categorize_item(item: dict) -> str:
     return "Misc"
 
 
-def group_items_by_location_price(items: list[dict]) -> dict[tuple[str, str], list[dict]]:
-    """Group items by normalized Location and Price."""
-    groups = {}
-    
+def group_items_by_location_price(items: list[dict]) -> dict[str, list[dict]]:
+    """Group items by normalized Location and Price using hash-based keys."""
+    # First, extract location and price for all items
+    item_data = []
     for item in items:
-        # Extract location and price from content
         content = item.get("content", "")
         location = "Unknown"
         price = "Unknown"
@@ -544,14 +561,28 @@ def group_items_by_location_price(items: list[dict]) -> dict[tuple[str, str], li
         if price_match:
             price = normalize_string(price_match.group(1).strip())
         
-        # Create group key with normalized values
-        group_key = (location, price)
-        
-        if group_key not in groups:
-            groups[group_key] = []
-        groups[group_key].append(item)
+        item_data.append({
+            'item': item,
+            'location': location,
+            'price': price
+        })
     
-    return groups
+    # Group by location and price
+    groups_by_location_price = {}
+    for data in item_data:
+        key = (data['location'], data['price'])
+        if key not in groups_by_location_price:
+            groups_by_location_price[key] = []
+        groups_by_location_price[key].append(data['item'])
+    
+    # Now generate hash keys for each group
+    final_groups = {}
+    for (location, price), items_in_group in groups_by_location_price.items():
+        # Generate hash key for the entire group
+        group_key_hash = generate_group_key(location, price, items_in_group)
+        final_groups[group_key_hash] = items_in_group
+    
+    return final_groups
 
 
 def create_categorized_item_list(items: list[dict]) -> str:
@@ -1199,22 +1230,19 @@ def generate_group_key(location: str, price: str, items: list[dict]) -> str:
     norm_location = normalize_string(location)
     norm_price = normalize_string(price)
     
-    # Create a more stable item signature
-    item_signatures = []
+    # Create a more stable item signature using only URLs (most stable identifier)
+    item_urls = []
     for item in items:
-        # Use multiple fields for stability
-        title = normalize_string(item.get("title", ""))
         url = normalize_string(item.get("url", ""))
-        
-        # Create item signature from title and URL (URL is more stable than title)
-        item_sig = f"{title}|{url}"
-        item_signatures.append(item_sig)
+        if url:  # Only include non-empty URLs
+            item_urls.append(url)
     
-    # Sort signatures for consistent ordering
-    item_signatures.sort()
+    # Sort URLs for consistent ordering
+    item_urls.sort()
     
     # Create combined string with separator that won't appear in normalized data
-    combined = f"{norm_location}||{norm_price}||{'||'.join(item_signatures)}"
+    # Use count of items + sorted URLs for stability
+    combined = f"{norm_location}||{norm_price}||{len(items)}||{'||'.join(item_urls)}"
     
     # Generate hash for unique key
     import hashlib
@@ -1308,6 +1336,11 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
         
         # Generate stable group key
         group_key_hash = generate_group_key(location, price, items_in_group)
+        
+        # Log group details for debugging
+        item_titles = [item.get("title", "Unknown") for item in items_in_group]
+        log.info("Checking group: %s | Location: '%s' | Price: '%s' | Items: %s", 
+                group_key_hash[:8], location, price, item_titles)
         
         # Double-check if already posted (within lock)
         if await is_group_already_posted(group_key_hash):
@@ -2122,8 +2155,22 @@ async def check_posts():
                 groups = group_items_by_location_price(changed_items)
                 
                 # Process each group
-                for group_key, items_in_group in groups.items():
-                    location, price = group_key
+                for group_key_hash, items_in_group in groups.items():
+                    # Extract location and price from first item for display
+                    first_item = items_in_group[0]
+                    content = first_item.get("content", "")
+                    location = "Unknown"
+                    price = "Unknown"
+                    
+                    # Parse location from first item
+                    loc_match = re.search(r"__\*\*Location:\*\*__\s*\n(.+?)(?=\n\n|\n__\*\*|$)", content, re.IGNORECASE | re.DOTALL)
+                    if loc_match:
+                        location = normalize_string(loc_match.group(1).strip())
+                    
+                    # Parse price from first item
+                    price_match = re.search(r"__\*\*Price:\*\*__\s*\n(.+?)(?=\n\n|\n__\*\*|$)", content, re.IGNORECASE | re.DOTALL)
+                    if price_match:
+                        price = normalize_string(price_match.group(1).strip())
                     
                     if len(items_in_group) >= 2:
                         # GROUPED POST: 2+ items with same Location + Price
@@ -2131,7 +2178,7 @@ async def check_posts():
                                 len(items_in_group), location, price)
                         
                         # Use safe posting with proper locking and duplicate prevention
-                        success = await safe_post_grouped_embed(channel, group_key, items_in_group)
+                        success = await safe_post_grouped_embed(channel, (location, price), items_in_group)
                         
                         if success:
                             await asyncio.sleep(message_delay)  # Rate limiting
