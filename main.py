@@ -2191,12 +2191,21 @@ async def mark_posted(pid: str, item: dict, message_id: int = None, channel_id: 
 
 async def update_discord_message_info(pid: str, message_id: int, channel_id: int):
     """Update Discord message info for an existing item."""
+    log.debug("Updating discord_message_info: pid=%s, message_id=%s, channel_id=%s", pid, message_id, channel_id)
+    
     async with aiosqlite.connect(DB) as db:
         await db.execute("""
             UPDATE items SET discord_message_id=?, discord_channel_id=?, last_updated=datetime('now')
             WHERE id=?
         """, (message_id, channel_id, pid))
+        
+        # Verify the update
+        async with db.execute("SELECT changes()") as cur:
+            changes = await cur.fetchone()
+            log.debug("Database changes: %s", changes[0])
+        
         await db.commit()
+        log.debug("Successfully updated discord_message_info for pid=%s", pid)
 
 
 def normalize_string(s: str) -> str:
@@ -2439,16 +2448,25 @@ async def get_stored_group(group_key: str) -> dict | None:
 
 async def get_items_in_grouped_message(message_id: int) -> list[dict]:
     """Get all items that belong to a specific grouped message."""
+    log.debug("Querying items for discord_message_id=%s", message_id)
+    
     async with aiosqlite.connect(DB) as db:
         async with db.execute("""
             SELECT id, url, title, content, price, rarity, image, images, content_hash
             FROM items WHERE discord_message_id=?
         """, (message_id,)) as cur:
             rows = await cur.fetchall()
+            log.debug("Found %d rows for discord_message_id=%s", len(rows), message_id)
+            
             items = []
             for row in rows:
                 # Generate pid from the stored id (which is the pid)
                 pid = row[0]
+                try:
+                    images_data = json.loads(row[7]) if row[7] else []
+                except (json.JSONDecodeError, TypeError):
+                    images_data = []
+                    
                 item_data = {
                     "pid": pid,
                     "id": row[0],
@@ -2458,10 +2476,13 @@ async def get_items_in_grouped_message(message_id: int) -> list[dict]:
                     "price": row[4],
                     "rarity": row[5],
                     "image": row[6],
-                    "images": json.loads(row[7]) if row[7] else [],
+                    "images": images_data,
                     "content_hash": row[8]
                 }
                 items.append(item_data)
+                log.debug("Found item: %s (pid: %s)", item_data["title"], pid)
+            
+            log.debug("Returning %d items for message %s", len(items), message_id)
             return items
 
 
