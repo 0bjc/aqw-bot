@@ -2603,7 +2603,7 @@ async def edit_existing_group_message(channel, stored_group: dict, group_key: tu
         await existing_msg.edit(embed=updated_embed, view=updated_view)
         
         # Update stored data
-        group_key_hash = generate_group_key(location, price, current_items)
+        group_key_hash = generate_stable_group_key(location, price, current_items)
         await update_stored_group_data(group_key_hash, location, price, current_items, msg_id, ch_id)
         
         # Update all items in the group to reference the updated message
@@ -2632,7 +2632,7 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
         location, price = group_key
         
         # Generate stable group key
-        group_key_hash = generate_group_key(location, price, items_in_group)
+        group_key_hash = generate_stable_group_key(location, price, items_in_group)
         
         # Log group details for debugging
         item_titles = [item.get("title", "Unknown") for item in items_in_group]
