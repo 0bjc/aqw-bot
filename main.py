@@ -995,8 +995,179 @@ class ClosePaneButton(discord.ui.Button):
             )
 
 
+# ---------------- CATEGORY BUTTON VIEW ----------------
+class CategoryButton(discord.ui.Button):
+    """Dynamic button for a specific item category."""
+    def __init__(self, category: str, items: list[dict], category_view: 'CategoryButtonsView'):
+        self.category = category
+        self.items = items
+        self.category_view = category_view
+        
+        # Style buttons based on category type
+        style_map = {
+            "Axes": discord.ButtonStyle.danger,
+            "Bows": discord.ButtonStyle.success, 
+            "Daggers": discord.ButtonStyle.secondary,
+            "Gauntlets": discord.ButtonStyle.primary,
+            "Guns": discord.ButtonStyle.danger,
+            "HandGuns": discord.ButtonStyle.secondary,
+            "Maces": discord.ButtonStyle.primary,
+            "Polearms": discord.ButtonStyle.success,
+            "Rifles": discord.ButtonStyle.danger,
+            "Staffs": discord.ButtonStyle.success,
+            "Swords": discord.ButtonStyle.primary,
+            "Wands": discord.ButtonStyle.success,
+            "Whips": discord.ButtonStyle.secondary,
+            "Weapon": discord.ButtonStyle.danger,
+            "Armor": discord.ButtonStyle.primary,
+            "Helm": discord.ButtonStyle.secondary,
+            "Cape": discord.ButtonStyle.success,
+            "Pet": discord.ButtonStyle.primary,
+            "Misc": discord.ButtonStyle.secondary
+        }
+        
+        style = style_map.get(category, discord.ButtonStyle.secondary)
+        
+        # Create emoji mapping for categories
+        emoji_map = {
+            "Axes": "🪓", "Bows": "🏹", "Daggers": "🗡️", "Gauntlets": "🥊",
+            "Guns": "🔫", "HandGuns": "🔫", "Maces": "🔨", "Polearms": "🔱",
+            "Rifles": "🔫", "Staffs": "🔮", "Swords": "⚔️", "Wands": "🪄",
+            "Whips": "🪢", "Weapon": "⚔️", "Armor": "🛡️", "Helm": "🎩",
+            "Cape": "🧥", "Pet": "🐾", "Misc": "📦"
+        }
+        
+        emoji = emoji_map.get(category, "📦")
+        
+        super().__init__(
+            label=f"{category} ({len(items)})",
+            style=style,
+            emoji=emoji,
+            custom_id=f"category_{category.lower().replace(' ', '_')}"
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        """Send ephemeral message with items from this category."""
+        # Filter items for this category
+        category_items = [item for item in self.items if categorize_item(item) == self.category]
+        
+        if not category_items:
+            await interaction.response.send_message(
+                f"No items found in {self.category} category.",
+                ephemeral=True
+            )
+            return
+        
+        # Create embed for this category
+        embed = discord.Embed(
+            title=f"📂 {self.category} ({len(category_items)} items)",
+            description=f"**Location:** {self.category_view.location}\n**Price:** {self.category_view.price}\n\n",
+            color=discord.Color.blue()
+        )
+        
+        # Add items to embed
+        item_list = []
+        for item in category_items:
+            title = item.get("title", "Unknown")
+            url = item.get("url", "")
+            price = item.get("price", "N/A")
+            
+            if url:
+                item_list.append(f"• **[{title}]({url})**\n  💰 {price}")
+            else:
+                item_list.append(f"• **{title}**\n  💰 {price}")
+        
+        # Add items to description
+        embed.description += "\n".join(item_list)
+        
+        # Truncate if too long
+        if len(embed.description) > 4000:
+            embed.description = embed.description[:3950] + "\n... *(truncated)*"
+        
+        # Collect images for this category
+        category_images = []
+        for item in category_items:
+            if item.get("images"):
+                category_images.extend(item.get("images", []))
+            elif item.get("image"):
+                category_images.append(item["image"])
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_images = []
+        for img in category_images:
+            if img and img not in seen:
+                seen.add(img)
+                unique_images.append(img)
+        
+        # Add image if available
+        view = None
+        if unique_images:
+            embed.set_image(url=unique_images[0])
+            if len(unique_images) > 1:
+                embed.description += f"\n\n🖼️ **{len(unique_images)} images available**"
+            
+            # Create navigation view for images
+            view = CategoryImageView(unique_images, self.category, f"{len(category_items)} Items")
+        
+        embed.set_footer(text="AQW Daily Gift - Category View")
+        
+        # Send ephemeral message
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class CategoryButtonsView(discord.ui.View):
+    """Dynamic view with category buttons for grouped items."""
+    def __init__(self, items: list[dict], location: str, price: str, timeout: float = 600.0):
+        super().__init__(timeout=timeout)
+        self.items = items
+        self.location = location
+        self.price = price
+        
+        # Categorize items and create buttons dynamically
+        categories = {}
+        for item in items:
+            category = categorize_item(item)
+            if category not in categories:
+                categories[category] = []
+            categories[category].append(item)
+        
+        # Define category order for button layout
+        category_order = [
+            "Axes", "Bows", "Daggers", "Gauntlets", "Guns", "HandGuns", 
+            "Maces", "Polearms", "Rifles", "Staffs", "Swords", "Wands", "Whips",
+            "Weapon", "Armor", "Helm", "Cape", "Pet", "Misc"
+        ]
+        
+        # Add buttons in order, but only for categories that have items
+        for category in category_order:
+            if category in categories:
+                button = CategoryButton(category, categories[category], self)
+                self.add_item(button)
+        
+        # Add close button at the end
+        self.add_item(ClosePaneButton())
+
+
+# ---------------- CATEGORY HELPER FUNCTIONS ----------------
+async def create_category_buttons_view(items: list[dict], location: str = "Various", price: str = "Various") -> CategoryButtonsView:
+    """Helper function to create a CategoryButtonsView for any group of items."""
+    return CategoryButtonsView(items, location, price)
+
+
+def get_categories_from_items(items: list[dict]) -> dict[str, list[dict]]:
+    """Helper function to get categorized items from a list of items."""
+    categories = {}
+    for item in items:
+        category = categorize_item(item)
+        if category not in categories:
+            categories[category] = []
+        categories[category].append(item)
+    return categories
+
+
 # ---------------- EMBED CREATION ----------------
-async def create_grouped_embed(group_key: tuple[str, str], items: list[dict]) -> tuple[discord.Embed, GroupedPaneView]:
+async def create_grouped_embed(group_key: tuple[str, str], items: list[dict]) -> tuple[discord.Embed, CategoryButtonsView]:
     """Create a grouped embed for items with same Location and Price with ephemeral images."""
     location, price = group_key
     
@@ -1048,12 +1219,8 @@ async def create_grouped_embed(group_key: tuple[str, str], items: list[dict]) ->
             seen.add(img)
             unique_images.append(img)
     
-    # Create grouped view with all images (or None if no images)
-    view = None
-    if unique_images:
-        # Create a composite title for the group
-        group_title = f"{len(items)} Items from {location}"
-        view = GroupedPaneView(items, group_title)
+    # Create category buttons view for grouped items
+    view = CategoryButtonsView(items, location, price)
     
     return embed, view
 
@@ -2322,6 +2489,55 @@ async def testaegift(interaction: discord.Interaction):
 @bot.tree.command(name="ping", description="Test if bot is responding")
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message("Pong! Bot is working!")
+
+
+@bot.tree.command(name="testcategories", description="Test category buttons with sample items")
+async def testcategories(interaction: discord.Interaction):
+    """Test command to demonstrate category buttons functionality."""
+    try:
+        await interaction.response.defer(thinking=True)
+    except discord.NotFound:
+        return
+
+    # Create sample items for testing
+    sample_items = [
+        {
+            "title": "Dragon Sword",
+            "url": "https://example.com/dragon-sword",
+            "price": "1000 AC",
+            "content": "__**Location:**__\nDragon Lair\n\n__**Price:**__\n1000 AC\n\n__**Rarity:**__\nEpic",
+            "images": ["https://i.imgur.com/dragon.jpg"]
+        },
+        {
+            "title": "Magic Staff",
+            "url": "https://example.com/magic-staff", 
+            "price": "1000 AC",
+            "content": "__**Location:**__\nDragon Lair\n\n__**Price:**__\n1000 AC\n\n__**Rarity:**__\nEpic",
+            "images": ["https://i.imgur.com/staff.jpg"]
+        },
+        {
+            "title": "Steel Armor",
+            "url": "https://example.com/steel-armor",
+            "price": "1000 AC", 
+            "content": "__**Location:**__\nDragon Lair\n\n__**Price:**__\n1000 AC\n\n__**Rarity:**__\nEpic",
+            "images": ["https://i.imgur.com/armor.jpg"]
+        }
+    ]
+
+    # Create test embed
+    embed = discord.Embed(
+        title="🧪 Category Buttons Test",
+        description="This is a test of the dynamic category buttons system.\n\nClick any category button below to see items from that category!",
+        color=discord.Color.purple()
+    )
+    
+    embed.add_field(name="Sample Items", value=f"• {sample_items[0]['title']}\n• {sample_items[1]['title']}\n• {sample_items[2]['title']}", inline=False)
+    embed.set_footer(text="AQW Daily Gift - Test Command")
+    
+    # Create category buttons view
+    view = CategoryButtonsView(sample_items, "Dragon Lair", "1000 AC")
+    
+    await interaction.followup.send(embed=embed, view=view)
 
 
 # ---------------- READY ----------------
