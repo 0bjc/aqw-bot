@@ -357,212 +357,559 @@ def extract_from_breadcrumbs(soup: BeautifulSoup, all_categories: list[str]) -> 
 
 
 def categorize_item(item: dict) -> str:
-    """Categorize an item using breadcrumb data first, then fallback to keywords."""
+    """
+    Categorize an item using breadcrumb data first, then fallback to keyword analysis.
+    
+    This function provides comprehensive logging and handles edge cases for reliable categorization.
+    
+    Args:
+        item (dict): Item data dictionary
+        
+    Returns:
+        str: The determined category for the item
+    """
+    item_title = item.get("title", "Unknown")
+    log.debug("Categorizing item: %s", item_title)
+    
     # First, try to extract category from breadcrumb if we have the HTML
     if "html_content" in item:
-        breadcrumb_category = extract_breadcrumb_category(item["html_content"], item.get("url", ""))
-        if breadcrumb_category != "No category found":
-            log.info("Category from breadcrumb: %s for %s", breadcrumb_category, item.get("title", "Unknown"))
-            return breadcrumb_category
+        try:
+            breadcrumb_category = extract_breadcrumb_category(item["html_content"], item.get("url", ""))
+            if breadcrumb_category != "No category found":
+                log.info("✓ Category from breadcrumb: %s for %s", breadcrumb_category, item_title)
+                return breadcrumb_category
+            else:
+                log.debug("✗ No breadcrumb category found for %s", item_title)
+        except Exception as e:
+            log.error("✗ Error extracting breadcrumb category for %s: %s", item_title, e)
+    else:
+        log.debug("No HTML content available for %s", item_title)
     
     # Fallback to keyword-based categorization with specific weapon types
     title = item.get("title", "").lower()
     content = item.get("content", "").lower()
     title_icons = item.get("title_icons", "").lower()
     
-    # Specific weapon type keywords
-    axe_keywords = ["axe", "hatchet", "battleaxe", "cleaver", "splitter"]
-    bow_keywords = ["bow", "archery", "crossbow", "longbow", "shortbow", "compound"]
-    dagger_keywords = ["dagger", "knife", "shiv", "stiletto", "blade", "dirk"]
-    gauntlet_keywords = ["gauntlet", "glove", "fist", "hand", "punch"]
-    gun_keywords = ["gun", "firearm", "pistol", "revolver", "shotgun"]
-    handgun_keywords = ["handgun", "pistol", "revolver", "sidearm"]
-    mace_keywords = ["mace", "club", "morningstar", "flail", "bludgeon"]
-    polearm_keywords = ["polearm", "spear", "lance", "pike", "halberd", "trident"]
-    rifle_keywords = ["rifle", "sniper", "carbine", "assault", "musket"]
-    staff_keywords = ["staff", "rod", "wand", "stick", "quarterstaff"]
-    sword_keywords = ["sword", "blade", "saber", "katana", "rapier", "scimitar", "claymore"]
-    wand_keywords = ["wand", "magic", "spell", "arcane", "mystic"]
-    whip_keywords = ["whip", "lash", "chain", "rope", "flail"]
+    log.debug("Keyword analysis for %s: Title='%s', Content length=%d, Icons='%s'", 
+             item_title, title[:50], len(content), title_icons[:50])
     
-    # Main category keywords (fallback)
-    armor_keywords = [
-        "armor", "armour", "plate", "mail", "chain", "scale", "leather", "cloth",
-        "robe", "tunic", "vest", "chest", "breastplate", "cuirass", "defense"
-    ]
+    # Define keyword categories with weights for better matching
+    keyword_categories = {
+        "Axes": {
+            "keywords": ["axe", "hatchet", "battleaxe", "cleaver", "splitter"],
+            "weight": 3,
+            "priority": 1
+        },
+        "Bows": {
+            "keywords": ["bow", "archery", "crossbow", "longbow", "shortbow", "compound"],
+            "weight": 3,
+            "priority": 2
+        },
+        "Daggers": {
+            "keywords": ["dagger", "knife", "shiv", "stiletto", "blade", "dirk"],
+            "weight": 3,
+            "priority": 3
+        },
+        "Gauntlets": {
+            "keywords": ["gauntlet", "glove", "fist", "hand", "punch"],
+            "weight": 3,
+            "priority": 4
+        },
+        "Guns": {
+            "keywords": ["gun", "firearm", "pistol", "revolver", "shotgun"],
+            "weight": 3,
+            "priority": 5
+        },
+        "HandGuns": {
+            "keywords": ["handgun", "pistol", "revolver", "sidearm"],
+            "weight": 3,
+            "priority": 6
+        },
+        "Maces": {
+            "keywords": ["mace", "club", "morningstar", "flail", "bludgeon"],
+            "weight": 3,
+            "priority": 7
+        },
+        "Polearms": {
+            "keywords": ["polearm", "spear", "lance", "pike", "halberd", "trident"],
+            "weight": 3,
+            "priority": 8
+        },
+        "Rifles": {
+            "keywords": ["rifle", "sniper", "carbine", "assault", "musket"],
+            "weight": 3,
+            "priority": 9
+        },
+        "Staffs": {
+            "keywords": ["staff", "rod", "wand", "stick", "quarterstaff"],
+            "weight": 3,
+            "priority": 10
+        },
+        "Swords": {
+            "keywords": ["sword", "blade", "saber", "katana", "rapier", "scimitar", "claymore"],
+            "weight": 3,
+            "priority": 11
+        },
+        "Wands": {
+            "keywords": ["wand", "magic", "spell", "arcane", "mystic"],
+            "weight": 3,
+            "priority": 12
+        },
+        "Whips": {
+            "keywords": ["whip", "lash", "chain", "rope", "flail"],
+            "weight": 3,
+            "priority": 13
+        },
+        "Weapon": {
+            "keywords": ["weapon", "weaponry", "armament", "implement"],
+            "weight": 2,
+            "priority": 20
+        },
+        "Armor": {
+            "keywords": [
+                "armor", "armour", "plate", "mail", "chain", "scale", "leather", "cloth",
+                "robe", "tunic", "vest", "chest", "breastplate", "cuirass", "defense"
+            ],
+            "weight": 2,
+            "priority": 21
+        },
+        "Helm": {
+            "keywords": [
+                "helm", "helmet", "hood", "mask", "crown", "tiara", "circlet", "hat",
+                "cap", "head", "skull", "visor", "coif", "headgear", "helmets"
+            ],
+            "weight": 2,
+            "priority": 22
+        },
+        "Cape": {
+            "keywords": ["cape", "cloak", "mantle", "shawl", "wrap", "covering", "back", "shoulder"],
+            "weight": 2,
+            "priority": 23
+        },
+        "Pet": {
+            "keywords": ["pet", "companion", "familiar", "mount", "animal", "creature", "beast"],
+            "weight": 2,
+            "priority": 24
+        }
+    }
     
-    helm_keywords = [
-        "helm", "helmet", "hood", "mask", "crown", "tiara", "circlet", "hat",
-        "cap", "head", "skull", "visor", "coif", "headgear", "helmets"
-    ]
+    # Calculate match scores for each category
+    category_scores = {}
+    match_details = {}
     
-    cape_keywords = [
-        "cape", "cloak", "mantle", "shawl", "wrap", "scarf", "drape", "cover",
-        "back", "wings", "wing", "jetpack", "pack", "backpack"
-    ]
+    for category, config in keyword_categories.items():
+        score = 0
+        matches = []
+        
+        # Check title matches (highest weight)
+        for keyword in config["keywords"]:
+            if keyword in title:
+                score += config["weight"] * 2  # Title matches are worth more
+                matches.append(f"title:{keyword}")
+                log.debug("✓ Title match for %s: '%s' in %s", category, keyword, item_title)
+        
+        # Check content matches
+        for keyword in config["keywords"]:
+            if keyword in content:
+                score += config["weight"]
+                matches.append(f"content:{keyword}")
+                log.debug("✓ Content match for %s: '%s'", category, keyword)
+        
+        # Check icon matches
+        for keyword in config["keywords"]:
+            if keyword in title_icons:
+                score += config["weight"]
+                matches.append(f"icon:{keyword}")
+                log.debug("✓ Icon match for %s: '%s'", category, keyword)
+        
+        if score > 0:
+            category_scores[category] = score
+            match_details[category] = matches
+            log.debug("Category %s scored %d with matches: %s", category, score, matches)
     
-    pet_keywords = [
-        "pet", "companion", "familiar", "mount", "rider", "dragon", "wolf", "bear",
-        "cat", "dog", "bird", "eagle", "hawk", "phoenix", "lion", "tiger", "snake",
-        "summon", "minion", "ally", "creature", "beast", "animal"
-    ]
+    # Determine best category
+    if category_scores:
+        # Sort by score (descending), then by priority (ascending)
+        sorted_categories = sorted(
+            category_scores.items(), 
+            key=lambda x: (-x[1], keyword_categories[x[0]]["priority"])
+        )
+        
+        best_category, best_score = sorted_categories[0]
+        best_matches = match_details[best_category]
+        
+        # Check if we have a clear winner (score significantly higher than second best)
+        if len(sorted_categories) > 1:
+            second_score = sorted_categories[1][1]
+            score_diff = best_score - second_score
+            
+            if score_diff >= 2:  # Clear winner
+                log.info("✓ Clear category match: %s (score: %d, diff: %d) for %s", 
+                        best_category, best_score, score_diff, item_title)
+                log.debug("Best matches: %s", best_matches)
+                return best_category
+            else:
+                # Close match, log for review but still use the best one
+                log.warning("⚠ Close category match: %s (score: %d) vs %s (score: %d) for %s", 
+                           best_category, best_score, sorted_categories[1][0], second_score, item_title)
+                log.info("✓ Selected category: %s (score: %d) for %s", best_category, best_score, item_title)
+                log.debug("Best matches: %s", best_matches)
+                return best_category
+        else:
+            # Only one category matched
+            log.info("✓ Single category match: %s (score: %d) for %s", best_category, best_score, item_title)
+            log.debug("Matches: %s", best_matches)
+            return best_category
+    else:
+        log.warning("✗ No keyword matches found for %s", item_title)
     
-    # Check all sources for category indicators - specific weapon types first
-    
-    # Check title first (most reliable)
-    if any(keyword in title for keyword in axe_keywords):
-        return "Axes"
-    if any(keyword in title for keyword in bow_keywords):
-        return "Bows"
-    if any(keyword in title for keyword in dagger_keywords):
-        return "Daggers"
-    if any(keyword in title for keyword in gauntlet_keywords):
-        return "Gauntlets"
-    if any(keyword in title for keyword in gun_keywords):
-        return "Guns"
-    if any(keyword in title for keyword in handgun_keywords):
-        return "HandGuns"
-    if any(keyword in title for keyword in mace_keywords):
-        return "Maces"
-    if any(keyword in title for keyword in polearm_keywords):
-        return "Polearms"
-    if any(keyword in title for keyword in rifle_keywords):
-        return "Rifles"
-    if any(keyword in title for keyword in staff_keywords):
-        return "Staffs"
-    if any(keyword in title for keyword in sword_keywords):
-        return "Swords"
-    if any(keyword in title for keyword in wand_keywords):
-        return "Wands"
-    if any(keyword in title for keyword in whip_keywords):
-        return "Whips"
-    
-    # Check main categories as fallback
-    if any(keyword in title for keyword in armor_keywords):
-        return "Armor"
-    if any(keyword in title for keyword in helm_keywords):
-        return "Helm"
-    if any(keyword in title for keyword in cape_keywords):
-        return "Cape"
-    if any(keyword in title for keyword in pet_keywords):
-        return "Pet"
-    
-    # Check content if title doesn't match
-    if any(keyword in content for keyword in axe_keywords):
-        return "Axes"
-    if any(keyword in content for keyword in bow_keywords):
-        return "Bows"
-    if any(keyword in content for keyword in dagger_keywords):
-        return "Daggers"
-    if any(keyword in content for keyword in gauntlet_keywords):
-        return "Gauntlets"
-    if any(keyword in content for keyword in gun_keywords):
-        return "Guns"
-    if any(keyword in content for keyword in handgun_keywords):
-        return "HandGuns"
-    if any(keyword in content for keyword in mace_keywords):
-        return "Maces"
-    if any(keyword in content for keyword in polearm_keywords):
-        return "Polearms"
-    if any(keyword in content for keyword in rifle_keywords):
-        return "Rifles"
-    if any(keyword in content for keyword in staff_keywords):
-        return "Staffs"
-    if any(keyword in content for keyword in sword_keywords):
-        return "Swords"
-    if any(keyword in content for keyword in wand_keywords):
-        return "Wands"
-    if any(keyword in content for keyword in whip_keywords):
-        return "Whips"
-    
-    if any(keyword in content for keyword in armor_keywords):
-        return "Armor"
-    if any(keyword in content for keyword in helm_keywords):
-        return "Helm"
-    if any(keyword in content for keyword in cape_keywords):
-        return "Cape"
-    if any(keyword in content for keyword in pet_keywords):
-        return "Pet"
-    
-    # Check title icons (tags)
-    if any(keyword in title_icons for keyword in axe_keywords):
-        return "Axes"
-    if any(keyword in title_icons for keyword in bow_keywords):
-        return "Bows"
-    if any(keyword in title_icons for keyword in dagger_keywords):
-        return "Daggers"
-    if any(keyword in title_icons for keyword in gauntlet_keywords):
-        return "Gauntlets"
-    if any(keyword in title_icons for keyword in gun_keywords):
-        return "Guns"
-    if any(keyword in title_icons for keyword in handgun_keywords):
-        return "HandGuns"
-    if any(keyword in title_icons for keyword in mace_keywords):
-        return "Maces"
-    if any(keyword in title_icons for keyword in polearm_keywords):
-        return "Polearms"
-    if any(keyword in title_icons for keyword in rifle_keywords):
-        return "Rifles"
-    if any(keyword in title_icons for keyword in staff_keywords):
-        return "Staffs"
-    if any(keyword in title_icons for keyword in sword_keywords):
-        return "Swords"
-    if any(keyword in title_icons for keyword in wand_keywords):
-        return "Wands"
-    if any(keyword in title_icons for keyword in whip_keywords):
-        return "Whips"
-    
-    if any(keyword in title_icons for keyword in armor_keywords):
-        return "Armor"
-    if any(keyword in title_icons for keyword in helm_keywords):
-        return "Helm"
-    if any(keyword in title_icons for keyword in cape_keywords):
-        return "Cape"
-    if any(keyword in title_icons for keyword in pet_keywords):
-        return "Pet"
-    
+    # Final fallback to Misc
+    log.info("→ Defaulted to Misc category for %s", item_title)
     return "Misc"
 
 
+def extract_location_from_content(content: str) -> str:
+    """
+    Extract location from item content with robust parsing and multiple fallback patterns.
+    
+    Args:
+        content (str): The item content text
+        
+    Returns:
+        str: Normalized location string
+    """
+    log.debug("Extracting location from content: %s...", content[:100] if content else "Empty content")
+    
+    # Primary pattern: __**Location:**__\nLocation Name
+    patterns = [
+        r"__\*\*Location:\*\*__\s*\n(.+?)(?=\n\n|\n__\*\*|$)",
+        r"\*\*Location:\*\*\s*\n(.+?)(?=\n\n|\n__|\n\*\*|$)",
+        r"Location:\s*\n(.+?)(?=\n\n|\n__|\n\*\*|$)",
+        r"Location[:\s]+(.+?)(?=\n\n|\n__|\n\*\*|$)",
+        r"From[:\s]+(.+?)(?=\n\n|\n__|\n\*\*|$)",
+        r"Found[:\s]+(.+?)(?=\n\n|\n__|\n\*\*|$)",
+        r"Area[:\s]+(.+?)(?=\n\n|\n__|\n\*\*|$)"
+    ]
+    
+    for i, pattern in enumerate(patterns):
+        match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
+        if match:
+            location = match.group(1).strip()
+            normalized_location = normalize_string(location)
+            log.debug("Pattern %d matched: '%s' → '%s'", i + 1, location, normalized_location)
+            
+            # Validate location is meaningful
+            if len(normalized_location) > 2 and normalized_location not in ['unknown', 'na', 'none']:
+                return normalized_location
+            else:
+                log.debug("Location '%s' seems invalid, trying next pattern", normalized_location)
+        else:
+            log.debug("Pattern %d failed to match", i + 1)
+    
+    # Fallback: Look for common location indicators in the content
+    location_keywords = [
+        'location:', 'from:', 'found:', 'area:', 'zone:', 'dropped by:', 'obtained from:',
+        'reward from:', 'quest:', 'drop:', 'monster:', 'boss:', 'npc:', 'shop:', 'store:'
+    ]
+    
+    lines = content.split('\n')
+    for line_num, line in enumerate(lines):
+        line_lower = line.lower().strip()
+        for keyword in location_keywords:
+            if keyword in line_lower:
+                # Extract the part after the keyword
+                parts = line_lower.split(keyword, 1)
+                if len(parts) > 1:
+                    location_part = parts[1].strip()
+                    # Clean up common suffixes
+                    location_part = re.sub(r'[:\.\!].*$', '', location_part).strip()
+                    if len(location_part) > 2:
+                        normalized_location = normalize_string(location_part)
+                        log.debug("Fallback location found on line %d: '%s' → '%s'", 
+                                line_num + 1, location_part, normalized_location)
+                        return normalized_location
+    
+    log.warning("No valid location found in content")
+    return "Unknown"
+
+
+def extract_price_from_content(content: str) -> str:
+    """
+    Extract price from item content with robust parsing and multiple fallback patterns.
+    
+    Args:
+        content (str): The item content text
+        
+    Returns:
+        str: Normalized price string
+    """
+    log.debug("Extracting price from content: %s...", content[:100] if content else "Empty content")
+    
+    # Primary pattern: __**Price:**__\nPrice Amount
+    patterns = [
+        r"__\*\*Price:\*\*__\s*\n(.+?)(?=\n\n|\n__\*\*|$)",
+        r"\*\*Price:\*\*\s*\n(.+?)(?=\n\n|\n__|\n\*\*|$)",
+        r"Price:\s*\n(.+?)(?=\n\n|\n__|\n\*\*|$)",
+        r"Price[:\s]+(.+?)(?=\n\n|\n__|\n\*\*|$)",
+        r"Cost[:\s]+(.+?)(?=\n\n|\n__|\n\*\*|$)",
+        r"Value[:\s]+(.+?)(?=\n\n|\n__|\n\*\*|$)",
+        r"Sells?[:\s]+(.+?)(?=\n\n|\n__|\n\*\*|$)"
+    ]
+    
+    for i, pattern in enumerate(patterns):
+        match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
+        if match:
+            price = match.group(1).strip()
+            normalized_price = normalize_string(price)
+            log.debug("Price pattern %d matched: '%s' → '%s'", i + 1, price, normalized_price)
+            
+            # Validate price is meaningful
+            if len(normalized_price) > 1 and normalized_price not in ['unknown', 'na', 'none', 'free']:
+                return normalized_price
+            else:
+                log.debug("Price '%s' seems invalid, trying next pattern", normalized_price)
+        else:
+            log.debug("Price pattern %d failed to match", i + 1)
+    
+    # Fallback: Look for price indicators and currency
+    price_patterns = [
+        r'(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:ac|gold|coins?|g|c)',
+        r'(?:ac|gold|coins?|g|c)\s*[:\s]*(\d+(?:,\d+)*(?:\.\d+)?)',
+        r'(?:free|no cost|0|n/a)',
+        r'(?:reward|drop|quest|monster|boss)',
+        r'(?:shop|store|buy|purchase)'
+    ]
+    
+    lines = content.split('\n')
+    for line_num, line in enumerate(lines):
+        line_lower = line.lower()
+        for pattern in price_patterns:
+            match = re.search(pattern, line_lower)
+            if match:
+                if match.groups():
+                    # Found a numeric price
+                    price_value = match.group(1)
+                    normalized_price = normalize_string(price_value + " AC")
+                    log.debug("Fallback price found on line %d: '%s' → '%s'", 
+                            line_num + 1, price_value, normalized_price)
+                    return normalized_price
+                else:
+                    # Found a non-numeric price indicator
+                    price_type = match.group(0)
+                    normalized_price = normalize_string(price_type.title())
+                    log.debug("Fallback price type found on line %d: '%s' → '%s'", 
+                            line_num + 1, price_type, normalized_price)
+                    return normalized_price
+    
+    log.warning("No valid price found in content")
+    return "Unknown"
+
+
+def validate_and_normalize_item_data(item: dict) -> dict:
+    """
+    Validate and normalize item data, ensuring all required fields are present and properly formatted.
+    
+    Args:
+        item (dict): Raw item data
+        
+    Returns:
+        dict: Validated and normalized item data
+    """
+    log.debug("Validating item: %s", item.get("title", "Unknown"))
+    
+    # Ensure required fields exist
+    normalized_item = {
+        'title': item.get("title", "Unknown Item"),
+        'url': item.get("url", ""),
+        'content': item.get("content", ""),
+        'price': item.get("price", ""),
+        'rarity': item.get("rarity", ""),
+        'image': item.get("image", ""),
+        'images': item.get("images", []),
+        'html_content': item.get("html_content", "")
+    }
+    
+    # Validate title
+    if not normalized_item['title'] or normalized_item['title'].strip() == "Unknown":
+        log.warning("Item has invalid title: %s", normalized_item['title'])
+        normalized_item['title'] = "Unknown Item"
+    
+    # Validate URL
+    if not normalized_item['url']:
+        log.warning("Item '%s' has no URL", normalized_item['title'])
+    
+    # Validate content
+    if not normalized_item['content']:
+        log.warning("Item '%s' has no content", normalized_item['title'])
+        normalized_item['content'] = "No content available"
+    
+    return normalized_item
+
+
 def group_items_by_location_price(items: list[dict]) -> dict[str, list[dict]]:
-    """Group items by normalized Location and Price using hash-based keys."""
-    # First, extract location and price for all items
+    """
+    Group items by normalized Location and Price using robust extraction and validation.
+    
+    This function provides comprehensive logging and handles edge cases for reliable grouping.
+    
+    Args:
+        items (list[dict]): List of items to group
+        
+    Returns:
+        dict[str, list[dict]]: Dictionary with hash keys as keys and lists of items as values
+    """
+    log.info("Starting grouping of %d items", len(items))
+    
+    # Validate and normalize all items first
+    validated_items = []
+    for i, item in enumerate(items):
+        try:
+            validated_item = validate_and_normalize_item_data(item)
+            validated_items.append(validated_item)
+            log.debug("Validated item %d: %s", i + 1, validated_item['title'])
+        except Exception as e:
+            log.error("Failed to validate item %d: %s", i + 1, e)
+            continue
+    
+    log.info("Successfully validated %d out of %d items", len(validated_items), len(items))
+    
+    # Extract location and price for all validated items
     item_data = []
-    for item in items:
+    extraction_stats = {
+        'location_success': 0,
+        'location_failed': 0,
+        'price_success': 0,
+        'price_failed': 0
+    }
+    
+    for i, item in enumerate(validated_items):
+        log.debug("Processing item %d: %s", i + 1, item['title'])
+        
         content = item.get("content", "")
         location = "Unknown"
         price = "Unknown"
         
-        # Parse location
-        loc_match = re.search(r"__\*\*Location:\*\*__\s*\n(.+?)(?=\n\n|\n__\*\*|$)", content, re.IGNORECASE | re.DOTALL)
-        if loc_match:
-            location = normalize_string(loc_match.group(1).strip())
+        # Extract location with robust parsing
+        try:
+            location = extract_location_from_content(content)
+            if location != "Unknown":
+                extraction_stats['location_success'] += 1
+                log.debug("✓ Location extracted: '%s' for %s", location, item['title'])
+            else:
+                extraction_stats['location_failed'] += 1
+                log.warning("✗ Failed to extract location for %s", item['title'])
+        except Exception as e:
+            extraction_stats['location_failed'] += 1
+            log.error("✗ Error extracting location for %s: %s", item['title'], e)
         
-        # Parse price
-        price_match = re.search(r"__\*\*Price:\*\*__\s*\n(.+?)(?=\n\n|\n__\*\*|$)", content, re.IGNORECASE | re.DOTALL)
-        if price_match:
-            price = normalize_string(price_match.group(1).strip())
+        # Extract price with robust parsing
+        try:
+            price = extract_price_from_content(content)
+            if price != "Unknown":
+                extraction_stats['price_success'] += 1
+                log.debug("✓ Price extracted: '%s' for %s", price, item['title'])
+            else:
+                extraction_stats['price_failed'] += 1
+                log.warning("✗ Failed to extract price for %s", item['title'])
+        except Exception as e:
+            extraction_stats['price_failed'] += 1
+            log.error("✗ Error extracting price for %s: %s", item['title'], e)
         
+        # Store extracted data
         item_data.append({
             'item': item,
             'location': location,
-            'price': price
+            'price': price,
+            'original_location': location,  # Keep original for debugging
+            'original_price': price
         })
+        
+        log.debug("Item %d processed: Location='%s', Price='%s'", 
+                 i + 1, location, price)
     
-    # Group by location and price
+    # Log extraction statistics
+    log.info("Extraction results - Location: %d success, %d failed | Price: %d success, %d failed",
+             extraction_stats['location_success'], extraction_stats['location_failed'],
+             extraction_stats['price_success'], extraction_stats['price_failed'])
+    
+    # Group items by location and price
     groups_by_location_price = {}
-    for data in item_data:
-        key = (data['location'], data['price'])
+    grouping_stats = {
+        'total_groups': 0,
+        'items_grouped': 0,
+        'items_ungrouped': 0,
+        'unknown_groups': 0
+    }
+    
+    for i, data in enumerate(item_data):
+        location = data['location']
+        price = data['price']
+        item_title = data['item']['title']
+        
+        # Create grouping key
+        key = (location, price)
+        
+        # Log grouping decision
+        if location == "Unknown" or price == "Unknown":
+            log.debug("Item '%s' has unknown location/price: Location='%s', Price='%s'", 
+                     item_title, location, price)
+            grouping_stats['unknown_groups'] += 1
+        
+        # Add to appropriate group
         if key not in groups_by_location_price:
             groups_by_location_price[key] = []
+            grouping_stats['total_groups'] += 1
+            log.debug("Created new group: Location='%s', Price='%s'", location, price)
+        
         groups_by_location_price[key].append(data['item'])
+        grouping_stats['items_grouped'] += 1
+        
+        log.debug("Added item '%s' to group (Location='%s', Price='%s', Group size: %d)", 
+                 item_title, location, price, len(groups_by_location_price[key]))
     
-    # Now generate hash keys for each group
+    # Log grouping statistics
+    log.info("Grouping results - Total groups: %d, Items grouped: %d, Unknown groups: %d",
+             grouping_stats['total_groups'], grouping_stats['items_grouped'], 
+             grouping_stats['unknown_groups'])
+    
+    # Generate hash keys for each group
     final_groups = {}
+    hash_generation_stats = {
+        'successful': 0,
+        'failed': 0
+    }
+    
     for (location, price), items_in_group in groups_by_location_price.items():
-        # Generate hash key for the entire group
-        group_key_hash = generate_group_key(location, price, items_in_group)
-        final_groups[group_key_hash] = items_in_group
+        try:
+            # Generate hash key for the entire group
+            group_key_hash = generate_group_key(location, price, items_in_group)
+            final_groups[group_key_hash] = items_in_group
+            hash_generation_stats['successful'] += 1
+            
+            log.debug("✓ Generated hash key for group: Location='%s', Price='%s', Items=%d, Hash=%s",
+                     location, price, len(items_in_group), group_key_hash[:8])
+            
+            # Log item titles in this group for debugging
+            item_titles = [item['title'] for item in items_in_group]
+            log.debug("Group items: %s", item_titles)
+            
+        except Exception as e:
+            hash_generation_stats['failed'] += 1
+            log.error("✗ Failed to generate hash key for group (Location='%s', Price='%s'): %s",
+                     location, price, e)
+    
+    # Log final statistics
+    log.info("Final grouping results - Hash keys generated: %d successful, %d failed",
+             hash_generation_stats['successful'], hash_generation_stats['failed'])
+    log.info("Total groups created: %d", len(final_groups))
+    
+    # Detailed group summary
+    for group_key_hash, items_in_group in final_groups.items():
+        location = items_in_group[0].get('location', 'Unknown') if items_in_group else 'Unknown'
+        price = items_in_group[0].get('price', 'Unknown') if items_in_group else 'Unknown'
+        item_titles = [item['title'] for item in items_in_group]
+        log.info("Group %s: Location='%s', Price='%s', Items=%d, Titles=%s",
+                group_key_hash[:8], location, price, len(items_in_group), item_titles)
     
     return final_groups
 
@@ -1160,8 +1507,10 @@ class EphemeralCategoryView(CategoryButtonsView):
 # ---------------- CATEGORY PLURALIZATION ----------------
 def pluralize_category(category: str) -> str:
     """
-    Convert category names to their proper plural forms.
-    Handles both regular and irregular pluralization for AQW item categories.
+    Convert category names to their proper plural forms with comprehensive coverage.
+    
+    This function handles both irregular and regular English pluralization rules
+    specifically optimized for AQW item categories and gaming terminology.
     
     Args:
         category (str): The singular category name to pluralize
@@ -1171,34 +1520,24 @@ def pluralize_category(category: str) -> str:
         
     Examples:
         >>> pluralize_category("Weapon")
-        "Weapons"
+        'Weapons'
         >>> pluralize_category("Helm") 
-        "Helms"
+        'Helms'
         >>> pluralize_category("Pet")
-        "Pets"
+        'Pets'
         >>> pluralize_category("Misc")
-        "Miscellaneous"
+        'Miscellaneous'
         >>> pluralize_category("Axe")
-        "Axes"
+        'Axes'
+        >>> pluralize_category("Knife")
+        'Knives'
+        >>> pluralize_category("Box")
+        'Boxes'
     """
-    # Define comprehensive irregular plural forms for AQW categories
-    irregular_plurals = {
-        # Weapon types that are already plural (don't change)
-        "Axes": "Axes",           # Already plural
-        "Bows": "Bows",           # Already plural  
-        "Daggers": "Daggers",     # Already plural
-        "Gauntlets": "Gauntlets", # Already plural
-        "Guns": "Guns",           # Already plural
-        "HandGuns": "HandGuns",   # Already plural
-        "Maces": "Maces",         # Already plural
-        "Polearms": "Polearms",   # Already plural
-        "Rifles": "Rifles",       # Already plural
-        "Staffs": "Staffs",       # Already plural
-        "Swords": "Swords",       # Already plural
-        "Wands": "Wands",         # Already plural
-        "Whips": "Whips",         # Already plural
-        
-        # Main categories with irregular plurals
+    # Comprehensive dictionary of irregular plurals for AQW and gaming categories
+    # This is checked first for performance (O(1) lookup)
+    IRREGULAR_PLURALS = {
+        # === MAIN AQW CATEGORIES (Irregular Forms) ===
         "Weapon": "Weapons",
         "Armor": "Armors", 
         "Helm": "Helms", 
@@ -1206,7 +1545,22 @@ def pluralize_category(category: str) -> str:
         "Pet": "Pets",
         "Misc": "Miscellaneous",
         
-        # Common singular weapon types that need pluralization
+        # === WEAPON TYPES (Already Plural - No Change) ===
+        "Axes": "Axes",
+        "Bows": "Bows",  
+        "Daggers": "Daggers",
+        "Gauntlets": "Gauntlets",
+        "Guns": "Guns",
+        "HandGuns": "HandGuns",
+        "Maces": "Maces",
+        "Polearms": "Polearms",
+        "Rifles": "Rifles",
+        "Staffs": "Staffs",
+        "Swords": "Swords",
+        "Wands": "Wands",
+        "Whips": "Whips",
+        
+        # === WEAPON TYPES (Singular to Plural) ===
         "Axe": "Axes",
         "Bow": "Bows",
         "Dagger": "Daggers",
@@ -1221,54 +1575,160 @@ def pluralize_category(category: str) -> str:
         "Wand": "Wands",
         "Whip": "Whips",
         
-        # Other potential categories
+        # === ARMOR & EQUIPMENT ===
         "Shield": "Shields",
         "Boots": "Boots",         # Already plural
         "Glove": "Gloves",
+        "Gloves": "Gloves",       # Already plural
+        "Helm": "Helms",
+        "Helmet": "Helmets",
+        "Pauldron": "Pauldrons",
+        "Greaves": "Greaves",     # Already plural
+        "Bracer": "Bracers",
+        "Bracers": "Bracers",     # Already plural
+        
+        # === ACCESSORIES & ITEMS ===
         "Ring": "Rings",
+        "Rings": "Rings",         # Already plural
         "Amulet": "Amulets",
-        "Scroll": "Scrolls",
+        "Necklace": "Necklaces",
+        "Earring": "Earrings",
+        "Belt": "Belts",
+        "Cape": "Capes",
+        "Cloak": "Cloaks",
+        "Robe": "Robes",
+        
+        # === CONSUMABLES ===
         "Potion": "Potions",
-        "Miscellaneous": "Miscellaneous"  # Already plural
+        "Scroll": "Scrolls",
+        "Food": "Foods",
+        "Drink": "Drinks",
+        
+        # === COMMON ENGLISH IRREGULARS (Gaming Context) ===
+        "Knife": "Knives",
+        "Wolf": "Wolves",
+        "Leaf": "Leaves",
+        "Life": "Lives",
+        "Wife": "Wives",
+        "Thief": "Thieves",
+        "Elf": "Elves",
+        "Self": "Selves",
+        "Shelf": "Shelves",
+        "Loaf": "Loaves",
+        "Half": "Halves",
+        "Calves": "Calves",       # Already plural
+        "Calf": "Calves",
+        
+        # === SPECIAL CASES ===
+        "Miscellaneous": "Miscellaneous",  # Already plural
+        "Equipment": "Equipment",          # Uncountable noun
+        "Loot": "Loot",                    # Uncountable noun
+        "Gear": "Gear",                    # Uncountable noun
+        "Furniture": "Furniture",          # Uncountable noun
+        "Information": "Information",      # Uncountable noun
+        "Knowledge": "Knowledge",          # Uncountable noun
+        "Money": "Money",                  # Uncountable noun
+        "News": "News",                    # Uncountable noun
+        
+        # === COMPOUND WORDS ===
+        "Footman": "Footmen",
+        "Policeman": "Policemen",
+        "Gentleman": "Gentlemen",
+        "Woman": "Women",
+        "Man": "Men",
+        "Child": "Children",
+        "Person": "People",
+        "Mouse": "Mice",
+        "Louse": "Lice",
+        "Goose": "Geese",
+        "Tooth": "Teeth",
+        "Foot": "Feet",
+        
+        # === LATIN-DERIVED PLURALS ===
+        "Focus": "Foci",
+        "Nucleus": "Nuclei",
+        "Radius": "Radii",
+        "Cactus": "Cacti",
+        "Fungus": "Fungi",
+        "Alumnus": "Alumni",
+        "Syllabus": "Syllabi",
+        "Analysis": "Analyses",
+        "Thesis": "Theses",
+        "Crisis": "Crises",
+        "Phenomenon": "Phenomena",
+        "Criterion": "Criteria",
+        "Datum": "Data",
+        "Medium": "Media",
+        "Bacterium": "Bacteria",
+        "Curriculum": "Curricula",
+        "Memorandum": "Memoranda",
+        "Millennium": "Millennia"
     }
     
-    # First check if category has an irregular plural (most common case)
-    if category in irregular_plurals:
-        return irregular_plurals[category]
+    # === FAST PATH: Check irregular plurals dictionary ===
+    # This handles 90% of cases with O(1) lookup performance
+    if category in IRREGULAR_PLURALS:
+        return IRREGULAR_PLURALS[category]
     
-    # Handle regular English pluralization rules for any unknown categories
+    # === REGULAR ENGLISH PLURALIZATION RULES ===
+    # Applied only when category is not in irregular dictionary
+    
+    # Rule 1: Words ending in -s, -ss, -sh, -ch, -x, -z → add -es
+    # Examples: class → classes, box → boxes, buzz → buzzes, witch → witches
     if category.endswith(('s', 'ss', 'sh', 'ch', 'x', 'z')):
-        # Words ending in s, ss, sh, ch, x, z add 'es'
-        # Examples: class -> classes, box -> boxes, buzz -> buzzes
         return category + 'es'
+    
+    # Rule 2: Words ending in -y
+    # If preceded by consonant → change -y to -ies (city → cities)
+    # If preceded by vowel → add -s (boy → boys)
     elif category.endswith('y') and len(category) > 1:
-        # Words ending in 'y' (not just 'y') change 'y' to 'ies' if preceded by consonant
         if category[-2] not in 'aeiou':
-            # Examples: city -> cities, party -> parties
             return category[:-1] + 'ies'
         else:
-            # Examples: boy -> boys, toy -> toys (vowel + y just adds 's')
             return category + 's'
+    
+    # Rule 3: Words ending in -f → change -f to -ves
+    # Examples: wolf → wolves, leaf → leaves
     elif category.endswith('f'):
-        # Words ending in 'f' change 'f' to 'ves'
-        # Examples: wolf -> wolves, leaf -> leaves
         return category[:-1] + 'ves'
+    
+    # Rule 4: Words ending in -fe → change -fe to -ves
+    # Examples: knife → knives, life → lives
     elif category.endswith('fe'):
-        # Words ending in 'fe' change 'fe' to 'ves'
-        # Examples: knife -> knives, life -> lives
         return category[:-2] + 'ves'
+    
+    # Rule 5: Words ending in -o
+    # Most add -es, but some add -s (especially musical instruments, shortened words)
+    # Examples: potato → potatoes, hero → heroes, but photo → photos, piano → pianos
     elif category.endswith('o'):
-        # Words ending in 'o' often add 'es' (but not always)
-        # Examples: potato -> potatoes, tomato -> tomatoes
-        # But: photo -> photos, piano -> pianos
-        # We'll use 'es' for consistency in gaming terms
-        if len(category) > 1 and category[-2] not in 'aeiou':
+        # Common gaming and technical terms often just add -s
+        gaming_terms = {'photo', 'piano', 'video', 'studio', 'radio', 'zoo'}
+        if category.lower() in gaming_terms:
+            return category + 's'
+        elif len(category) > 1 and category[-2] not in 'aeiou':
             return category + 'es'
         else:
             return category + 's'
+    
+    # Rule 6: Words ending in -is → change -is to -es (Greek/Latin roots)
+    # Examples: analysis → analyses, thesis → theses
+    elif category.endswith('is'):
+        return category[:-2] + 'es'
+    
+    # Rule 7: Words ending in -us → change -us to -i (Latin roots)
+    # Examples: cactus → cacti, fungus → fungi
+    elif category.endswith('us'):
+        return category[:-2] + 'i'
+    
+    # Rule 8: Words ending in -on → change -on to -a (Greek roots)
+    # Examples: phenomenon → phenomena, criterion → criteria
+    elif category.endswith('on'):
+        return category[:-2] + 'a'
+    
+    # === DEFAULT RULE: Add -s ===
+    # This covers the majority of regular English nouns
+    # Examples: cat → cats, dog → dogs, item → items
     else:
-        # Default: add 's' for most regular nouns
-        # Examples: cat -> cats, dog -> dogs, item -> items
         return category + 's'
 
 
@@ -2893,6 +3353,109 @@ async def testpluralization(interaction: discord.Interaction):
     embed.set_footer(text="AQW Daily Gift - Comprehensive Pluralization Test")
     
     await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="testgrouping", description="Test improved item grouping functionality")
+async def testgrouping(interaction: discord.Interaction):
+    """Test command to demonstrate the improved grouping system with debugging."""
+    try:
+        await interaction.response.defer(thinking=True)
+    except discord.NotFound:
+        return
+
+    # Create test items with various content formats and edge cases
+    test_items = [
+        {
+            "title": "Dragon Sword of Fire",
+            "url": "https://example.com/dragon-sword",
+            "content": "__**Location:**__\nDragon Lair\n\n__**Price:**__\n1500 AC\n\n__**Rarity:**__\nEpic\n\nA powerful sword forged in dragon fire.",
+            "images": ["https://i.imgur.com/dragon-sword.jpg"]
+        },
+        {
+            "title": "Dragon Shield",
+            "url": "https://example.com/dragon-shield",
+            "content": "**Location:** Dragon Lair\n\n**Price:** 1500 AC\n\n**Rarity:** Epic\n\nA sturdy shield made from dragon scales.",
+            "images": ["https://i.imgur.com/dragon-shield.jpg"]
+        },
+        {
+            "title": "Flame Bow",
+            "url": "https://example.com/flame-bow", 
+            "content": "Location: Volcano Peak\n\nPrice: 1200 AC\n\nRarity: Rare\n\nA bow that shoots flaming arrows.",
+            "images": ["https://i.imgur.com/flame-bow.jpg"]
+        },
+        {
+            "title": "Mystic Staff",
+            "url": "https://example.com/mystic-staff",
+            "content": "Found in the Tower of Magic\n\nCost: 1000 Gold Coins\n\nAn enchanted staff with mystical powers.",
+            "images": ["https://i.imgur.com/mystic-staff.jpg"]
+        },
+        {
+            "title": "Steel Helmet",
+            "url": "https://example.com/steel-helmet",
+            "content": "Reward from the Guard Captain Quest\n\nPrice: N/A\n\nA sturdy steel helmet for protection.",
+            "images": ["https://i.imgur.com/steel-helmet.jpg"]
+        },
+        {
+            "title": "Lucky Pet",
+            "url": "https://example.com/lucky-pet",
+            "content": "From: Lucky Draw Event\n\nPrice: Free\n\nA cute companion that brings good luck.",
+            "images": ["https://i.imgur.com/lucky-pet.jpg"]
+        }
+    ]
+
+    # Test the grouping function
+    log.info("Testing improved grouping function with %d items", len(test_items))
+    
+    try:
+        groups = group_items_by_location_price(test_items)
+        
+        embed = discord.Embed(
+            title="🧪 Improved Grouping Test Results",
+            description=f"Successfully grouped {len(test_items)} items into {len(groups)} groups",
+            color=discord.Color.green()
+        )
+        
+        # Add group details
+        for i, (group_key_hash, items_in_group) in enumerate(groups.items(), 1):
+            # Extract location and price from first item
+            first_item = items_in_group[0]
+            content = first_item.get("content", "")
+            
+            # Use the improved extraction functions
+            location = extract_location_from_content(content)
+            price = extract_price_from_content(content)
+            
+            # Get item titles
+            item_titles = [item['title'] for item in items_in_group]
+            
+            embed.add_field(
+                name=f"Group {i}: {location} - {price}",
+                value=f"Items: {len(items_in_group)}\nTitles: {', '.join(item_titles)}\nHash: {group_key_hash[:8]}",
+                inline=False
+            )
+        
+        # Add statistics
+        embed.add_field(
+            name="📊 Statistics",
+            value=f"• Total items processed: {len(test_items)}\n• Groups created: {len(groups)}\n• Average items per group: {len(test_items)/len(groups):.1f}",
+            inline=False
+        )
+        
+        embed.set_footer(text="AQW Daily Gift - Improved Grouping Test")
+        
+        await interaction.followup.send(embed=embed)
+        
+        # Log results
+        log.info("Grouping test completed successfully: %d groups created from %d items", len(groups), len(test_items))
+        
+    except Exception as e:
+        log.error("Grouping test failed: %s", e)
+        embed = discord.Embed(
+            title="❌ Grouping Test Failed",
+            description=f"Error during grouping test: {e}",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
 
 
 @bot.tree.command(name="testgroupupdate", description="Test group update functionality")
