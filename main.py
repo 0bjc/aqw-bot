@@ -2437,6 +2437,34 @@ async def get_stored_group(group_key: str) -> dict | None:
             return None
 
 
+async def get_items_in_grouped_message(message_id: int) -> list[dict]:
+    """Get all items that belong to a specific grouped message."""
+    async with aiosqlite.connect(DB) as db:
+        async with db.execute("""
+            SELECT id, url, title, content, price, rarity, image, images, content_hash
+            FROM items WHERE discord_message_id=?
+        """, (message_id,)) as cur:
+            rows = await cur.fetchall()
+            items = []
+            for row in rows:
+                # Generate pid from the stored id (which is the pid)
+                pid = row[0]
+                item_data = {
+                    "pid": pid,
+                    "id": row[0],
+                    "url": row[1],
+                    "title": row[2],
+                    "content": row[3],
+                    "price": row[4],
+                    "rarity": row[5],
+                    "image": row[6],
+                    "images": json.loads(row[7]) if row[7] else [],
+                    "content_hash": row[8]
+                }
+                items.append(item_data)
+            return items
+
+
 async def mark_group_posted(group_key: str, location: str, price: str, items: list[dict], 
                           message_id: int = None, channel_id: int = None):
     """Mark a group as posted to avoid duplicates with atomic operation."""
@@ -2555,6 +2583,7 @@ async def edit_existing_group_message(channel, stored_group: dict, group_key: tu
                                     current_items: list[dict]) -> bool:
     """
     Edit an existing grouped message with updated items.
+    Merges existing items with current items to preserve all items in the group.
     Returns True if successful, False otherwise.
     """
     try:
@@ -2582,23 +2611,53 @@ async def edit_existing_group_message(channel, stored_group: dict, group_key: tu
             log.error("No permission to fetch message %s", msg_id)
             return False
         
-        # Create updated embed and view
+        # Get existing items from the grouped message
+        existing_items = await get_items_in_grouped_message(msg_id)
+        log.info("Found %d existing items in grouped message %s", len(existing_items), msg_id)
+        
+        # Merge existing items with current items
+        # Use URL as unique identifier to deduplicate
+        merged_items = {}
+        
+        # Add existing items first
+        for item in existing_items:
+            url = item.get("url", "")
+            if url:
+                merged_items[url] = item
+        
+        # Add/update with current items (this will update any changed items)
+        for item in current_items:
+            url = item.get("url", "")
+            if url:
+                merged_items[url] = item
+        
+        # Convert back to list
+        all_items = list(merged_items.values())
+        log.info("Merged group: %d existing + %d current = %d total items", 
+                len(existing_items), len(current_items), len(all_items))
+        
+        # Create updated embed and view with all items
         location, price = group_key
-        updated_embed, updated_view = await create_grouped_embed(group_key, current_items)
+        updated_embed, updated_view = await create_grouped_embed(group_key, all_items)
         
         # Add "Updated" indicator to footer
-        updated_embed.set_footer(text=f"AQW Daily Gift - Updated • {len(current_items)} items")
+        updated_embed.set_footer(text=f"AQW Daily Gift - Updated • {len(all_items)} items")
         
         # Edit the message
         await existing_msg.edit(embed=updated_embed, view=updated_view)
         
-        # Update stored data
-        group_key_hash = generate_stable_group_key(location, price, current_items)
-        await update_stored_group_data(group_key_hash, location, price, current_items, msg_id, ch_id)
+        # Update stored data with all items
+        group_key_hash = generate_stable_group_key(location, price, all_items)
+        await update_stored_group_data(group_key_hash, location, price, all_items, msg_id, ch_id)
         
         # Update all items in the group to reference the updated message
-        for item in current_items:
-            pid = urlparse(item["url"]).path.strip("/").replace("/", "-") or item["url"]
+        for item in all_items:
+            # Use existing pid if available, otherwise generate it
+            if "pid" in item:
+                pid = item["pid"]
+            else:
+                pid = urlparse(item["url"]).path.strip("/").replace("/", "-") or item["url"]
+                item["pid"] = pid
             await update_stored_item(pid, item)
             await update_discord_message_info(pid, msg_id, ch_id)
         
