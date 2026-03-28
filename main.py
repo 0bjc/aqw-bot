@@ -2155,6 +2155,26 @@ def generate_content_hash(item: dict) -> str:
     content_str = json.dumps(content_data, sort_keys=True)
     return hashlib.md5(content_str.encode()).hexdigest()
 
+
+def generate_group_content_hash(items: list[dict]) -> str:
+    """Generate hash for group change detection based on item titles and URLs."""
+    # Sort items by URL for consistent ordering
+    sorted_items = sorted(items, key=lambda x: x.get("url", ""))
+    
+    # Create a list of item identifiers (title + url) for hashing
+    item_identifiers = []
+    for item in sorted_items:
+        identifier = {
+            "title": item.get("title", ""),
+            "url": item.get("url", ""),
+            "price": item.get("price", ""),
+            "rarity": item.get("rarity", "")
+        }
+        item_identifiers.append(identifier)
+    
+    content_str = json.dumps(item_identifiers, sort_keys=True)
+    return hashlib.md5(content_str.encode()).hexdigest()
+
 async def is_posted(pid: str) -> bool:
     """Check if item is already posted."""
     async with aiosqlite.connect(DB) as db:
@@ -2466,12 +2486,24 @@ async def get_stored_group(group_key: str) -> dict | None:
         """, (group_key,)) as cur:
             row = await cur.fetchone()
             if row:
+                categories = json.loads(row[4]) if row[4] else []
+                
+                # Extract content hash from categories (first entry with "hash:" prefix)
+                content_hash = None
+                actual_categories = []
+                for category in categories:
+                    if category.startswith("hash:"):
+                        content_hash = category[5:]  # Remove "hash:" prefix
+                    else:
+                        actual_categories.append(category)
+                
                 return {
                     "group_key": row[0],
                     "location": row[1],
                     "price": row[2],
                     "item_titles": json.loads(row[3]) if row[3] else [],
-                    "categories": json.loads(row[4]) if row[4] else [],
+                    "categories": actual_categories,  # Return actual categories without hash
+                    "content_hash": content_hash,  # Return extracted hash
                     "discord_message_id": row[5],
                     "discord_channel_id": row[6]
                 }
@@ -2588,10 +2620,15 @@ async def has_group_changed(group_key: str, items: list[dict]) -> tuple[bool, di
         return True, None
     
     # Generate current content hash for comparison
-    current_hash = generate_content_hash({"items": items})
+    current_hash = generate_group_content_hash(items)
     stored_hash = stored_group.get("content_hash")
     
-    log.debug("Hash comparison - Current: %s, Stored: %s", current_hash[:8], stored_hash[:8] if stored_hash else "None")
+    log.info("Hash comparison - Current: %s, Stored: %s, Items: %d", 
+             current_hash[:8], stored_hash[:8] if stored_hash else "None", len(items))
+    
+    # Log item details for debugging
+    item_titles = [item.get("title", "Unknown") for item in items]
+    log.info("Current items: %s", item_titles)
     
     if stored_hash is None:
         log.debug("No stored hash found, assuming group has changed")
