@@ -3670,6 +3670,25 @@ async def check_posts():
                         pid = item["pid"]
                         stored_item = await get_stored_item(pid)
                         
+                        # Check if this item is already part of a grouped message
+                        async with aiosqlite.connect(DB) as db:
+                            cursor = await db.execute("""
+                                SELECT gp.group_key, gp.discord_message_id, gp.discord_channel_id
+                                FROM grouped_posts gp
+                                WHERE EXISTS (
+                                    SELECT 1 
+                                    FROM json_each(gp.item_titles) 
+                                    WHERE value = ?
+                                )
+                                LIMIT 1
+                            """, (item["title"],))
+                            group_result = await cursor.fetchone()
+                            
+                            if group_result:
+                                log.info("Item %s is already part of grouped message %s, skipping individual update", 
+                                        item["title"], group_result[0][:8])
+                                continue
+                        
                         if stored_item:
                             # Existing item changed - update it
                             await update_stored_item(pid, item)
