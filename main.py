@@ -2191,28 +2191,16 @@ async def mark_posted(pid: str, item: dict, message_id: int = None, channel_id: 
 
 async def update_discord_message_info(pid: str, message_id: int, channel_id: int):
     """Update Discord message info for an existing item."""
-    log.info("Updating discord_message_info: pid=%s, message_id=%s, channel_id=%s", pid, message_id, channel_id)
+    log.debug("Updating discord_message_info: pid=%s, message_id=%s, channel_id=%s", pid, message_id, channel_id)
     
     async with aiosqlite.connect(DB) as db:
-        # Check if item exists before updating
-        async with db.execute("SELECT id FROM items WHERE id=?", (pid,)) as cur:
-            exists = await cur.fetchone()
-            if not exists:
-                log.warning("Item with pid=%s not found in database", pid)
-                return
-        
         await db.execute("""
             UPDATE items SET discord_message_id=?, discord_channel_id=?, last_updated=datetime('now')
             WHERE id=?
         """, (message_id, channel_id, pid))
         
-        # Verify the update
-        async with db.execute("SELECT changes()") as cur:
-            changes = await cur.fetchone()
-            log.info("Database changes: %s", changes[0])
-        
         await db.commit()
-        log.info("Successfully updated discord_message_info for pid=%s", pid)
+        log.debug("Successfully updated discord_message_info for pid=%s", pid)
 
 
 def normalize_string(s: str) -> str:
@@ -2455,20 +2443,15 @@ async def get_stored_group(group_key: str) -> dict | None:
 
 async def get_items_in_grouped_message(message_id: int) -> list[dict]:
     """Get all items that belong to a specific grouped message."""
-    log.info("Querying items for discord_message_id=%s", message_id)
+    log.debug("Querying items for discord_message_id=%s", message_id)
     
     async with aiosqlite.connect(DB) as db:
-        # First check if any items exist with this message_id
-        async with db.execute("SELECT COUNT(*) FROM items WHERE discord_message_id=?", (message_id,)) as cur:
-            count = await cur.fetchone()
-            log.info("Found %d items with discord_message_id=%s", count[0], message_id)
-        
         async with db.execute("""
             SELECT id, url, title, content, price, rarity, image, images, content_hash
             FROM items WHERE discord_message_id=?
         """, (message_id,)) as cur:
             rows = await cur.fetchall()
-            log.info("Found %d rows for discord_message_id=%s", len(rows), message_id)
+            log.debug("Found %d rows for discord_message_id=%s", len(rows), message_id)
             
             items = []
             for row in rows:
@@ -2572,9 +2555,6 @@ async def has_group_changed(group_key: str, items: list[dict]) -> tuple[bool, di
     stored_hash = stored_group.get("content_hash")
     
     log.debug("Hash comparison - Current: %s, Stored: %s", current_hash[:8], stored_hash[:8] if stored_hash else "None")
-    
-    # TEMPORARY: Force change detection for testing
-    return True, stored_group
     
     if stored_hash is None:
         log.debug("No stored hash found, assuming group has changed")
@@ -2763,7 +2743,7 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
             await update_stored_group_data(group_key_hash, location, price, items_in_group, 
                                           grouped_msg.id, channel.id)
             
-            # Update all items in the group to reference the grouped message
+            # Store all items in the database and link them to the grouped message
             for item in items_in_group:
                 # Generate pid if not present
                 if "pid" not in item:
@@ -2772,8 +2752,8 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
                 else:
                     pid = item["pid"]
                 
-                await update_stored_item(pid, item)
-                await update_discord_message_info(pid, grouped_msg.id, channel.id)
+                # Store the item in database with Discord message info
+                await mark_posted(pid, item, grouped_msg.id, channel.id)
             
             log.info("✅ Posted new grouped embed with %d items (key: %s)", len(items_in_group), group_key_hash[:8])
             return True
