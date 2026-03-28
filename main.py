@@ -3677,6 +3677,73 @@ def extract_item_details(page_url: str) -> dict | None:
     }
 
 
+async def get_existing_grouped_items() -> list[dict]:
+    """
+    Retrieve all existing grouped items from the database.
+    This preserves items that are no longer in recent changes.
+    """
+    try:
+        async with aiosqlite.connect(DB) as db:
+            async with db.execute("""
+                SELECT item_titles, location, price, url, content, image, images, title_icons
+                FROM grouped_posts 
+                WHERE item_titles IS NOT NULL AND item_titles != '[]'
+            """) as cur:
+                rows = await cur.fetchall()
+                
+                existing_items = []
+                for row in rows:
+                    item_titles = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                    location = row[1]
+                    price = row[2]
+                    url = row[3] or ""
+                    content = row[4] or ""
+                    image = row[5] or ""
+                    images = json.loads(row[6]) if isinstance(row[6], str) else (row[6] or [])
+                    title_icons = json.loads(row[7]) if isinstance(row[7], str) else (row[7] or [])
+                    
+                    # Create item dict for each title in the group
+                    for title in item_titles:
+                        item = {
+                            "title": title,
+                            "content": content,
+                            "price": price,
+                            "location": location,
+                            "image": image,
+                            "images": images,
+                            "url": url,
+                            "title_icons": title_icons,
+                            "pid": url.split("/")[-1] if url else title.lower().replace(" ", "-")
+                        }
+                        existing_items.append(item)
+                
+                log.info("Retrieved %d existing items from %d groups", len(existing_items), len(rows))
+                return existing_items
+                
+    except Exception as e:
+        log.error("Failed to retrieve existing grouped items: %s", e)
+        return []
+
+
+def merge_current_with_existing_items(current_items: list[dict], existing_items: list[dict]) -> list[dict]:
+    """
+    Merge current items with existing items, prioritizing current data for duplicates.
+    This ensures group stability by preserving items no longer in recent changes.
+    """
+    # Create a map of current items by title for quick lookup
+    current_titles_map = {item["title"]: item for item in current_items}
+    
+    # Start with current items (they have the most up-to-date data)
+    merged_items = current_items.copy()
+    
+    # Add existing items that aren't in current items
+    for existing_item in existing_items:
+        if existing_item["title"] not in current_titles_map:
+            merged_items.append(existing_item)
+    
+    return merged_items
+
+
 def _extract_recent_changes_entries() -> dict[str, datetime]:
     """
     Get mapping: page_url -> earliest change_time within CHECK_DAYS.
@@ -4014,8 +4081,18 @@ async def check_posts():
                 log.info("Checking groups - Changed items: %d, All current items: %d", 
                          len(changed_items), len(all_current_items))
                 
-                # Group ALL current items by Location and Price to check for group updates
-                all_groups = improved_group_items_by_location_price(all_current_items)
+                # Retrieve existing grouped items from database to preserve group stability
+                existing_grouped_items = await get_existing_grouped_items()
+                log.info("Retrieved %d existing grouped items from database", len(existing_grouped_items))
+                
+                # Merge current items with existing grouped items
+                # This preserves items that are no longer in recent changes
+                merged_items = merge_current_with_existing_items(all_current_items, existing_grouped_items)
+                log.info("Merged items: %d current + %d existing = %d total", 
+                         len(all_current_items), len(existing_grouped_items), len(merged_items))
+                
+                # Group ALL merged items by Location and Price to maintain stable groups
+                all_groups = improved_group_items_by_location_price(merged_items)
                 
                 # Also group changed items separately for new group creation
                 changed_groups = improved_group_items_by_location_price(changed_items) if changed_items else {}
