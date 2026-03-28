@@ -2120,6 +2120,18 @@ async def delete_old_individual_messages(items: list[dict]):
                     if msg_id and ch_id:
                         log.info("  │  ├─ Found message in database: %d in channel %d", msg_id, ch_id)
                         
+                        # Check if this message ID is from a grouped post (don't delete grouped posts!)
+                        cursor2 = await db.execute("""
+                            SELECT discord_message_id FROM grouped_posts 
+                            WHERE discord_message_id = ?
+                        """, (msg_id,))
+                        grouped_row = await cursor2.fetchone()
+                        
+                        if grouped_row:
+                            log.info("  │  ├─ ℹ️ This is a grouped message - skipping deletion")
+                            deletion_stats['not_found'] += 1  # Count as skipped
+                            continue
+                        
                         # Get the channel
                         channel = bot.get_channel(ch_id)
                         if channel:
@@ -3685,7 +3697,7 @@ async def get_existing_grouped_items() -> list[dict]:
     try:
         async with aiosqlite.connect(DB) as db:
             async with db.execute("""
-                SELECT item_titles, location, price, url, content, image, images, title_icons
+                SELECT item_titles, location, price 
                 FROM grouped_posts 
                 WHERE item_titles IS NOT NULL AND item_titles != '[]'
             """) as cur:
@@ -3696,24 +3708,19 @@ async def get_existing_grouped_items() -> list[dict]:
                     item_titles = json.loads(row[0]) if isinstance(row[0], str) else row[0]
                     location = row[1]
                     price = row[2]
-                    url = row[3] or ""
-                    content = row[4] or ""
-                    image = row[5] or ""
-                    images = json.loads(row[6]) if isinstance(row[6], str) else (row[6] or [])
-                    title_icons = json.loads(row[7]) if isinstance(row[7], str) else (row[7] or [])
                     
                     # Create item dict for each title in the group
                     for title in item_titles:
                         item = {
                             "title": title,
-                            "content": content,
+                            "content": "",  # Not stored in grouped_posts
                             "price": price,
                             "location": location,
-                            "image": image,
-                            "images": images,
-                            "url": url,
-                            "title_icons": title_icons,
-                            "pid": url.split("/")[-1] if url else title.lower().replace(" ", "-")
+                            "image": "",  # Not stored in grouped_posts
+                            "images": [],  # Not stored in grouped_posts
+                            "url": "",  # Not stored in grouped_posts
+                            "title_icons": [],  # Not stored in grouped_posts
+                            "pid": title.lower().replace(" ", "-")  # Generate from title
                         }
                         existing_items.append(item)
                 
