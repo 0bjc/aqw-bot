@@ -4842,12 +4842,16 @@ async def monitor_deletions(interaction: discord.Interaction):
         await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
 
 
-@bot.tree.command(name="checkgroups", description="Check the status of all grouped messages")
+@bot.tree.command(name="checkgroups", description="Check the status of all grouped messages and clean up corrupted data")
 @commands.has_permissions(manage_messages=True)
 async def check_groups(interaction: discord.Interaction):
-    """Check the status of all grouped messages in the database."""
+    """Check the status of all grouped messages in the database and clean up corrupted data."""
     try:
         await interaction.response.defer(thinking=True)
+        
+        # First, run cleanup to remove corrupted groups
+        log.info("🧹 Running cleanup before checking groups...")
+        cleaned = await cleanup_corrupted_groups()
         
         async with aiosqlite.connect(DB) as db:
             async with db.execute("""
@@ -4864,6 +4868,15 @@ async def check_groups(interaction: discord.Interaction):
             title="📊 Grouped Messages Status",
             color=discord.Color.blue()
         )
+        
+        # Add cleanup results
+        if cleaned > 0:
+            embed.add_field(
+                name="🧹 Cleanup Results",
+                value=f"✅ Removed {cleaned} corrupted group(s) from database",
+                inline=False
+            )
+            embed.color = discord.Color.orange()
         
         for row in rows:
             group_key, location, price, item_titles_json, msg_id, ch_id, last_updated = row
@@ -4885,6 +4898,13 @@ async def check_groups(interaction: discord.Interaction):
             else:
                 msg_exists = "📵 Channel Not Found"
             
+            # Highlight potential issues
+            status_emoji = "✅"
+            if len(item_titles) > 10:
+                status_emoji = "⚠️"
+            elif len(item_titles) == 0:
+                status_emoji = "❌"
+            
             field_value = (
                 f"**Location:** {location}\n"
                 f"**Items:** {len(item_titles)} ({', '.join(item_titles[:3])}{'...' if len(item_titles) > 3 else ''})\n"
@@ -4893,7 +4913,7 @@ async def check_groups(interaction: discord.Interaction):
             )
             
             embed.add_field(
-                name=f"Group {group_key[:8]}",
+                name=f"{status_emoji} Group {group_key[:8]}",
                 value=field_value,
                 inline=False
             )
