@@ -2057,21 +2057,56 @@ async def create_grouped_embed(group_key: tuple[str, str], items: list[dict]) ->
     
 
 async def delete_old_individual_messages(items: list[dict]):
-    """Delete old individual messages for items that are now grouped."""
-    log.info("🗑️ DELETE OLD MESSAGES DEBUG START")
-    log.info("  - Items to check: %d", len(items))
+    """Delete old individual messages for items that are now grouped with comprehensive debugging."""
+    log.info("🗑️ OLD INDIVIDUAL MESSAGES DELETION START")
+    log.info("  ├─ Items to check: %d", len(items))
+    
+    if not items:
+        log.info("  └─ No items to process - exiting")
+        return
+    
+    # Track deletion statistics
+    deletion_stats = {
+        'total_items': len(items),
+        'items_with_messages': 0,
+        'successful_deletions': 0,
+        'failed_deletions': 0,
+        'not_found': 0,
+        'permission_denied': 0
+    }
+    
+    # Log item details
+    for i, item in enumerate(items, 1):
+        item_title = item.get('title', 'Unknown')
+        message_id = item.get('discord_message_id')
+        channel_id = item.get('discord_channel_id')
+        log.info("  ├─ Item %d: '%s'", i, item_title)
+        log.info("  │  ├─ Message ID: %s", message_id if message_id else 'None')
+        log.info("  │  └─ Channel ID: %s", channel_id if channel_id else 'None')
     
     deleted_count = 0
     not_found_count = 0
     forbidden_count = 0
     
-    for item in items:
+    for i, item in enumerate(items, 1):
         pid = urlparse(item["url"]).path.strip("/").replace("/", "-") or item["url"]
-        log.info("  - Checking item: %s (PID: %s)", item.get("title", "Unknown"), pid)
+        item_title = item.get("title", "Unknown")
+        message_id = item.get('discord_message_id')
+        channel_id = item.get('discord_channel_id')
+        
+        log.info("  ├─ Processing item %d: '%s'", i, item_title)
+        log.info("  │  ├─ PID: %s", pid)
+        log.info("  │  ├─ Message ID: %s", message_id if message_id else 'None')
+        log.info("  │  └─ Channel ID: %s", channel_id if channel_id else 'None')
+        
+        # Update statistics
+        if message_id:
+            deletion_stats['items_with_messages'] += 1
         
         try:
             async with aiosqlite.connect(DB) as db:
                 # Get the message ID for this item
+                log.debug("  │  └─ Querying database for message info...")
                 cursor = await db.execute("""
                     SELECT discord_message_id, discord_channel_id 
                     FROM items WHERE pid=?
@@ -2081,39 +2116,48 @@ async def delete_old_individual_messages(items: list[dict]):
                 if row:
                     msg_id, ch_id = row
                     if msg_id and ch_id:
-                        log.info("    - Found message ID: %s in channel: %s", msg_id, ch_id)
+                        log.info("  │  ├─ Found message in database: %d in channel %d", msg_id, ch_id)
                         
                         # Get the channel
                         channel = bot.get_channel(ch_id)
                         if channel:
                             try:
                                 # Fetch and delete the message
+                                log.debug("  │  │  └─ Fetching message %d...", msg_id)
                                 msg = await channel.fetch_message(msg_id)
                                 await msg.delete()
-                                log.info("    ✅ Deleted old message for: %s", item["title"])
-                                deleted_count += 1
+                                log.info("  │  ├─ ✅ Successfully deleted message")
+                                deletion_stats['successful_deletions'] += 1
                             except discord.NotFound:
-                                log.info("    ℹ️ Old message not found (already deleted): %s", item["title"])
-                                not_found_count += 1
+                                log.warning("  │  ├─ ℹ️ Message not found (already deleted)")
+                                deletion_stats['not_found'] += 1
                             except discord.Forbidden:
-                                log.warning("    ⚠️ No permission to delete old message: %s", item["title"])
-                                forbidden_count += 1
+                                log.error("  │  ├─ ❌ No permission to delete message")
+                                deletion_stats['permission_denied'] += 1
                             except Exception as e:
-                                log.error("    ❌ Error deleting old message for %s: %s", item["title"], e)
+                                log.error("  │  ├─ ❌ Error deleting message: %s", e)
+                                deletion_stats['failed_deletions'] += 1
                         else:
-                            log.warning("    ⚠️ Channel %s not found for item: %s", ch_id, item["title"])
+                            log.warning("  │  ├─ ⚠️ Channel %d not found", ch_id)
+                            deletion_stats['failed_deletions'] += 1
                     else:
-                        log.info("    ℹ️ No message ID/channel ID stored for item: %s", item["title"])
+                        log.info("  │  ├─ ℹ️ No message ID/channel ID stored")
                 else:
-                    log.info("    ℹ️ No database entry for item: %s", item["title"])
+                    log.info("  │  ├─ ℹ️ No database entry found")
                     
         except Exception as e:
-            log.error("    ❌ Database error checking item %s: %s", item.get("title", "Unknown"), e)
+            log.error("  │  └─ ❌ Database error: %s", e)
+            deletion_stats['failed_deletions'] += 1
     
-    log.info("📊 Deletion summary:")
-    log.info("  - Deleted: %d", deleted_count)
-    log.info("  - Not found: %d", not_found_count)
-    log.info("  - Forbidden: %d", forbidden_count)
+    # Log comprehensive deletion statistics
+    log.info("  └─ 📊 DELETION STATISTICS:")
+    log.info("     ├─ Total items processed: %d", deletion_stats['total_items'])
+    log.info("     ├─ Items with messages: %d", deletion_stats['items_with_messages'])
+    log.info("     ├─ Successfully deleted: %d", deletion_stats['successful_deletions'])
+    log.info("     ├─ Not found: %d", deletion_stats['not_found'])
+    log.info("     ├─ Permission denied: %d", deletion_stats['permission_denied'])
+    log.info("     └─ Failed deletions: %d", deletion_stats['failed_deletions'])
+    log.info("🗑️ OLD INDIVIDUAL MESSAGES DELETION END")
     log.info("🗑️ DELETE OLD MESSAGES DEBUG END")
 
 
@@ -2528,10 +2572,45 @@ async def update_group_discord_message_info(group_key: str, message_id: int, cha
 
 
 async def delete_group_post(group_key: str):
-    """Delete a group post record."""
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("DELETE FROM grouped_posts WHERE group_key=?", (group_key,))
-        await db.commit()
+    """Delete a group post record with comprehensive debugging."""
+    log.info("🗑️ GROUP POST DELETION START")
+    log.info("  ├─ Group key: %s", group_key[:16] + "..." if len(group_key) > 16 else group_key)
+    
+    try:
+        # First check if the group exists
+        async with aiosqlite.connect(DB) as db:
+            async with db.execute("SELECT location, price, item_titles FROM grouped_posts WHERE group_key = ?", (group_key,)) as cur:
+                existing_group = await cur.fetchone()
+                
+                if existing_group:
+                    location, price, item_titles = existing_group
+                    log.info("  ├─ Found existing group:")
+                    log.info("  │  ├─ Location: '%s'", location)
+                    log.info("  │  ├─ Price: '%s'", price)
+                    log.info("  │  └─ Items: %s", item_titles)
+                else:
+                    log.warning("  ├─ Group not found in database")
+                    log.info("  └─ Deletion completed (nothing to delete)")
+                    return
+        
+        # Perform the deletion
+        async with aiosqlite.connect(DB) as db:
+            cursor = await db.execute("DELETE FROM grouped_posts WHERE group_key=?", (group_key,))
+            rows_affected = cursor.rowcount
+            await db.commit()
+            
+            log.info("  ├─ Database operation completed")
+            log.info("  ├─ Rows affected: %d", rows_affected)
+            
+            if rows_affected > 0:
+                log.info("  └─ ✅ Group post successfully deleted")
+            else:
+                log.warning("  └─ ⚠️ No rows were affected - group may have been already deleted")
+                
+    except Exception as e:
+        log.error("  ├─ ❌ Error during group post deletion")
+        log.error("  └─ Exception: %s", e)
+        raise
 
 
 def generate_group_content_hash(items: list[dict]) -> str:
@@ -2796,6 +2875,25 @@ async def process_grouped_items(channel, group_key: tuple[str, str], items_in_gr
     """Process grouped items with detailed debug logging."""
     location, price = group_key
     
+    # Comprehensive debugging start
+    log.info("🚀 GROUPED POST PROCESSING START")
+    log.info("  ├─ Location: '%s'", location)
+    log.info("  ├─ Price: '%s'", price)
+    log.info("  ├─ Items count: %d", len(items_in_group))
+    log.info("  ├─ Channel: %s (ID: %d)", channel.name, channel.id)
+    
+    # Log item details
+    item_titles = [item.get('title', 'Unknown') for item in items_in_group]
+    log.info("  ├─ Item titles: %s", ', '.join(item_titles))
+    
+    # Generate group key for database operations
+    group_key_hash = generate_stable_group_key(location, price, items_in_group)
+    log.info("  ├─ Generated group key hash: %s", group_key_hash[:16] + "...")
+    
+    # Check if group already exists
+    log.info("  └─ Checking if group already exists...")
+    stored_group = await get_stored_group(group_key_hash)
+    
     # Generate stable group key
     group_key_hash = generate_stable_group_key(location, price, items_in_group)
     
@@ -2990,62 +3088,101 @@ async def process_grouped_items(channel, group_key: tuple[str, str], items_in_gr
 
 
 async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_group: list[dict]) -> bool:
-    """Safely post a grouped embed with proper locking and duplicate prevention."""
+    """Safely post a grouped embed with proper locking and duplicate prevention with comprehensive debugging."""
     global posting_lock
     
+    # Comprehensive debugging start
+    location, price = group_key
+    log.info("🔒 SAFE POST GROUPED EMBED START")
+    log.info("  ├─ Location: '%s'", location)
+    log.info("  ├─ Price: '%s'", price)
+    log.info("  ├─ Items count: %d", len(items_in_group))
+    log.info("  ├─ Channel: %s (ID: %d)", channel.name, channel.id)
+    log.info("  └─ Acquiring posting lock...")
+    
     async with posting_lock:  # Prevent race conditions
-        location, price = group_key
+        log.info("  ├─ ✅ Posting lock acquired")
         
         # Generate stable group key
         group_key_hash = generate_stable_group_key(location, price, items_in_group)
+        log.info("  ├─ Generated group key hash: %s", group_key_hash[:16] + "...")
         
         # Log group details for debugging
         item_titles = [item.get("title", "Unknown") for item in items_in_group]
-        log.info("Checking group: %s | Location: '%s' | Price: '%s' | Items: %s", 
-                group_key_hash[:8], location, price, item_titles)
+        log.info("  ├─ Item titles: %s", ', '.join(item_titles))
         
         # Check if group has changed
+        log.info("  └─ Checking if group has changed...")
         has_changed, stored_group = await has_group_changed(group_key_hash, items_in_group)
+        
+        if stored_group:
+            log.info("  ├─ Found stored group:")
+            log.info("  │  ├─ Message ID: %s", stored_group.get('discord_message_id', 'None'))
+            log.info("  │  ├─ Channel ID: %s", stored_group.get('discord_channel_id', 'None'))
+            log.info("  │  └─ Has changed: %s", has_changed)
+        else:
+            log.info("  ├─ No stored group found")
+            log.info("  └─ This appears to be a new group")
         
         # If group exists, check if the Discord message still exists
         if stored_group:
             msg_id = stored_group.get("discord_message_id")
             ch_id = stored_group.get("discord_channel_id")
             if msg_id and ch_id:
+                log.info("  ├─ Checking if Discord message %d still exists...", msg_id)
                 message_exists = await check_message_exists(msg_id, ch_id)
                 if not message_exists:
-                    log.info("Discord message %s no longer exists, will create new group message", msg_id)
+                    log.warning("  ├─ ❌ Discord message %d no longer exists", msg_id)
+                    log.info("  │  └─ Will create new group message")
                     # Clear the stored message ID to force creation of new message
                     stored_group["discord_message_id"] = None
                     # Since message doesn't exist, we need to create a new one
                     has_changed = True
+                else:
+                    log.info("  ├─ ✅ Discord message %d still exists", msg_id)
+            else:
+                log.warning("  ├─ ⚠️ Stored group has incomplete message info")
+                log.info("  │  ├─ Message ID: %s", msg_id if msg_id else 'None')
+                log.info("  │  └─ Channel ID: %s", ch_id if ch_id else 'None')
         
         if not has_changed and stored_group:
-            log.info("Group unchanged, skipping: %s (%d items)", group_key_hash[:8], len(items_in_group))
+            log.info("  ├─ Group unchanged - skipping posting")
+            log.info("  │  ├─ Group key: %s", group_key_hash[:8])
+            log.info("  │  └─ Items: %d", len(items_in_group))
+            log.info("  └─ 🔒 SAFE POST GROUPED EMBED END (SKIPPED)")
             return False
         elif stored_group:
-            log.info("Group changed, updating existing: %s (%d items)", group_key_hash[:8], len(items_in_group))
+            log.info("  ├─ Group changed - will update existing message")
         else:
-            log.info("New group, creating: %s (%d items)", group_key_hash[:8], len(items_in_group))
+            log.info("  ├─ New group - will create new message")
         
         if stored_group:
             # Group exists but has changed - update existing message
+            log.info("  ├─ Updating existing group message...")
             
             # Delete old individual messages first
+            log.info("  │  ├─ Deleting old individual messages...")
             await delete_old_individual_messages(items_in_group)
             
             # Edit existing message
+            log.info("  │  └─ Editing existing Discord message...")
             success = await edit_existing_group_message(channel, stored_group, group_key, items_in_group)
             if success:
-                log.info("✅ Successfully updated grouped message: %s", group_key_hash[:8])
+                log.info("  ├─ ✅ Successfully updated grouped message")
+                log.info("  │  ├─ Group key: %s", group_key_hash[:8])
+                log.info("  │  └─ Items: %d", len(items_in_group))
+                log.info("  └─ 🔒 SAFE POST GROUPED EMBED END (UPDATED)")
                 return True
             else:
-                log.error("❌ Failed to update grouped message, will create new one")
+                log.warning("  ├─ ❌ Failed to update grouped message")
+                log.info("  │  └─ Will create new message instead")
                 # Fall through to create new message if update failed
         
         # New group or update failed - create new message
+        log.info("  ├─ Creating new group message...")
         try:
             # Delete old individual messages first
+            log.info("  │  ├─ Deleting old individual messages...")
             await delete_old_individual_messages(items_in_group)
             
             # If we have a stored group but the message wasn't found, 
@@ -3098,17 +3235,25 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
                     log.warning("Failed to retrieve stored group items: %s", e)
             
             # Create and send grouped embed
+            log.info("  │  ├─ Creating grouped embed...")
             grouped_embed, view = await create_grouped_embed(group_key, items_in_group)
+            
+            log.info("  │  ├─ Sending grouped message to Discord...")
             grouped_msg = await channel.send(embed=grouped_embed, view=view)
-            log.info("✅ Posted new grouped embed with %d items (key: %s) - Message ID: %s", 
-                    len(items_in_group), group_key_hash[:8], grouped_msg.id)
+            
+            log.info("  │  ├─ ✅ Message sent successfully")
+            log.info("  │  │  ├─ Message ID: %d", grouped_msg.id)
+            log.info("  │  │  ├─ Items in group: %d", len(items_in_group))
+            log.info("  │  │  └─ Group key: %s", group_key_hash[:8])
             
             # Mark group as posted atomically with updated data storage
+            log.info("  │  ├─ Updating stored group data...")
             await update_stored_group_data(group_key_hash, location, price, items_in_group, 
                                           grouped_msg.id, channel.id)
             
             # Store all items in the database and link them to the grouped message
-            for item in items_in_group:
+            log.info("  │  ├─ Storing %d items in database...", len(items_in_group))
+            for i, item in enumerate(items_in_group, 1):
                 # Generate pid if not present
                 if "pid" not in item:
                     pid = urlparse(item["url"]).path.strip("/").replace("/", "-") or item["url"]
@@ -3116,17 +3261,26 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
                 else:
                     pid = item["pid"]
                 
+                log.debug("  │  │  ├─ Storing item %d: %s", i, item.get('title', 'Unknown'))
                 # Store the item in database with Discord message info
                 await mark_posted(pid, item, grouped_msg.id, channel.id)
             
-            log.info("✅ Posted new grouped embed with %d items (key: %s)", len(items_in_group), group_key_hash[:8])
+            log.info("  ├─ ✅ Successfully created and stored new grouped message")
+            log.info("  │  ├─ Message ID: %d", grouped_msg.id)
+            log.info("  │  ├─ Items: %d", len(items_in_group))
+            log.info("  │  └─ Group key: %s", group_key_hash[:8])
+            log.info("  └─ 🔒 SAFE POST GROUPED EMBED END (CREATED)")
             return True
             
         except discord.HTTPException as e:
-            log.error("❌ Failed to send grouped message: %s", e)
+            log.error("  ├─ ❌ Discord HTTP error")
+            log.error("  │  └─ Exception: %s", e)
+            log.error("  └─ 🔒 SAFE POST GROUPED EMBED END (HTTP ERROR)")
             return False
         except Exception as e:
-            log.error("❌ Unexpected error posting group: %s", e)
+            log.error("  ├─ ❌ Unexpected error during group posting")
+            log.error("  │  └─ Exception: %s", e)
+            log.error("  └─ 🔒 SAFE POST GROUPED EMBED END (ERROR)")
             return False
 
 
@@ -4788,10 +4942,18 @@ async def check_groups(interaction: discord.Interaction):
 @bot.tree.command(name="dismiss", description="Dismiss the most recent grouped message in this channel")
 @commands.has_permissions(manage_messages=True)
 async def dismiss(interaction: discord.Interaction):
-    """Dismiss (delete) the most recent grouped message in the channel."""
+    """Dismiss (delete) the most recent grouped message in the channel with comprehensive debugging."""
+    log.info("🚀 DISMISS COMMAND START")
+    log.info("  ├─ User: %s (ID: %d)", interaction.user.name, interaction.user.id)
+    log.info("  ├─ Channel: %s (ID: %d)", interaction.channel.name, interaction.channel.id)
+    log.info("  └─ Permissions: Manage Messages = ✅")
+    
     try:
         await interaction.response.defer(thinking=True)
+        log.info("  ├─ Interaction deferred successfully")
     except discord.NotFound:
+        log.warning("  ├─ Interaction not found - token may have expired")
+        log.info("  └─ Exiting silently")
         return
     
     channel = interaction.channel
@@ -4801,13 +4963,23 @@ async def dismiss(interaction: discord.Interaction):
     
     # Get recent messages from the channel
     try:
+        log.info("  ├─ Fetching recent messages (limit: 20)")
         messages = [msg async for msg in channel.history(limit=20)]
+        log.info("  ├─ Retrieved %d messages", len(messages))
         
         # Find the most recent message that looks like a grouped post
+        log.info("  └─ Searching for grouped messages...")
         grouped_message = None
-        for message in messages:
+        messages_checked = 0
+        
+        for i, message in enumerate(messages, 1):
+            messages_checked += 1
+            log.debug("  ├─ Message %d: Author=%s, Bot=%s, Embeds=%d", 
+                     i, message.author.name, message.author.bot, len(message.embeds))
+            
             # Skip messages from bots that aren't our bot
             if message.author.bot and message.author.id != bot.user.id:
+                log.debug("  │  └─ Skipping other bot message")
                 continue
                 
             # Check if this looks like a grouped message
@@ -4815,24 +4987,42 @@ async def dismiss(interaction: discord.Interaction):
                 message.embeds[0].title and 
                 ("Daily Gift" in message.embeds[0].title or "Location:" in str(message.embeds[0].description))):
                 grouped_message = message
+                log.info("  ├─ ✅ Found grouped message at position %d", i)
+                log.info("  │  ├─ Message ID: %d", message.id)
+                log.info("  │  ├─ Title: '%s'", message.embeds[0].title)
+                log.info("  │  └─ Created: %s", message.created_at.strftime('%Y-%m-%d %H:%M:%S'))
                 break
+            else:
+                log.debug("  │  └─ Not a grouped message")
+        
+        log.info("  └─ Checked %d messages", messages_checked)
         
         if not grouped_message:
+            log.warning("  ├─ No grouped message found")
             await interaction.followup.send("No recent grouped message found to dismiss.", ephemeral=True)
             return
         
         # Delete the message
+        log.info("  ├─ Attempting to delete message %d", grouped_message.id)
         await grouped_message.delete()
         
         # Log the action
-        log.info("Dismissed grouped message in channel %s by %s", channel.name, interaction.user.name)
+        log.info("  ├─ ✅ Message deleted successfully")
+        log.info("  └─ DISMISS COMMAND COMPLETED")
+        log.info("     ├─ Channel: %s", channel.name)
+        log.info("     ├─ User: %s", interaction.user.name)
+        log.info("     └─ Message ID: %d", grouped_message.id)
         
         await interaction.followup.send("✅ Grouped message dismissed successfully.", ephemeral=True)
         
     except discord.Forbidden:
+        log.error("  ├─ ❌ Permission denied - cannot delete messages")
+        log.error("  └─ DISMISS COMMAND FAILED (PERMISSIONS)")
         await interaction.followup.send("❌ I don't have permission to delete messages in this channel.", ephemeral=True)
     except Exception as e:
-        log.error("Error dismissing message: %s", e)
+        log.error("  ├─ ❌ Unexpected error during dismiss operation")
+        log.error("  └─ Exception: %s", e)
+        log.error("  └─ DISMISS COMMAND FAILED (ERROR)")
         await interaction.followup.send(f"❌ Error dismissing message: {e}", ephemeral=True)
 
 
