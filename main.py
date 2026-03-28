@@ -2109,7 +2109,7 @@ async def delete_old_individual_messages(items: list[dict]):
                 log.debug("  │  └─ Querying database for message info...")
                 cursor = await db.execute("""
                     SELECT discord_message_id, discord_channel_id 
-                    FROM items WHERE pid=?
+                    FROM items WHERE id=?
                 """, (pid,))
                 row = await cursor.fetchone()
                 
