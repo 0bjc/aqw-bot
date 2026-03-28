@@ -3624,9 +3624,15 @@ async def check_posts():
                 
                 # Group ALL current items by Location and Price to check for group updates
                 all_groups = improved_group_items_by_location_price(all_current_items)
+                log.info("DEBUG: all_groups has %d groups", len(all_groups))
+                for key, items in all_groups.items():
+                    log.info("DEBUG: all_groups[%s]: %d items", key[:8], len(items))
                 
                 # Also group changed items separately for new group creation
                 changed_groups = improved_group_items_by_location_price(changed_items) if changed_items else {}
+                log.info("DEBUG: changed_groups has %d groups", len(changed_groups))
+                for key, items in changed_groups.items():
+                    log.info("DEBUG: changed_groups[%s]: %d items", key[:8], len(items))
                 
                 # Combine both: process all groups but prioritize changed ones
                 groups = {**all_groups, **changed_groups}
@@ -3635,6 +3641,10 @@ async def check_posts():
                 
                 # Process each group
                 for group_key_hash, items_in_group in groups.items():
+                    log.info("DEBUG: Processing group %s with %d items", group_key_hash[:8], len(items_in_group))
+                    for item in items_in_group:
+                        log.info("DEBUG: Item in group: %s", item.get("title", "Unknown"))
+                    
                     # Extract location and price from first item for display
                     first_item = items_in_group[0]
                     content = first_item.get("content", "")
@@ -3666,6 +3676,7 @@ async def check_posts():
                     
                     else:
                         # SINGLE ITEM: No grouping, treat as normal individual post
+                        log.info("DEBUG: Processing single item: %s", items_in_group[0].get("title", "Unknown"))
                         item = items_in_group[0]
                         pid = item["pid"]
                         stored_item = await get_stored_item(pid)
