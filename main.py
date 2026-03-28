@@ -4986,17 +4986,103 @@ async def dismiss(interaction: discord.Interaction):
     except Exception as e:
         log.error("  ├─ ❌ Unexpected error during dismiss operation")
         log.error("  └─ Exception: %s", e)
-        log.error("  └─ DISMISS COMMAND FAILED (ERROR)")
         await interaction.followup.send(f"❌ Error dismissing message: {e}", ephemeral=True)
+    
+    log.info("  └─ DISMISS COMMAND COMPLETED")
 
 
-@dismiss.error
-async def dismiss_error(interaction: discord.Interaction, error):
-    """Handle errors for the dismiss command."""
+@bot.tree.command(name="cleanup-groups", description="Clean up corrupted group data from database")
+@commands.has_permissions(manage_messages=True)
+async def cleanup_groups(interaction: discord.Interaction):
+    """Clean up corrupted group data that may have incorrect item counts."""
+    log.info("🧹 CLEANUP GROUPS COMMAND START")
+    log.info("  ├─ User: %s (ID: %d)", interaction.user.name, interaction.user.id)
+    log.info("  └─ Channel: %s (ID: %d)", interaction.channel.name, interaction.channel.id)
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        async with aiosqlite.connect(DB) as db:
+            # Get all stored groups
+            cursor = await db.execute("""
+                SELECT group_key, location, price, item_titles, discord_message_id, discord_channel_id
+                FROM grouped_posts
+            """)
+            groups = await cursor.fetchall()
+            
+            if not groups:
+                await interaction.followup.send("✅ No group data found in database.", ephemeral=True)
+                return
+            
+            log.info("  ├─ Found %d stored groups", len(groups))
+            cleaned_count = 0
+            
+            for row in groups:
+                group_key, location, price, item_titles_json, message_id, channel_id = row
+                
+                try:
+                    # Parse item titles
+                    if isinstance(item_titles_json, str):
+                        item_titles = json.loads(item_titles_json)
+                    else:
+                        item_titles = item_titles_json
+                    
+                    # Check if item count seems reasonable (more than 10 items is likely corrupted)
+                    if len(item_titles) > 10:
+                        log.warning("  ├─ Found potentially corrupted group: %s items", len(item_titles))
+                        log.warning("  │  ├─ Group key: %s", group_key[:16] + "...")
+                        log.warning("  │  └─ Items: %s", item_titles[:5])  # Show first 5 items
+                        
+                        # Delete the corrupted group
+                        await db.execute("DELETE FROM grouped_posts WHERE group_key=?", (group_key,))
+                        cleaned_count += 1
+                        
+                        # Try to delete the Discord message if it exists
+                        if message_id and channel_id:
+                            try:
+                                channel = bot.get_channel(channel_id)
+                                if channel:
+                                    message = await channel.fetch_message(message_id)
+                                    await message.delete()
+                                    log.info("  │  └─ ✅ Deleted corrupted Discord message")
+                            except discord.NotFound:
+                                log.info("  │  └─ ℹ️ Discord message not found (already deleted)")
+                            except Exception as e:
+                                log.warning("  │  └─ ⚠️ Could not delete Discord message: %s", e)
+                    
+                except Exception as e:
+                    log.warning("  ├─ Error processing group %s: %s", group_key[:16], e)
+                    # Delete groups that can't be parsed
+                    await db.execute("DELETE FROM grouped_posts WHERE group_key=?", (group_key,))
+                    cleaned_count += 1
+            
+            await db.commit()
+            
+            if cleaned_count > 0:
+                log.info("  ├─ ✅ Cleaned up %d corrupted groups", cleaned_count)
+                await interaction.followup.send(
+                    f"✅ Cleaned up {cleaned_count} corrupted group(s) from database.", 
+                    ephemeral=True
+                )
+            else:
+                log.info("  └─ ✅ No corrupted groups found")
+                await interaction.followup.send("✅ No corrupted groups found.", ephemeral=True)
+                
+    except Exception as e:
+        log.error("  ├─ ❌ Error during cleanup")
+        log.error("  └─ Exception: %s", e)
+        await interaction.followup.send(f"❌ Error during cleanup: {e}", ephemeral=True)
+    
+    log.info("🧹 CLEANUP GROUPS COMMAND END")
+
+
+@cleanup_groups.error
+async def cleanup_groups_error(interaction: discord.Interaction, error):
+    """Handle errors for the cleanup groups command."""
     if isinstance(error, commands.MissingPermissions):
         await interaction.response.send_message("❌ You need 'Manage Messages' permission to use this command.", ephemeral=True)
     else:
-        await interaction.response.send_message(f"❌ An error occurred: {error}", ephemeral=True)
+        await interaction.response.send_message(f"❌ Error: {error}", ephemeral=True)
 
 
 # ---------------- READY ----------------
