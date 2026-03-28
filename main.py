@@ -4186,6 +4186,26 @@ async def check_posts():
                         # SINGLE ITEM: No grouping, treat as normal individual post
                         item = items_in_group[0]
                         pid = item["pid"]
+                        
+                        # Skip items with unknown location/price (likely data extraction errors)
+                        content = item.get("content", "")
+                        location = "Unknown"
+                        price = "Unknown"
+                        
+                        # Parse location from item
+                        loc_match = re.search(r"__\*\*Location:\*\*__\s*\n(.+?)(?=\n\n|\n__\*\*|$)", content, re.IGNORECASE | re.DOTALL)
+                        if loc_match:
+                            location = normalize_string(loc_match.group(1).strip())
+                        
+                        # Parse price from item
+                        price_match = re.search(r"__\*\*Price:\*\*__\s*\n(.+?)(?=\n\n|\n__\*\*|$)", content, re.IGNORECASE | re.DOTALL)
+                        if price_match:
+                            price = normalize_string(price_match.group(1).strip())
+                        
+                        if location == "Unknown" or price == "Unknown":
+                            log.warning("Skipping item '%s' with unknown location/price from individual posting", item["title"])
+                            continue
+                        
                         stored_item = await get_stored_item(pid)
                         
                         # Check if this item is already part of a grouped message
