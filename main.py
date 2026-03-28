@@ -816,34 +816,44 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
         log.debug("Processing item %d: %s", i + 1, item['title'])
         
         content = item.get("content", "")
-        location = "Unknown"
-        price = "Unknown"
         
-        # Extract location with robust parsing
-        try:
-            location = extract_location_from_content(content)
-            if location != "Unknown":
-                extraction_stats['location_success'] += 1
-                log.debug("✓ Location extracted: '%s' for %s", location, item['title'])
-            else:
+        # For existing grouped items, preserve their original location/price from database
+        if not content and not item.get("url"):
+            # This is an existing grouped item without content - use database values
+            location = item.get("location", "Unknown")
+            price = item.get("price", "Unknown")
+            log.debug("Using database location/price for existing item '%s': Location='%s', Price='%s'", 
+                     item['title'], location, price)
+        else:
+            # This is a current item - extract from content
+            location = "Unknown"
+            price = "Unknown"
+            
+            # Extract location with robust parsing
+            try:
+                location = extract_location_from_content(content)
+                if location != "Unknown":
+                    extraction_stats['location_success'] += 1
+                    log.debug("✓ Location extracted: '%s' for %s", location, item['title'])
+                else:
+                    extraction_stats['location_failed'] += 1
+                    log.warning("✗ Failed to extract location for %s", item['title'])
+            except Exception as e:
                 extraction_stats['location_failed'] += 1
-                log.warning("✗ Failed to extract location for %s", item['title'])
-        except Exception as e:
-            extraction_stats['location_failed'] += 1
-            log.error("✗ Error extracting location for %s: %s", item['title'], e)
-        
-        # Extract price with robust parsing
-        try:
-            price = extract_price_from_content(content)
-            if price != "Unknown":
-                extraction_stats['price_success'] += 1
-                log.debug("✓ Price extracted: '%s' for %s", price, item['title'])
-            else:
+                log.error("✗ Error extracting location for %s: %s", item['title'], e)
+            
+            # Extract price with robust parsing
+            try:
+                price = extract_price_from_content(content)
+                if price != "Unknown":
+                    extraction_stats['price_success'] += 1
+                    log.debug("✓ Price extracted: '%s' for %s", price, item['title'])
+                else:
+                    extraction_stats['price_failed'] += 1
+                    log.warning("✗ Failed to extract price for %s", item['title'])
+            except Exception as e:
                 extraction_stats['price_failed'] += 1
-                log.warning("✗ Failed to extract price for %s", item['title'])
-        except Exception as e:
-            extraction_stats['price_failed'] += 1
-            log.error("✗ Error extracting price for %s: %s", item['title'], e)
+                log.error("✗ Error extracting price for %s: %s", item['title'], e)
         
         # Store extracted data
         item_data.append({
@@ -874,9 +884,12 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
         price = data['price']
         item_title = data['item']['title']
         
-        # Skip items with unknown location or price to prevent broken posts
-        if location == "Unknown" or price == "Unknown":
-            log.warning("Skipping item '%s' with unknown location/price from grouping: Location='%s', Price='%s'", 
+        # Skip items with unknown location/price ONLY if they're new items (not from database)
+        # Existing grouped items should be preserved even if they lose their content
+        is_new_item = data['item'].get('url') is not None or data['item'].get('content') is not None
+        
+        if (location == "Unknown" or price == "Unknown") and is_new_item:
+            log.warning("Skipping new item '%s' with unknown location/price from grouping: Location='%s', Price='%s'", 
                        item_title, location, price)
             grouping_stats['skipped_unknown'] += 1
             continue
