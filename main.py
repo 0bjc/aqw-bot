@@ -2191,9 +2191,16 @@ async def mark_posted(pid: str, item: dict, message_id: int = None, channel_id: 
 
 async def update_discord_message_info(pid: str, message_id: int, channel_id: int):
     """Update Discord message info for an existing item."""
-    log.debug("Updating discord_message_info: pid=%s, message_id=%s, channel_id=%s", pid, message_id, channel_id)
+    log.info("Updating discord_message_info: pid=%s, message_id=%s, channel_id=%s", pid, message_id, channel_id)
     
     async with aiosqlite.connect(DB) as db:
+        # Check if item exists before updating
+        async with db.execute("SELECT id FROM items WHERE id=?", (pid,)) as cur:
+            exists = await cur.fetchone()
+            if not exists:
+                log.warning("Item with pid=%s not found in database", pid)
+                return
+        
         await db.execute("""
             UPDATE items SET discord_message_id=?, discord_channel_id=?, last_updated=datetime('now')
             WHERE id=?
@@ -2202,10 +2209,10 @@ async def update_discord_message_info(pid: str, message_id: int, channel_id: int
         # Verify the update
         async with db.execute("SELECT changes()") as cur:
             changes = await cur.fetchone()
-            log.debug("Database changes: %s", changes[0])
+            log.info("Database changes: %s", changes[0])
         
         await db.commit()
-        log.debug("Successfully updated discord_message_info for pid=%s", pid)
+        log.info("Successfully updated discord_message_info for pid=%s", pid)
 
 
 def normalize_string(s: str) -> str:
@@ -2448,15 +2455,20 @@ async def get_stored_group(group_key: str) -> dict | None:
 
 async def get_items_in_grouped_message(message_id: int) -> list[dict]:
     """Get all items that belong to a specific grouped message."""
-    log.debug("Querying items for discord_message_id=%s", message_id)
+    log.info("Querying items for discord_message_id=%s", message_id)
     
     async with aiosqlite.connect(DB) as db:
+        # First check if any items exist with this message_id
+        async with db.execute("SELECT COUNT(*) FROM items WHERE discord_message_id=?", (message_id,)) as cur:
+            count = await cur.fetchone()
+            log.info("Found %d items with discord_message_id=%s", count[0], message_id)
+        
         async with db.execute("""
             SELECT id, url, title, content, price, rarity, image, images, content_hash
             FROM items WHERE discord_message_id=?
         """, (message_id,)) as cur:
             rows = await cur.fetchall()
-            log.debug("Found %d rows for discord_message_id=%s", len(rows), message_id)
+            log.info("Found %d rows for discord_message_id=%s", len(rows), message_id)
             
             items = []
             for row in rows:
