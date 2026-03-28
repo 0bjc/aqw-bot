@@ -1505,63 +1505,63 @@ class CategoryButton(discord.ui.Button):
                     ephemeral=True
                 )
                 return
-        
-        # Create embed for this category
-        embed = discord.Embed(
-            title=f"📂 {get_category_form(self.category, len(category_items))} ({len(category_items)} items)",
-            description=f"**Location:** {self.category_view.location}\n**Price:** {self.category_view.price}\n\n",
-            color=discord.Color.blue()
-        )
-        
-        # Add items to embed
-        item_list = []
-        for item in category_items:
-            title = item.get("title", "Unknown")
-            url = item.get("url", "")
-            price = item.get("price", "N/A")
             
-            if url:
-                item_list.append(f"• **[{title}]({url})**\n  💰 {price}")
-            else:
-                item_list.append(f"• **{title}**\n  💰 {price}")
-        
-        # Add items to description
-        embed.description += "\n".join(item_list)
-        
-        # Truncate if too long
-        if len(embed.description) > 4000:
-            embed.description = embed.description[:3950] + "\n... *(truncated)*"
-        
-        # Collect images for this category
-        category_images = []
-        for item in category_items:
-            if item.get("images"):
-                category_images.extend(item.get("images", []))
-            elif item.get("image"):
-                category_images.append(item["image"])
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_images = []
-        for img in category_images:
-            if img and img not in seen:
-                seen.add(img)
-                unique_images.append(img)
-        
-        # Add image if available
-        view = None
-        if unique_images:
-            embed.set_image(url=unique_images[0])
-            if len(unique_images) > 1:
-                embed.description += f"\n\n🖼️ **{len(unique_images)} images available**"
+            # Create embed for this category
+            embed = discord.Embed(
+                title=f"📂 {get_category_form(self.category, len(category_items))} ({len(category_items)} items)",
+                description=f"**Location:** {self.category_view.location}\n**Price:** {self.category_view.price}\n\n",
+                color=discord.Color.blue()
+            )
             
-            # Create navigation view for images
-            view = CategoryImageView(unique_images, self.category, f"{len(category_items)} Items")
-        
-        embed.set_footer(text="AQW Daily Gift - Category View")
-        
-        # Send ephemeral message using followup since we already deferred
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            # Add items to embed
+            item_list = []
+            for item in category_items:
+                title = item.get("title", "Unknown")
+                url = item.get("url", "")
+                price = item.get("price", "N/A")
+                
+                if url:
+                    item_list.append(f"• **[{title}]({url})**\n  💰 {price}")
+                else:
+                    item_list.append(f"• **{title}**\n  💰 {price}")
+            
+            # Add items to description
+            embed.description += "\n".join(item_list)
+            
+            # Truncate if too long
+            if len(embed.description) > 4000:
+                embed.description = embed.description[:3950] + "\n... *(truncated)*"
+            
+            # Collect images for this category
+            category_images = []
+            for item in category_items:
+                if item.get("images"):
+                    category_images.extend(item.get("images", []))
+                elif item.get("image"):
+                    category_images.append(item["image"])
+            
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_images = []
+            for img in category_images:
+                if img and img not in seen:
+                    seen.add(img)
+                    unique_images.append(img)
+            
+            # Add image if available
+            view = None
+            if unique_images:
+                embed.set_image(url=unique_images[0])
+                if len(unique_images) > 1:
+                    embed.description += f"\n\n🖼️ **{len(unique_images)} images available**"
+                
+                # Create navigation view for images
+                view = CategoryImageView(unique_images, self.category, f"{len(category_items)} Items")
+            
+            embed.set_footer(text="AQW Daily Gift - Category View")
+            
+            # Send ephemeral message using followup since we already deferred
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         
         except discord.errors.InteractionResponded:
             # If interaction was already responded to, try to edit original response
