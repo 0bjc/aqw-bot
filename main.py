@@ -2809,6 +2809,50 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
             # Delete old individual messages first
             await delete_old_individual_messages(items_in_group)
             
+            # If we have a stored group but the message wasn't found, 
+            # try to retrieve additional items from the stored group data
+            if stored_group:
+                try:
+                    stored_titles = json.loads(stored_group.get("item_titles", "[]"))
+                    log.info("Retrieved %d item titles from stored group", len(stored_titles))
+                    
+                    # Find items in current items that match stored titles
+                    current_titles = {item["title"] for item in items_in_group}
+                    missing_titles = set(stored_titles) - current_titles
+                    
+                    if missing_titles:
+                        log.info("Missing items from current fetch: %s", list(missing_titles))
+                        # Try to find these items in the database
+                        async with aiosqlite.connect(DB) as db:
+                            missing_items = []
+                            for title in missing_titles:
+                                cursor = await db.execute("""
+                                    SELECT id, url, title, content, price, rarity, image, images, content_hash
+                                    FROM items WHERE title=?
+                                """, (title,))
+                                row = await cursor.fetchone()
+                                if row:
+                                    images_data = json.loads(row[7]) if row[7] else []
+                                    item_data = {
+                                        "pid": row[0],
+                                        "id": row[0],
+                                        "url": row[1],
+                                        "title": row[2],
+                                        "content": row[3],
+                                        "price": row[4],
+                                        "rarity": row[5],
+                                        "image": row[6],
+                                        "images": images_data,
+                                        "content_hash": row[8]
+                                    }
+                                    missing_items.append(item_data)
+                            
+                            if missing_items:
+                                log.info("Adding %d missing items from database to group", len(missing_items))
+                                items_in_group.extend(missing_items)
+                except Exception as e:
+                    log.warning("Failed to retrieve stored group items: %s", e)
+            
             # Create and send grouped embed
             grouped_embed, view = await create_grouped_embed(group_key, items_in_group)
             grouped_msg = await channel.send(embed=grouped_embed, view=view)
@@ -3624,26 +3668,19 @@ async def check_posts():
                 
                 # Group ALL current items by Location and Price to check for group updates
                 all_groups = improved_group_items_by_location_price(all_current_items)
-                log.info("DEBUG: all_groups has %d groups", len(all_groups))
-                for key, items in all_groups.items():
-                    log.info("DEBUG: all_groups[%s]: %d items", key[:8], len(items))
                 
                 # Also group changed items separately for new group creation
                 changed_groups = improved_group_items_by_location_price(changed_items) if changed_items else {}
-                log.info("DEBUG: changed_groups has %d groups", len(changed_groups))
-                for key, items in changed_groups.items():
-                    log.info("DEBUG: changed_groups[%s]: %d items", key[:8], len(items))
                 
                 # Combine both: process all groups but prioritize changed ones
-                groups = {**all_groups, **changed_groups}
+                # Note: all_groups should take precedence to avoid single-item changed groups
+                # overriding multi-item groups
+                groups = {**changed_groups, **all_groups}
                 
                 log.info("Total groups to process: %d", len(groups))
                 
                 # Process each group
                 for group_key_hash, items_in_group in groups.items():
-                    log.info("DEBUG: Processing group %s with %d items", group_key_hash[:8], len(items_in_group))
-                    for item in items_in_group:
-                        log.info("DEBUG: Item in group: %s", item.get("title", "Unknown"))
                     
                     # Extract location and price from first item for display
                     first_item = items_in_group[0]
@@ -3676,7 +3713,6 @@ async def check_posts():
                     
                     else:
                         # SINGLE ITEM: No grouping, treat as normal individual post
-                        log.info("DEBUG: Processing single item: %s", items_in_group[0].get("title", "Unknown"))
                         item = items_in_group[0]
                         pid = item["pid"]
                         stored_item = await get_stored_item(pid)
