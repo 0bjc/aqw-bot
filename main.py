@@ -2055,6 +2055,8 @@ async def create_grouped_embed(group_key: tuple[str, str], items: list[dict]) ->
     # Create category buttons view for grouped items
     view = CategoryButtonsView(items, location, price)
     
+    return embed, view
+    
 
 async def delete_old_individual_messages(items: list[dict]):
     """Delete old individual messages for items that are now grouped with comprehensive debugging."""
