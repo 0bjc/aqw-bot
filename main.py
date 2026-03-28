@@ -707,7 +707,7 @@ def deduplicate_items(items: list[dict]) -> list[dict]:
         ...     {'url': 'http://test.com/item', 'title': 'Item', 'content': ''},
         ...     {'url': 'http://test.com/item', 'title': 'Item', 'content': 'Full content'}
         ... ]
-        >>> deduped = deduplicate_items(items)
+        >>> deduped = deduplicate_items(items)"""
     log.info("Deduplicating %d items", len(items))
     
     # Group by URL, but handle items without URLs separately
