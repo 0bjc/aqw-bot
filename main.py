@@ -1095,29 +1095,49 @@ class GroupedShowPaneButton(discord.ui.Button):
         )
     
     async def callback(self, interaction: discord.Interaction):
-        view = self.view_ref
-        
-        # Categorize items first
-        categorized_items = {}
-        for item in view.items:
-            category = categorize_item(item)
-            if category not in categorized_items:
-                categorized_items[category] = []
-            categorized_items[category].append(item)
-        
-        if not categorized_items:
-            await interaction.response.send_message(
-                "No items available for this group.",
-                ephemeral=True
-            )
-            return
-        
-        # Defer the interaction to avoid timeout, but don't send initial message
-        await interaction.response.defer(ephemeral=True)
+        try:
+            view = self.view_ref
+            
+            # Categorize items first
+            categorized_items = {}
+            for item in view.items:
+                category = categorize_item(item)
+                if category not in categorized_items:
+                    categorized_items[category] = []
+                categorized_items[category].append(item)
+            
+            if not categorized_items:
+                await interaction.response.send_message(
+                    "No items available for this group.",
+                    ephemeral=True
+                )
+                return
+            
+            # Defer the interaction to avoid timeout, but don't send initial message
+            await interaction.response.defer(ephemeral=True)
         
         # Send separate ephemeral message for each category
-        for category, items_in_category in categorized_items.items():
-            await self._send_category_message(interaction, category, items_in_category, view.group_title)
+            for category, items_in_category in categorized_items.items():
+                await self._send_category_message(interaction, category, items_in_category, view.group_title)
+                
+        except discord.errors.InteractionResponded:
+            # If interaction was already responded to, try to edit original response
+            pass
+        except Exception as e:
+            log.error(f"Error in grouped pane button callback: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        "An error occurred while processing your request.", 
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.followup.send(
+                        "An error occurred while processing your request.", 
+                        ephemeral=True
+                    )
+            except:
+                pass  # If even this fails, just log and continue
     
     async def _send_category_message(self, interaction: discord.Interaction, category: str, items: list[dict], group_title: str):
         """Send a separate ephemeral message for a specific category."""
@@ -1472,15 +1492,19 @@ class CategoryButton(discord.ui.Button):
     
     async def callback(self, interaction: discord.Interaction):
         """Send ephemeral message with items from this category."""
-        # Filter items for this category
-        category_items = [item for item in self.items if categorize_item(item) == self.category]
-        
-        if not category_items:
-            await interaction.response.send_message(
-                f"No items found in {get_category_form(self.category, len(category_items))} category.",
-                ephemeral=True
-            )
-            return
+        try:
+            # Acknowledge immediately to prevent timeout
+            await interaction.response.defer(ephemeral=True)
+            
+            # Filter items for this category
+            category_items = [item for item in self.items if categorize_item(item) == self.category]
+            
+            if not category_items:
+                await interaction.followup.send(
+                    f"No items found in {get_category_form(self.category, len(category_items))} category.",
+                    ephemeral=True
+                )
+                return
         
         # Create embed for this category
         embed = discord.Embed(
@@ -1536,13 +1560,26 @@ class CategoryButton(discord.ui.Button):
         
         embed.set_footer(text="AQW Daily Gift - Category View")
         
-        # Send ephemeral message
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        # Send ephemeral message using followup since we already deferred
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        
+        except discord.errors.InteractionResponded:
+            # If interaction was already responded to, try to edit original response
+            pass
+        except Exception as e:
+            log.error(f"Error in category button callback: {e}")
+            try:
+                await interaction.followup.send(
+                    "An error occurred while processing your request.", 
+                    ephemeral=True
+                )
+            except:
+                pass  # If even this fails, just log and continue
 
 
 class CategoryButtonsView(discord.ui.View):
     """Dynamic view with category buttons for grouped items."""
-    def __init__(self, items: list[dict], location: str, price: str, timeout: float = 600.0, 
+    def __init__(self, items: list[dict], location: str, price: str, timeout: float = None, 
                  include_close_button: bool = False):
         super().__init__(timeout=timeout)
         self.items = items
