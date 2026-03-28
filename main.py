@@ -358,214 +358,143 @@ def extract_from_breadcrumbs(soup: BeautifulSoup, all_categories: list[str]) -> 
 
 def categorize_item(item: dict) -> str:
     """
-    Categorize an item using breadcrumb data first, then fallback to keyword analysis.
-    
-    This function provides comprehensive logging and handles edge cases for reliable categorization.
-    
-    Args:
-        item (dict): Item data dictionary
-        
-    Returns:
-        str: The determined category for the item
+    Improved categorization with better keyword matching and fallback logic.
     """
     item_title = item.get("title", "Unknown")
     log.debug("Categorizing item: %s", item_title)
-    
-    # First, try to extract category from breadcrumb if we have the HTML
+
+    # First, try breadcrumb extraction
     if "html_content" in item:
         try:
             breadcrumb_category = extract_breadcrumb_category(item["html_content"], item.get("url", ""))
             if breadcrumb_category != "No category found":
                 log.info("✓ Category from breadcrumb: %s for %s", breadcrumb_category, item_title)
                 return breadcrumb_category
-            else:
-                log.debug("✗ No breadcrumb category found for %s", item_title)
         except Exception as e:
             log.error("✗ Error extracting breadcrumb category for %s: %s", item_title, e)
-    else:
-        log.debug("No HTML content available for %s", item_title)
-    
-    # Fallback to keyword-based categorization with specific weapon types
+
+    # Enhanced keyword matching
     title = item.get("title", "").lower()
     content = item.get("content", "").lower()
-    title_icons = item.get("title_icons", "").lower()
-    
-    log.debug("Keyword analysis for %s: Title='%s', Content length=%d, Icons='%s'", 
-             item_title, title[:50], len(content), title_icons[:50])
-    
-    # Define keyword categories with weights for better matching
-    keyword_categories = {
-        "Axes": {
-            "keywords": ["axe", "hatchet", "battleaxe", "cleaver", "splitter"],
+    url = item.get("url", "").lower()
+
+    # Combine all text for analysis
+    all_text = f"{title} {content} {url}"
+
+    # Enhanced keyword categories with more specific matches
+    categories = {
+        "Swords": {
+            "keywords": ["sword", "blade", "saber", "katana", "rapier", "scimitar", "claymore", "longsword", "broadsword", "greatsword"],
             "weight": 3,
             "priority": 1
         },
-        "Bows": {
-            "keywords": ["bow", "archery", "crossbow", "longbow", "shortbow", "compound"],
+        "Helm": {
+            "keywords": ["helm", "helmet", "hood", "mask", "crown", "tiara", "circlet", "hat", "cap", "head", "skull", "visor", "coif", "headgear", "helmets"],
             "weight": 3,
             "priority": 2
         },
-        "Daggers": {
-            "keywords": ["dagger", "knife", "shiv", "stiletto", "blade", "dirk"],
+        "Axes": {
+            "keywords": ["axe", "hatchet", "battleaxe", "cleaver", "splitter", "greataxe", "handaxe"],
             "weight": 3,
             "priority": 3
         },
-        "Gauntlets": {
-            "keywords": ["gauntlet", "glove", "fist", "hand", "punch"],
+        "Bows": {
+            "keywords": ["bow", "archery", "crossbow", "longbow", "shortbow", "compound", "arrow", "quiver"],
             "weight": 3,
             "priority": 4
         },
-        "Guns": {
-            "keywords": ["gun", "firearm", "pistol", "revolver", "shotgun"],
+        "Daggers": {
+            "keywords": ["dagger", "knife", "shiv", "stiletto", "blade", "dirk", "poison", "assassin"],
             "weight": 3,
             "priority": 5
         },
-        "HandGuns": {
-            "keywords": ["handgun", "pistol", "revolver", "sidearm"],
+        "Maces": {
+            "keywords": ["mace", "club", "morningstar", "flail", "bludgeon", "hammer", "maul", "warhammer"],
             "weight": 3,
             "priority": 6
         },
-        "Maces": {
-            "keywords": ["mace", "club", "morningstar", "flail", "bludgeon"],
+        "Polearms": {
+            "keywords": ["polearm", "spear", "lance", "pike", "halberd", "trident", "glaive", "staff"],
             "weight": 3,
             "priority": 7
         },
-        "Polearms": {
-            "keywords": ["polearm", "spear", "lance", "pike", "halberd", "trident"],
+        "Guns": {
+            "keywords": ["gun", "firearm", "pistol", "revolver", "shotgun", "rifle", "sniper", "bullet", "ammo"],
             "weight": 3,
             "priority": 8
         },
-        "Rifles": {
-            "keywords": ["rifle", "sniper", "carbine", "assault", "musket"],
+        "Wands": {
+            "keywords": ["wand", "magic", "spell", "arcane", "mystic", "staff", "rod", "spellbook"],
             "weight": 3,
             "priority": 9
         },
-        "Staffs": {
-            "keywords": ["staff", "rod", "wand", "stick", "quarterstaff"],
-            "weight": 3,
+        "Armor": {
+            "keywords": ["armor", "armour", "plate", "mail", "chain", "scale", "leather", "cloth", "robe", "tunic", "vest", "chest", "breastplate", "cuirass", "defense", "protection"],
+            "weight": 2,
             "priority": 10
         },
-        "Swords": {
-            "keywords": ["sword", "blade", "saber", "katana", "rapier", "scimitar", "claymore"],
-            "weight": 3,
-            "priority": 11
-        },
-        "Wands": {
-            "keywords": ["wand", "magic", "spell", "arcane", "mystic"],
-            "weight": 3,
-            "priority": 12
-        },
-        "Whips": {
-            "keywords": ["whip", "lash", "chain", "rope", "flail"],
-            "weight": 3,
-            "priority": 13
-        },
-        "Weapon": {
-            "keywords": ["weapon", "weaponry", "armament", "implement"],
-            "weight": 2,
-            "priority": 20
-        },
-        "Armor": {
-            "keywords": [
-                "armor", "armour", "plate", "mail", "chain", "scale", "leather", "cloth",
-                "robe", "tunic", "vest", "chest", "breastplate", "cuirass", "defense"
-            ],
-            "weight": 2,
-            "priority": 21
-        },
-        "Helm": {
-            "keywords": [
-                "helm", "helmet", "hood", "mask", "crown", "tiara", "circlet", "hat",
-                "cap", "head", "skull", "visor", "coif", "headgear", "helmets"
-            ],
-            "weight": 2,
-            "priority": 22
-        },
         "Cape": {
-            "keywords": ["cape", "cloak", "mantle", "shawl", "wrap", "covering", "back", "shoulder"],
+            "keywords": ["cape", "cloak", "mantle", "shawl", "wrap", "covering", "back", "shoulder", "scarf"],
             "weight": 2,
-            "priority": 23
+            "priority": 11
         },
         "Pet": {
             "keywords": ["pet", "companion", "familiar", "mount", "animal", "creature", "beast"],
             "weight": 2,
-            "priority": 24
+            "priority": 12
         }
     }
-    
-    # Calculate match scores for each category
-    category_scores = {}
+
+    # Calculate scores for each category
+    best_category = "Miscellaneous"
+    best_score = 0
     match_details = {}
-    
-    for category, config in keyword_categories.items():
+
+    for category, config in categories.items():
+        keywords = config["keywords"]
+        weight = config["weight"]
+
         score = 0
-        matches = []
-        
-        # Check title matches (highest weight)
-        for keyword in config["keywords"]:
-            if keyword in title:
-                score += config["weight"] * 2  # Title matches are worth more
-                matches.append(f"title:{keyword}")
-                log.debug("✓ Title match for %s: '%s' in %s", category, keyword, item_title)
-        
-        # Check content matches
-        for keyword in config["keywords"]:
-            if keyword in content:
-                score += config["weight"]
-                matches.append(f"content:{keyword}")
-                log.debug("✓ Content match for %s: '%s'", category, keyword)
-        
-        # Check icon matches
-        for keyword in config["keywords"]:
-            if keyword in title_icons:
-                score += config["weight"]
-                matches.append(f"icon:{keyword}")
-                log.debug("✓ Icon match for %s: '%s'", category, keyword)
-        
+        matched_keywords = []
+
+        # Check each keyword
+        for keyword in keywords:
+            # Count occurrences in all text
+            count = all_text.count(keyword)
+            if count > 0:
+                # Title matches get higher weight
+                title_count = title.count(keyword)
+                content_count = content.count(keyword)
+                url_count = url.count(keyword)
+
+                # Calculate weighted score
+                keyword_score = (title_count * 5 + content_count * 2 + url_count * 1) * weight
+                score += keyword_score
+
+                if keyword_score > 0:
+                    matched_keywords.append(f"{keyword}({keyword_score})")
+
         if score > 0:
-            category_scores[category] = score
-            match_details[category] = matches
-            log.debug("Category %s scored %d with matches: %s", category, score, matches)
-    
-    # Determine best category
-    if category_scores:
-        # Sort by score (descending), then by priority (ascending)
-        sorted_categories = sorted(
-            category_scores.items(), 
-            key=lambda x: (-x[1], keyword_categories[x[0]]["priority"])
-        )
-        
-        best_category, best_score = sorted_categories[0]
-        best_matches = match_details[best_category]
-        
-        # Check if we have a clear winner (score significantly higher than second best)
-        if len(sorted_categories) > 1:
-            second_score = sorted_categories[1][1]
-            score_diff = best_score - second_score
-            
-            if score_diff >= 2:  # Clear winner
-                log.info("✓ Clear category match: %s (score: %d, diff: %d) for %s", 
-                        best_category, best_score, score_diff, item_title)
-                log.debug("Best matches: %s", best_matches)
-                return best_category
-            else:
-                # Close match, log for review but still use the best one
-                log.warning("⚠ Close category match: %s (score: %d) vs %s (score: %d) for %s", 
-                           best_category, best_score, sorted_categories[1][0], second_score, item_title)
-                log.info("✓ Selected category: %s (score: %d) for %s", best_category, best_score, item_title)
-                log.debug("Best matches: %s", best_matches)
-                return best_category
-        else:
-            # Only one category matched
-            log.info("✓ Single category match: %s (score: %d) for %s", best_category, best_score, item_title)
-            log.debug("Matches: %s", best_matches)
-            return best_category
+            match_details[category] = {
+                "score": score,
+                "matches": matched_keywords
+            }
+
+            if score > best_score:
+                best_score = score
+                best_category = category
+
+    # Log detailed matching info
+    if best_score > 0:
+        log.info("✓ Best match: %s (score: %d) for %s", 
+                best_category, best_score, item_title)
+        if match_details:
+            log.debug("All matches: %s", match_details)
     else:
         log.warning("✗ No keyword matches found for %s", item_title)
+        log.info("→ Defaulted to Misc category for %s", item_title)
     
-    # Final fallback to Misc
-    log.info("→ Defaulted to Misc category for %s", item_title)
-    return "Misc"
+    return best_category
 
 
 def extract_location_from_content(content: str) -> str:
@@ -2144,36 +2073,47 @@ async def delete_old_individual_messages(items: list[dict]):
 
 
 def generate_content_hash(item: dict) -> str:
-    """Generate hash for change detection."""
-    content_data = {
-        "title": item.get("title", ""),
-        "content": item.get("content", ""),
-        "price": item.get("price", ""),
-        "rarity": item.get("rarity", ""),
-        "images": sorted(item.get("images", []))  # Sort for consistent hashing
-    }
-    content_str = json.dumps(content_data, sort_keys=True)
-    return hashlib.md5(content_str.encode()).hexdigest()
-
-
-def generate_group_content_hash(items: list[dict]) -> str:
-    """Generate hash for group change detection based on item titles and URLs."""
-    # Sort items by URL for consistent ordering
-    sorted_items = sorted(items, key=lambda x: x.get("url", ""))
+    """Generate a more reliable content hash for an item.
+    Includes all relevant fields and normalizes data for consistency.
+    """
+    # Extract and normalize all relevant fields
+    title = item.get("title", "").strip().lower()
+    content = item.get("content", "").strip().lower()
+    price = item.get("price", "").strip().lower()
+    rarity = item.get("rarity", "").strip().lower()
+    image = item.get("image", "").strip().lower()
     
-    # Create a list of item identifiers (title + url) for hashing
-    item_identifiers = []
-    for item in sorted_items:
-        identifier = {
-            "title": item.get("title", ""),
-            "url": item.get("url", ""),
-            "price": item.get("price", ""),
-            "rarity": item.get("rarity", "")
-        }
-        item_identifiers.append(identifier)
+    # Normalize images list
+    images = item.get("images", [])
+    if isinstance(images, str):
+        try:
+            images = json.loads(images)
+        except:
+            images = []
+    if not isinstance(images, list):
+        images = []
+    # Sort images for consistency
+    sorted_images = sorted([img.strip().lower() for img in images if img])
     
-    content_str = json.dumps(item_identifiers, sort_keys=True)
-    return hashlib.md5(content_str.encode()).hexdigest()
+    # Create normalized content string
+    content_parts = [
+        f"title:{title}",
+        f"content:{content}",
+        f"price:{price}",
+        f"rarity:{rarity}",
+        f"image:{image}",
+        f"images:{'|'.join(sorted_images)}"
+    ]
+    
+    # Join and hash
+    combined = "||".join(content_parts)
+    hash_value = hashlib.md5(combined.encode('utf-8')).hexdigest()
+    
+    log.debug("Generated hash for %s: %s (from %d chars)", 
+             item.get("title", "Unknown")[:30], hash_value[:8], len(combined))
+    
+    return hash_value
+
 
 async def is_posted(pid: str) -> bool:
     """Check if item is already posted."""
@@ -2593,53 +2533,81 @@ async def delete_group_post(group_key: str):
 
 
 def generate_group_content_hash(items: list[dict]) -> str:
-    """Generate a hash for the entire group's content to detect changes."""
-    # Sort items by URL for consistent hashing
+    """Generate a more reliable hash for a group of items.
+    Uses item URLs for ordering and includes all item data.
+    """
+    if not items:
+        return hashlib.md5(b"empty_group").hexdigest()
+    
+    # Sort items by URL for consistent ordering
     sorted_items = sorted(items, key=lambda x: x.get("url", ""))
     
-    # Create a list of item hashes
+    # Generate hash for each item
     item_hashes = []
     for item in sorted_items:
         item_hash = generate_content_hash(item)
         item_hashes.append(item_hash)
     
-    # Create combined hash
-    combined = "|".join(item_hashes)
-    return hashlib.md5(combined.encode('utf-8')).hexdigest()
+    # Create group hash
+    combined = "||".join(item_hashes)
+    group_hash = hashlib.md5(combined.encode('utf-8')).hexdigest()
+    
+    log.debug("Generated group hash: %s from %d items", group_hash[:8], len(items))
+    
+    return group_hash
 
 
 async def has_group_changed(group_key: str, items: list[dict]) -> tuple[bool, dict | None]:
     """
-    Check if a group has changed by comparing current items with stored group data.
-    Returns tuple of (has_changed, stored_group_data).
+    Improved group change detection with better logging and hash comparison.
     """
-    log.info("Checking group change for key: %s", group_key[:8])
+    log.info("Checking group change for key: %s (%d items)", group_key[:8], len(items))
+    
+    # Get stored group
     stored_group = await get_stored_group(group_key)
     
     if not stored_group:
-        log.warning("No stored group found for key: %s - this might indicate the group was deleted", group_key[:8])
+        log.warning("No stored group found for key: %s - creating new group", group_key[:8])
         return True, None
     
-    # Generate current content hash for comparison
+    # Generate current hash
     current_hash = generate_group_content_hash(items)
     stored_hash = stored_group.get("content_hash")
     
-    log.info("Hash comparison - Current: %s, Stored: %s, Items: %d", 
-             current_hash[:8], stored_hash[:8] if stored_hash else "None", len(items))
+    # Log comparison details
+    log.info("Hash comparison - Current: %s, Stored: %s", 
+             current_hash[:8], stored_hash[:8] if stored_hash else "None")
     
-    # Log item details for debugging
-    item_titles = [item.get("title", "Unknown") for item in items]
-    log.info("Current items: %s", item_titles)
+    # Log current items
+    current_titles = sorted([item.get("title", "Unknown") for item in items])
+    stored_titles = sorted(stored_group.get("item_titles", []))
     
+    log.info("Current items: %s", current_titles)
+    log.info("Stored items: %s", stored_titles)
+    
+    # Check if hashes match
     if stored_hash is None:
-        log.debug("No stored hash found, assuming group has changed")
+        log.warning("No stored hash found - assuming group has changed")
         return True, stored_group
     
     if stored_hash != current_hash:
-        log.debug("Hashes differ, group has changed")
+        log.info("Hashes differ - group has changed")
+        
+        # Find what changed
+        current_set = set(current_titles)
+        stored_set = set(stored_titles)
+        
+        added = current_set - stored_set
+        removed = stored_set - current_set
+        
+        if added:
+            log.info("Items added: %s", list(added))
+        if removed:
+            log.info("Items removed: %s", list(removed))
+        
         return True, stored_group
     
-    log.debug("Hashes match, group unchanged")
+    log.info("Hashes match - group unchanged")
     return False, stored_group
 
 
@@ -2673,95 +2641,103 @@ async def update_stored_group_data(group_key: str, location: str, price: str, it
 async def edit_existing_group_message(channel, stored_group: dict, group_key: tuple[str, str], 
                                     current_items: list[dict]) -> bool:
     """
-    Edit an existing grouped message with updated items.
-    Merges existing items with current items to preserve all items in the group.
+    Edit an existing grouped message with improved error handling and retry logic.
     Returns True if successful, False otherwise.
     """
-    try:
-        # Get stored message info
-        msg_id = stored_group.get("discord_message_id")
-        ch_id = stored_group.get("discord_channel_id")
-        
-        if not msg_id or not ch_id:
-            log.warning("Missing message info for stored group %s", group_key[0][:8])
-            return False
-        
-        # Get the target channel
-        target_channel = bot.get_channel(ch_id)
-        if not target_channel:
-            log.warning("Channel %s not found for updating group message", ch_id)
-            return False
-        
-        # Fetch the existing message
+    max_retries = 3
+    retry_delay = 1  # seconds
+    
+    for attempt in range(max_retries):
         try:
-            existing_msg = await target_channel.fetch_message(msg_id)
-        except discord.NotFound:
-            log.warning("Existing message %s not found for group %s", msg_id, group_key[0][:8])
-            return False
-        except discord.Forbidden:
-            log.error("No permission to fetch message %s", msg_id)
-            return False
-        
-        # Get existing items from the grouped message
-        existing_items = await get_items_in_grouped_message(msg_id)
-        log.info("Found %d existing items in grouped message %s", len(existing_items), msg_id)
-        
-        # Merge existing items with current items
-        # Use URL as unique identifier to deduplicate
-        merged_items = {}
-        
-        # Add existing items first
-        for item in existing_items:
-            url = item.get("url", "")
-            if url:
-                merged_items[url] = item
-        
-        # Add/update with current items (this will update any changed items)
-        for item in current_items:
-            url = item.get("url", "")
-            if url:
-                merged_items[url] = item
-        
-        # Convert back to list
-        all_items = list(merged_items.values())
-        log.info("Merged group: %d existing + %d current = %d total items", 
-                len(existing_items), len(current_items), len(all_items))
-        
-        # Create updated embed and view with all items
-        location, price = group_key
-        updated_embed, updated_view = await create_grouped_embed(group_key, all_items)
-        
-        # Add "Updated" indicator to footer
-        updated_embed.set_footer(text=f"AQW Daily Gift - Updated • {len(all_items)} items")
-        
-        # Edit the message
-        await existing_msg.edit(embed=updated_embed, view=updated_view)
-        
-        # Update stored data with all items
-        group_key_hash = generate_stable_group_key(location, price, all_items)
-        await update_stored_group_data(group_key_hash, location, price, all_items, msg_id, ch_id)
-        
-        # Update all items in the group to reference the updated message
-        for item in all_items:
-            # Use existing pid if available, otherwise generate it
-            if "pid" in item:
-                pid = item["pid"]
-            else:
+            # Get stored message info
+            msg_id = stored_group.get("discord_message_id")
+            ch_id = stored_group.get("discord_channel_id")
+            
+            if not msg_id or not ch_id:
+                log.warning("Missing message info for stored group %s", group_key[0][:8])
+                return False
+            
+            # Get the target channel
+            target_channel = bot.get_channel(ch_id)
+            if not target_channel:
+                log.warning("Channel %s not found for updating group message", ch_id)
+                return False
+            
+            # Fetch the existing message
+            try:
+                existing_msg = await target_channel.fetch_message(msg_id)
+                log.info("Found existing message %s for group %s", msg_id, group_key[0][:8])
+            except discord.NotFound:
+                log.warning("Existing message %s not found for group %s in channel %s - message may have been deleted", 
+                           msg_id, group_key[0][:8], ch_id)
+                return False
+            except discord.Forbidden:
+                log.error("No permission to fetch message %s", msg_id)
+                return False
+            
+            # Get existing items from the grouped message
+            existing_items = await get_items_in_grouped_message(msg_id)
+            log.info("Found %d existing items in grouped message %s", len(existing_items), msg_id)
+            
+            # Merge existing items with current items to preserve all items
+            # Use a dictionary to deduplicate by URL
+            all_items_dict = {}
+            
+            # Add existing items first
+            for item in existing_items:
+                all_items_dict[item.get("url", "")] = item
+            
+            # Add/overwrite with current items (they have more up-to-date data)
+            for item in current_items:
+                all_items_dict[item.get("url", "")] = item
+            
+            # Convert back to list
+            all_items = list(all_items_dict.values())
+            
+            log.info("Merged items: %d existing + %d current = %d total", 
+                    len(existing_items), len(current_items), len(all_items))
+            
+            # Create updated embed and view
+            location, price = group_key
+            updated_embed, updated_view = await create_grouped_embed(group_key, all_items)
+            
+            # Edit the message
+            await existing_msg.edit(embed=updated_embed, view=updated_view)
+            log.info("Successfully edited grouped message %s with %d items", msg_id, len(all_items))
+            
+            # Update stored data with all items
+            group_key_hash = generate_stable_group_key(location, price, all_items)
+            await update_stored_group_data(group_key_hash, location, price, all_items, msg_id, ch_id)
+            
+            # Update all items in the group to reference the updated message
+            for item in all_items:
                 pid = urlparse(item["url"]).path.strip("/").replace("/", "-") or item["url"]
-                item["pid"] = pid
-            await update_stored_item(pid, item)
-            await update_discord_message_info(pid, msg_id, ch_id)
-        
-        log.info("✅ Updated existing grouped message: %s (key: %s)", 
-                location, group_key_hash[:8])
-        return True
-        
-    except discord.HTTPException as e:
-        log.error("❌ Failed to edit grouped message: %s", e)
-        return False
-    except Exception as e:
-        log.error("❌ Unexpected error editing group message: %s", e)
-        return False
+                await update_item_message_info(pid, msg_id, ch_id)
+            
+            return True
+            
+        except discord.HTTPException as e:
+            if e.status == 429:  # Rate limited
+                wait_time = e.retry_after if hasattr(e, 'retry_after') else retry_delay
+                log.warning("Rate limited when editing group message, waiting %d seconds (attempt %d/%d)", 
+                          wait_time, attempt + 1, max_retries)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(wait_time)
+                    continue
+            else:
+                log.error("HTTP error editing group message (attempt %d/%d): %s", 
+                         attempt + 1, max_retries, e)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    continue
+        except Exception as e:
+            log.error("Unexpected error editing group message (attempt %d/%d): %s", 
+                     attempt + 1, max_retries, e)
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+                continue
+    
+    return False
 
 
 async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_group: list[dict]) -> bool:
@@ -2862,6 +2838,8 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
             # Create and send grouped embed
             grouped_embed, view = await create_grouped_embed(group_key, items_in_group)
             grouped_msg = await channel.send(embed=grouped_embed, view=view)
+            log.info("✅ Posted new grouped embed with %d items (key: %s) - Message ID: %s", 
+                    len(items_in_group), group_key_hash[:8], grouped_msg.id)
             
             # Mark group as posted atomically with updated data storage
             await update_stored_group_data(group_key_hash, location, price, items_in_group, 
@@ -4224,6 +4202,211 @@ async def simulategroupchange(interaction: discord.Interaction):
     log.info("Simulated group changes - bot should update existing message on next check")
 
 
+@bot.tree.command(name="debuggroup", description="Debug a specific group by key")
+@commands.has_permissions(manage_messages=True)
+async def debug_group(interaction: discord.Interaction, group_key: str = None):
+    """Debug a specific group or show all groups with detailed information."""
+    try:
+        await interaction.response.defer(thinking=True)
+        
+        if not group_key:
+            # Show all groups
+            async with aiosqlite.connect(DB) as db:
+                async with db.execute("""
+                    SELECT group_key, location, price, item_titles, categories, 
+                           discord_message_id, discord_channel_id, last_updated
+                    FROM grouped_posts ORDER BY last_updated DESC LIMIT 10
+                """) as cur:
+                    rows = await cur.fetchall()
+            
+            if not rows:
+                await interaction.followup.send("No grouped messages found in database.")
+                return
+            
+            embed = discord.Embed(
+                title="🔍 Recent Groups (Last 10)",
+                description="Use `/debuggroup key:<group_key>` for detailed info",
+                color=discord.Color.blue()
+            )
+            
+            for row in rows:
+                group_key_full, location, price, item_titles_json, categories_json, msg_id, ch_id, last_updated = row
+                item_titles = json.loads(item_titles_json) if item_titles_json else []
+                
+                # Check if message exists
+                channel = bot.get_channel(ch_id)
+                msg_status = "❓ Unknown"
+                if channel:
+                    try:
+                        await channel.fetch_message(msg_id)
+                        msg_status = "✅ Found"
+                    except discord.NotFound:
+                        msg_status = "❌ Not Found"
+                    except discord.Forbidden:
+                        msg_status = "🔒 No Permission"
+                    except Exception:
+                        msg_status = "⚠️ Error"
+                else:
+                    msg_status = "📵 Channel Not Found"
+                
+                embed.add_field(
+                    name=f"Group {group_key_full[:8]}",
+                    value=f"**Location:** {location}\n"
+                          f"**Items:** {len(item_titles)}\n"
+                          f"**Message:** {msg_status}\n"
+                          f"**Last Updated:** {last_updated}",
+                    inline=False
+                )
+            
+            await interaction.followup.send(embed=embed)
+        else:
+            # Debug specific group
+            stored_group = await get_stored_group(group_key)
+            
+            if not stored_group:
+                await interaction.followup.send(f"Group `{group_key[:8]}` not found in database.")
+                return
+            
+            # Create detailed debug embed
+            embed = discord.Embed(
+                title=f"🔍 Group Debug: {group_key[:8]}",
+                color=discord.Color.orange()
+            )
+            
+            # Basic info
+            embed.add_field(
+                name="📊 Basic Info",
+                value=f"**Location:** {stored_group.get('location', 'Unknown')}\n"
+                      f"**Price:** {stored_group.get('price', 'Unknown')}\n"
+                      f"**Message ID:** {stored_group.get('discord_message_id', 'Unknown')}\n"
+                      f"**Channel ID:** {stored_group.get('discord_channel_id', 'Unknown')}\n"
+                      f"**Content Hash:** {stored_group.get('content_hash', 'None')[:8] if stored_group.get('content_hash') else 'None'}",
+                inline=False
+            )
+            
+            # Items
+            item_titles = stored_group.get('item_titles', [])
+            items_text = "\n".join([f"• {title}" for title in item_titles[:10]])
+            if len(item_titles) > 10:
+                items_text += f"\n... and {len(item_titles) - 10} more"
+            
+            embed.add_field(
+                name=f"📦 Items ({len(item_titles)})",
+                value=items_text or "No items",
+                inline=False
+            )
+            
+            # Categories
+            categories = stored_group.get('categories', [])
+            categories_text = ", ".join(categories) if categories else "No categories"
+            
+            embed.add_field(
+                name="🏷️ Categories",
+                value=categories_text,
+                inline=False
+            )
+            
+            # Check message status
+            msg_id = stored_group.get('discord_message_id')
+            ch_id = stored_group.get('discord_channel_id')
+            if msg_id and ch_id:
+                channel = bot.get_channel(ch_id)
+                if channel:
+                    try:
+                        msg = await channel.fetch_message(msg_id)
+                        embed.add_field(
+                            name="✅ Message Status",
+                            value=f"Message exists and was created {msg.created_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                                  f"Jump: [Click to view]({msg.jump_url})",
+                            inline=False
+                        )
+                    except discord.NotFound:
+                        embed.add_field(
+                            name="❌ Message Status",
+                            value="Message not found - it may have been deleted",
+                            inline=False
+                        )
+                    except discord.Forbidden:
+                        embed.add_field(
+                            name="🔒 Message Status",
+                            value="No permission to view message",
+                            inline=False
+                        )
+                else:
+                    embed.add_field(
+                        name="📵 Message Status",
+                        value="Channel not found",
+                        inline=False
+                    )
+            
+            await interaction.followup.send(embed=embed)
+            
+    except Exception as e:
+        log.error("Error in debug_group: %s", e)
+        await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="checkgroups", description="Check the status of all grouped messages")
+@commands.has_permissions(manage_messages=True)
+async def check_groups(interaction: discord.Interaction):
+    """Check the status of all grouped messages in the database."""
+    try:
+        await interaction.response.defer(thinking=True)
+        
+        async with aiosqlite.connect(DB) as db:
+            async with db.execute("""
+                SELECT group_key, location, price, item_titles, discord_message_id, discord_channel_id, last_updated
+                FROM grouped_posts ORDER BY last_updated DESC
+            """) as cur:
+                rows = await cur.fetchall()
+        
+        if not rows:
+            await interaction.followup.send("No grouped messages found in database.")
+            return
+        
+        embed = discord.Embed(
+            title="📊 Grouped Messages Status",
+            color=discord.Color.blue()
+        )
+        
+        for row in rows:
+            group_key, location, price, item_titles_json, msg_id, ch_id, last_updated = row
+            item_titles = json.loads(item_titles_json) if item_titles_json else []
+            
+            # Check if message still exists
+            channel = bot.get_channel(ch_id)
+            msg_exists = "❓ Unknown"
+            if channel:
+                try:
+                    await channel.fetch_message(msg_id)
+                    msg_exists = "✅ Found"
+                except discord.NotFound:
+                    msg_exists = "❌ Not Found"
+                except discord.Forbidden:
+                    msg_exists = "🔒 No Permission"
+                except Exception as e:
+                    msg_exists = f"⚠️ Error: {str(e)[:20]}"
+            else:
+                msg_exists = "📵 Channel Not Found"
+            
+            field_value = (
+                f"**Location:** {location}\n"
+                f"**Items:** {len(item_titles)} ({', '.join(item_titles[:3])}{'...' if len(item_titles) > 3 else ''})\n"
+                f"**Message:** {msg_exists} (ID: {msg_id})\n"
+                f"**Last Updated:** {last_updated}"
+            )
+            
+            embed.add_field(
+                name=f"Group {group_key[:8]}",
+                value=field_value,
+                inline=False
+            )
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        log.error("Error in check_groups: %s", e)
+        await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
 @bot.tree.command(name="dismiss", description="Dismiss the most recent grouped message in this channel")
 @commands.has_permissions(manage_messages=True)
 async def dismiss(interaction: discord.Interaction):
