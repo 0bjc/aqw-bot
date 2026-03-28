@@ -3021,15 +3021,8 @@ async def process_grouped_items(channel, group_key: tuple[str, str], items_in_gr
                     stored_titles = json.loads(stored_titles)
                 log.info("  - Retrieved %d item titles from stored group", len(stored_titles))
                 
-                # Find items in current items that match stored titles
-                current_titles = {item["title"] for item in items_in_group}
-                missing_titles = set(stored_titles) - current_titles
-                
-                if missing_titles:
-                    log.info("  - Missing items from current fetch: %s", list(missing_titles))
-                    log.info("  - These items will be removed from the group (no longer available)")
-                    # Don't add missing items - they're no longer available in current fetch
-                    # This prevents the endless delete/repost cycle
+                # Keep existing grouped items intact - don't remove them just because they're not in recent changes
+                # Groups should be stable and only add new items, not remove existing ones
             except Exception as e:
                 log.error("  - Failed to retrieve stored group items: %s", e)
         else:
@@ -3184,15 +3177,8 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
                         stored_titles = json.loads(stored_titles)
                     log.info("Retrieved %d item titles from stored group", len(stored_titles))
                     
-                    # Find items in current items that match stored titles
-                    current_titles = {item["title"] for item in items_in_group}
-                    missing_titles = set(stored_titles) - current_titles
-                    
-                    if missing_titles:
-                        log.info("Missing items from current fetch: %s", list(missing_titles))
-                        log.info("These items will be removed from the group (no longer available)")
-                        # Don't add missing items - they're no longer available in current fetch
-                        # This prevents the endless delete/repost cycle
+                    # Keep existing grouped items intact - don't remove them just because they're not in recent changes
+                    # Groups should be stable and only add new items, not remove existing ones
                 except Exception as e:
                     log.warning("Failed to retrieve stored group items: %s", e)
             
