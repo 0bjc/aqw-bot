@@ -3720,7 +3720,7 @@ async def get_existing_grouped_items() -> list[dict]:
     try:
         async with aiosqlite.connect(DB) as db:
             async with db.execute("""
-                SELECT item_titles, location, price 
+                SELECT item_titles, location, price, categories
                 FROM grouped_posts 
                 WHERE item_titles IS NOT NULL AND item_titles != '[]'
             """) as cur:
@@ -3731,6 +3731,7 @@ async def get_existing_grouped_items() -> list[dict]:
                     item_titles = json.loads(row[0]) if isinstance(row[0], str) else row[0]
                     location = row[1]
                     price = row[2]
+                    categories = json.loads(row[3]) if isinstance(row[3], str) else row[3]
                     
                     # Create item dict for each title in the group
                     for title in item_titles:
@@ -3745,6 +3746,11 @@ async def get_existing_grouped_items() -> list[dict]:
                             "title_icons": [],  # Not stored in grouped_posts
                             "pid": title.lower().replace(" ", "-")  # Generate from title
                         }
+                        
+                        # Add category if available for this title
+                        if categories and title in categories:
+                            item["category"] = categories[title]
+                        
                         existing_items.append(item)
                 
                 log.info("Retrieved %d existing items from %d groups", len(existing_items), len(rows))
@@ -3763,6 +3769,9 @@ def merge_current_with_existing_items(current_items: list[dict], existing_items:
     # Create a map of current items by title for quick lookup
     current_titles_map = {item["title"]: item for item in current_items}
     
+    # Create a map of existing items by title for category preservation
+    existing_titles_map = {item["title"]: item for item in existing_items}
+    
     # Start with current items (they have the most up-to-date data)
     merged_items = current_items.copy()
     
@@ -3770,6 +3779,11 @@ def merge_current_with_existing_items(current_items: list[dict], existing_items:
     for existing_item in existing_items:
         if existing_item["title"] not in current_titles_map:
             merged_items.append(existing_item)
+        else:
+            # For items that exist in both, preserve category from existing if current doesn't have one
+            current_item = current_titles_map[existing_item["title"]]
+            if "category" in existing_item and "category" not in current_item:
+                current_item["category"] = existing_item["category"]
     
     return merged_items
 
