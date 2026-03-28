@@ -2544,33 +2544,36 @@ def generate_group_content_hash(items: list[dict]) -> str:
     return hashlib.md5(combined.encode('utf-8')).hexdigest()
 
 
-async def has_group_changed(group_key: str, current_items: list[dict]) -> tuple[bool, dict | None]:
+async def has_group_changed(group_key: str, items: list[dict]) -> tuple[bool, dict | None]:
     """
-    Check if a group has changed since last posting.
-    Returns (has_changed, stored_group_data)
+    Check if a group has changed by comparing current items with stored group data.
+    Returns tuple of (has_changed, stored_group_data).
     """
     stored_group = await get_stored_group(group_key)
+    
     if not stored_group:
-        return True, None  # New group
+        log.debug("No stored group found for key: %s", group_key[:8])
+        return True, None
     
-    # Generate hash for current items
-    current_hash = generate_group_content_hash(current_items)
+    # Generate current content hash for comparison
+    current_hash = generate_content_hash({"items": items})
+    stored_hash = stored_group.get("content_hash")
     
-    # Compare with stored data (we'll store the hash in the categories field for comparison)
-    stored_categories = stored_group.get("categories", [])
-    if stored_categories and len(stored_categories) > 0:
-        # Check if the first category entry contains our hash
-        stored_hash = stored_categories[0] if isinstance(stored_categories[0], str) else None
-        if stored_hash and stored_hash.startswith("hash:"):
-            stored_hash = stored_hash[5:]  # Remove "hash:" prefix
-            return current_hash != stored_hash, stored_group
+    log.debug("Hash comparison - Current: %s, Stored: %s", current_hash[:8], stored_hash[:8] if stored_hash else "None")
     
-    # Fallback: compare item titles and URLs
-    stored_titles = set(stored_group.get("item_titles", []))
-    current_titles = set([item.get("title", "") for item in current_items])
+    # TEMPORARY: Force change detection for testing
+    return True, stored_group
     
-    titles_changed = stored_titles != current_titles
-    return titles_changed, stored_group
+    if stored_hash is None:
+        log.debug("No stored hash found, assuming group has changed")
+        return True, stored_group
+    
+    if stored_hash != current_hash:
+        log.debug("Hashes differ, group has changed")
+        return True, stored_group
+    
+    log.debug("Hashes match, group unchanged")
+    return False, stored_group
 
 
 async def update_stored_group_data(group_key: str, location: str, price: str, items: list[dict], 
