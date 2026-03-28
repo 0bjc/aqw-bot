@@ -2865,11 +2865,16 @@ async def edit_existing_group_message(channel, stored_group: dict, group_key: tu
             group_key_hash = generate_stable_group_key(location, price, all_items)
             await update_stored_group_data(group_key_hash, location, price, all_items, msg_id, ch_id)
             
-            # Update all items in the group to reference the updated message
+            # Update all items in group to reference the grouped message
             log.info("    - Updating item message references...")
-            for item in all_items:
-                pid = urlparse(item["url"]).path.strip("/").replace("/", "-") or item["url"]
-                await update_item_message_info(pid, msg_id, ch_id)
+            async with aiosqlite.connect(DB) as db:
+                for item in all_items:
+                    pid = urlparse(item["url"]).path.strip("/").replace("/", "-") or item["url"]
+                    await db.execute("""
+                        UPDATE items SET discord_message_id=?, discord_channel_id=?, last_updated=datetime('now')
+                        WHERE id=?
+                    """, (msg_id, ch_id, pid))
+                await db.commit()
             
             log.info("    ✅ All item references updated")
             log.info("🔧 EDIT MESSAGE DEBUG END (SUCCESS)")
@@ -3167,7 +3172,21 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
                 return True
             else:
                 log.warning("  ├─ ❌ Failed to update grouped message")
-                log.info("  │  └─ Will create new message instead")
+                log.info("  │  └─ Deleting old grouped message and creating new one...")
+                
+                # Delete the old grouped message to prevent duplicates
+                if stored_group.get("discord_message_id") and stored_group.get("discord_channel_id"):
+                    try:
+                        old_channel = bot.get_channel(stored_group["discord_channel_id"])
+                        if old_channel:
+                            old_msg = await old_channel.fetch_message(stored_group["discord_message_id"])
+                            await old_msg.delete()
+                            log.info("  │  ├─ ✅ Deleted old grouped message")
+                    except discord.NotFound:
+                        log.info("  │  ├─ ℹ️ Old grouped message not found (already deleted)")
+                    except Exception as e:
+                        log.error("  │  ├─ ❌ Error deleting old grouped message: %s", e)
+                
                 # Fall through to create new message if update failed
         
         # New group or update failed - create new message
