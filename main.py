@@ -2613,10 +2613,11 @@ async def has_group_changed(group_key: str, items: list[dict]) -> tuple[bool, di
     Check if a group has changed by comparing current items with stored group data.
     Returns tuple of (has_changed, stored_group_data).
     """
+    log.info("Checking group change for key: %s", group_key[:8])
     stored_group = await get_stored_group(group_key)
     
     if not stored_group:
-        log.debug("No stored group found for key: %s", group_key[:8])
+        log.warning("No stored group found for key: %s - this might indicate the group was deleted", group_key[:8])
         return True, None
     
     # Generate current content hash for comparison
@@ -2811,9 +2812,14 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
             
             # If we have a stored group but the message wasn't found, 
             # try to retrieve additional items from the stored group data
+            log.info("Creating new group message - stored_group available: %s", 
+                    "Yes" if stored_group else "No")
             if stored_group:
                 try:
-                    stored_titles = json.loads(stored_group.get("item_titles", "[]"))
+                    stored_titles = stored_group.get("item_titles", [])
+                    # item_titles is already a list from the database, not JSON string
+                    if isinstance(stored_titles, str):
+                        stored_titles = json.loads(stored_titles)
                     log.info("Retrieved %d item titles from stored group", len(stored_titles))
                     
                     # Find items in current items that match stored titles
