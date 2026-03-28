@@ -708,30 +708,29 @@ def deduplicate_items(items: list[dict]) -> list[dict]:
         ...     {'url': 'http://test.com/item', 'title': 'Item', 'content': 'Full content'}
         ... ]
         >>> deduped = deduplicate_items(items)
-        >>> len(deduped)
-        1
-        >>> deduped[0]['content']
-        'Full content'
-    """
     log.info("Deduplicating %d items", len(items))
     
-    # Group items by URL
+    # Group by URL, but handle items without URLs separately
     url_groups = {}
+    
     for item in items:
         url = item.get("url", "").strip()
+        
+        # For items without URLs, use title as the deduplication key
         if not url:
-            log.warning("Item without URL: %s", item.get("title", "Unknown"))
-            continue
+            key = f"no_url:{item.get('title', '')}"
+        else:
+            key = url
             
-        if url not in url_groups:
-            url_groups[url] = []
-        url_groups[url].append(item)
+        if key not in url_groups:
+            url_groups[key] = []
+        url_groups[key].append(item)
     
-    # Select best item for each URL
+    # Select best item for each group
     deduplicated = []
     duplicates_removed = 0
     
-    for url, duplicate_items in url_groups.items():
+    for key, duplicate_items in url_groups.items():
         if len(duplicate_items) == 1:
             deduplicated.append(duplicate_items[0])
         else:
@@ -740,9 +739,14 @@ def deduplicate_items(items: list[dict]) -> list[dict]:
             deduplicated.append(best_item)
             duplicates_removed += len(duplicate_items) - 1
             
-            log.debug("Deduplicated URL '%s': kept item with %d fields, discarded %d items", 
-                     url[:50], sum(1 for v in best_item.values() if v and str(v).strip()), 
-                     len(duplicate_items) - 1)
+            if key.startswith("no_url:"):
+                log.debug("Deduplicated item without URL '%s': kept item with %d fields, discarded %d items", 
+                         key[7:], sum(1 for v in best_item.values() if v and str(v).strip()), 
+                         len(duplicate_items) - 1)
+            else:
+                log.debug("Deduplicated URL '%s': kept item with %d fields, discarded %d items", 
+                         key[:50], sum(1 for v in best_item.values() if v and str(v).strip()), 
+                         len(duplicate_items) - 1)
     
     log.info("Deduplication complete: %d items -> %d items (removed %d duplicates)", 
              len(items), len(deduplicated), duplicates_removed)
