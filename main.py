@@ -2615,6 +2615,22 @@ async def delete_group_post(group_key: str):
         raise
 
 
+def generate_content_hash(item: dict) -> str:
+    """Generate a content hash for an individual item to detect changes."""
+    # Use key fields that determine if content has changed
+    content_fields = [
+        item.get("title", ""),
+        item.get("content", ""),
+        item.get("price", ""),
+        item.get("rarity", ""),
+        item.get("image", ""),
+        json.dumps(sorted(item.get("images", []))) if item.get("images") else ""
+    ]
+    
+    content_str = "|".join(str(field) for field in content_fields)
+    return hashlib.md5(content_str.encode()).hexdigest()
+
+
 def generate_group_content_hash(items: list[dict]) -> str:
     """Generate a more reliable hash for a group of items.
     Uses item URLs for ordering and includes all item data.
@@ -4074,10 +4090,12 @@ async def check_posts():
                 # Also group changed items separately for new group creation
                 changed_groups = improved_group_items_by_location_price(changed_items) if changed_items else {}
                 
-                # Combine both: process all groups but prioritize changed ones
-                # Note: all_groups should take precedence to avoid single-item changed groups
-                # overriding multi-item groups
-                groups = {**changed_groups, **all_groups}
+                # Use all_groups when there are changed items to avoid duplication
+                # Use changed_groups when only processing updates to existing groups
+                if changed_items:
+                    groups = all_groups  # Process all current items as groups
+                else:
+                    groups = changed_groups  # Only process specific changed groups
                 
                 log.info("Total groups to process: %d", len(groups))
                 
