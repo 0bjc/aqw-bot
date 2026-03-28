@@ -3027,40 +3027,9 @@ async def process_grouped_items(channel, group_key: tuple[str, str], items_in_gr
                 
                 if missing_titles:
                     log.info("  - Missing items from current fetch: %s", list(missing_titles))
-                    # Try to find these items in the database
-                    log.info("  - Retrieving missing items from database...")
-                    async with aiosqlite.connect(DB) as db:
-                        missing_items = []
-                        for title in missing_titles:
-                            cursor = await db.execute("""
-                                SELECT id, url, title, content, price, rarity, image, images, content_hash
-                                FROM items WHERE title=?
-                            """, (title,))
-                            row = await cursor.fetchone()
-                            if row:
-                                images_data = json.loads(row[7]) if row[7] else []
-                                item_data = {
-                                    "pid": row[0],
-                                    "id": row[0],
-                                    "url": row[1],
-                                    "title": row[2],
-                                    "content": row[3],
-                                    "price": row[4],
-                                    "rarity": row[5],
-                                    "image": row[6],
-                                    "images": images_data,
-                                    "content_hash": row[8]
-                                }
-                                missing_items.append(item_data)
-                                log.info("    ✅ Found missing item: %s", title)
-                            else:
-                                log.warning("    ❌ Missing item not found in database: %s", title)
-                        
-                        if missing_items:
-                            log.info("  - Adding %d missing items from database to group", len(missing_items))
-                            items_in_group.extend(missing_items)
-                            log.info("  - New total items: %d", len(items_in_group))
-                            log.info("  - Final items: %s", [item.get("title", "Unknown") for item in items_in_group])
+                    log.info("  - These items will be removed from the group (no longer available)")
+                    # Don't add missing items - they're no longer available in current fetch
+                    # This prevents the endless delete/repost cycle
             except Exception as e:
                 log.error("  - Failed to retrieve stored group items: %s", e)
         else:
@@ -3221,34 +3190,9 @@ async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_
                     
                     if missing_titles:
                         log.info("Missing items from current fetch: %s", list(missing_titles))
-                        # Try to find these items in the database
-                        async with aiosqlite.connect(DB) as db:
-                            missing_items = []
-                            for title in missing_titles:
-                                cursor = await db.execute("""
-                                    SELECT id, url, title, content, price, rarity, image, images, content_hash
-                                    FROM items WHERE title=?
-                                """, (title,))
-                                row = await cursor.fetchone()
-                                if row:
-                                    images_data = json.loads(row[7]) if row[7] else []
-                                    item_data = {
-                                        "pid": row[0],
-                                        "id": row[0],
-                                        "url": row[1],
-                                        "title": row[2],
-                                        "content": row[3],
-                                        "price": row[4],
-                                        "rarity": row[5],
-                                        "image": row[6],
-                                        "images": images_data,
-                                        "content_hash": row[8]
-                                    }
-                                    missing_items.append(item_data)
-                            
-                            if missing_items:
-                                log.info("Adding %d missing items from database to group", len(missing_items))
-                                items_in_group.extend(missing_items)
+                        log.info("These items will be removed from the group (no longer available)")
+                        # Don't add missing items - they're no longer available in current fetch
+                        # This prevents the endless delete/repost cycle
                 except Exception as e:
                     log.warning("Failed to retrieve stored group items: %s", e)
             
