@@ -3604,19 +3604,34 @@ async def check_posts():
             # Check for new changes and collect changed items
             has_new_changes = False
             changed_items = []
+            all_current_items = []
             
             for post in posts:
                 pid = urlparse(post["url"]).path.strip("/").replace("/", "-") or post["url"]
                 
+                # Store all current items for group checking
+                post["pid"] = pid
+                all_current_items.append(post)
+                
                 if await has_item_changed(pid, post):
                     has_new_changes = True
-                    # Store the item data for grouping
-                    post["pid"] = pid
                     changed_items.append(post)
             
-            if changed_items:
-                # Group changed items by Location and Price using improved function
-                groups = improved_group_items_by_location_price(changed_items)
+            # Always check all current items for potential group updates
+            if changed_items or all_current_items:
+                log.info("Checking groups - Changed items: %d, All current items: %d", 
+                         len(changed_items), len(all_current_items))
+                
+                # Group ALL current items by Location and Price to check for group updates
+                all_groups = improved_group_items_by_location_price(all_current_items)
+                
+                # Also group changed items separately for new group creation
+                changed_groups = improved_group_items_by_location_price(changed_items) if changed_items else {}
+                
+                # Combine both: process all groups but prioritize changed ones
+                groups = {**all_groups, **changed_groups}
+                
+                log.info("Total groups to process: %d", len(groups))
                 
                 # Process each group
                 for group_key_hash, items_in_group in groups.items():
