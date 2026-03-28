@@ -884,11 +884,13 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
         price = data['price']
         item_title = data['item']['title']
         
-        # Skip items with unknown location/price ONLY if they're new items (not from database)
+        # Skip items with unknown location/price ONLY if they're truly new items
         # Existing grouped items should be preserved even if they lose their content
-        is_new_item = data['item'].get('url') is not None or data['item'].get('content') is not None
+        # An item is truly new if it has a URL (from recent changes) OR content but not both missing
+        has_url_or_content = bool(data['item'].get('url')) or bool(data['item'].get('content'))
+        is_existing_grouped_item = not has_url_or_content and location != "Unknown" and price != "Unknown"
         
-        if (location == "Unknown" or price == "Unknown") and is_new_item:
+        if (location == "Unknown" or price == "Unknown") and has_url_or_content and not is_existing_grouped_item:
             log.warning("Skipping new item '%s' with unknown location/price from grouping: Location='%s', Price='%s'", 
                        item_title, location, price)
             grouping_stats['skipped_unknown'] += 1
