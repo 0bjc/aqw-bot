@@ -865,7 +865,8 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
         'total_groups': 0,
         'items_grouped': 0,
         'items_ungrouped': 0,
-        'unknown_groups': 0
+        'unknown_groups': 0,
+        'skipped_unknown': 0
     }
     
     for i, data in enumerate(item_data):
@@ -873,14 +874,15 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
         price = data['price']
         item_title = data['item']['title']
         
+        # Skip items with unknown location or price to prevent broken posts
+        if location == "Unknown" or price == "Unknown":
+            log.warning("Skipping item '%s' with unknown location/price from grouping: Location='%s', Price='%s'", 
+                       item_title, location, price)
+            grouping_stats['skipped_unknown'] += 1
+            continue
+        
         # Create grouping key
         key = (location, price)
-        
-        # Log grouping decision
-        if location == "Unknown" or price == "Unknown":
-            log.debug("Item '%s' has unknown location/price: Location='%s', Price='%s'", 
-                     item_title, location, price)
-            grouping_stats['unknown_groups'] += 1
         
         # Add to appropriate group
         if key not in groups_by_location_price:
@@ -895,9 +897,9 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
                  item_title, location, price, len(groups_by_location_price[key]))
     
     # Log grouping statistics
-    log.info("Grouping results - Total groups: %d, Items grouped: %d, Unknown groups: %d",
+    log.info("Grouping results - Total groups: %d, Items grouped: %d, Unknown groups: %d, Skipped unknown: %d",
              grouping_stats['total_groups'], grouping_stats['items_grouped'], 
-             grouping_stats['unknown_groups'])
+             grouping_stats['unknown_groups'], grouping_stats['skipped_unknown'])
     
     # Step 5: Generate stable hash keys for each group
     final_groups = {}
@@ -4109,6 +4111,9 @@ async def check_posts():
             changed_items = []
             all_current_items = []
             
+            # Store the timestamp at the start of processing to detect race conditions
+            processing_start_time = datetime.now()
+            
             for post in posts:
                 pid = urlparse(post["url"]).path.strip("/").replace("/", "-") or post["url"]
                 
@@ -4278,6 +4283,32 @@ async def check_posts():
                             except discord.HTTPException as e:
                                 log.error("Failed to send new message: %s", e)
                                 await asyncio.sleep(5)  # Longer delay on error
+            
+            # Check for race conditions - fetch recent changes again to see if we missed anything
+            try:
+                race_check_posts = await asyncio.to_thread(fetch_recent_aegifts, limit=10)
+                if race_check_posts:
+                    processing_time = (datetime.now() - processing_start_time).total_seconds()
+                    log.debug("Race condition check: Processing took %.2f seconds", processing_time)
+                    
+                    # Check if any new items appeared during processing
+                    race_check_pids = set()
+                    for post in race_check_posts:
+                        pid = urlparse(post["url"]).path.strip("/").replace("/", "-") or post["url"]
+                        race_check_pids.add(pid)
+                    
+                    original_pids = set(post["pid"] for post in all_current_items)
+                    new_pids_during_processing = race_check_pids - original_pids
+                    
+                    if new_pids_during_processing:
+                        log.warning("Race condition detected: %d new items appeared during processing: %s", 
+                                   len(new_pids_during_processing), list(new_pids_during_processing))
+                        # Force a shorter polling interval to catch these changes quickly
+                        smart_polling.update_interval(has_new_changes=True, has_error=False)
+                        await asyncio.sleep(2)  # Brief pause before next iteration
+                        continue
+            except Exception as e:
+                log.debug("Race condition check failed: %s", e)
             
             # Update polling interval based on whether we found changes
             smart_polling.update_interval(has_new_changes=has_new_changes, has_error=False)
