@@ -4991,6 +4991,83 @@ async def dismiss(interaction: discord.Interaction):
     log.info("  └─ DISMISS COMMAND COMPLETED")
 
 
+async def cleanup_corrupted_groups():
+    """Clean up corrupted group data immediately without requiring command sync."""
+    log.info("🧹 IMMEDIATE CLEANUP START")
+    
+    try:
+        async with aiosqlite.connect(DB) as db:
+            # Get all stored groups
+            cursor = await db.execute("""
+                SELECT group_key, location, price, item_titles, discord_message_id, discord_channel_id
+                FROM grouped_posts
+            """)
+            groups = await cursor.fetchall()
+            
+            if not groups:
+                log.info("  └─ No group data found in database.")
+                return 0
+            
+            log.info("  ├─ Found %d stored groups", len(groups))
+            cleaned_count = 0
+            
+            for row in groups:
+                group_key, location, price, item_titles_json, message_id, channel_id = row
+                
+                try:
+                    # Parse item titles
+                    if isinstance(item_titles_json, str):
+                        item_titles = json.loads(item_titles_json)
+                    else:
+                        item_titles = item_titles_json
+                    
+                    # Check for corruption (unusual item counts or parsing errors)
+                    if len(item_titles) > 10 or len(item_titles) == 0:
+                        log.warning("  ├─ Found corrupted group: %s items", len(item_titles))
+                        log.warning("  │  ├─ Group key: %s", group_key[:16] + "...")
+                        log.warning("  │  └─ Items: %s", item_titles[:3] if len(item_titles) > 3 else item_titles)
+                        
+                        # Delete the corrupted group
+                        await db.execute("DELETE FROM grouped_posts WHERE group_key=?", (group_key,))
+                        cleaned_count += 1
+                        
+                        # Try to delete the Discord message if it exists
+                        if message_id and channel_id:
+                            try:
+                                channel = bot.get_channel(channel_id)
+                                if channel:
+                                    message = await channel.fetch_message(message_id)
+                                    await message.delete()
+                                    log.info("  │  └─ ✅ Deleted corrupted Discord message")
+                            except discord.NotFound:
+                                log.info("  │  └─ ℹ️ Discord message not found (already deleted)")
+                            except Exception as e:
+                                log.warning("  │  └─ ⚠️ Could not delete Discord message: %s", e)
+                    
+                except Exception as e:
+                    log.warning("  ├─ Error processing group %s: %s", group_key[:16], e)
+                    # Delete groups that can't be parsed
+                    await db.execute("DELETE FROM grouped_posts WHERE group_key=?", (group_key,))
+                    cleaned_count += 1
+            
+            await db.commit()
+            
+            if cleaned_count > 0:
+                log.info("  ├─ ✅ Cleaned up %d corrupted groups", cleaned_count)
+            else:
+                log.info("  └─ ✅ No corrupted groups found")
+                
+            return cleaned_count
+                
+    except Exception as e:
+        log.error("  ├─ ❌ Error during cleanup")
+        log.error("  └─ Exception: %s", e)
+        return 0
+    
+    finally:
+        log.info("🧹 IMMEDIATE CLEANUP END")
+
+
 @bot.tree.command(name="cleanup-groups", description="Clean up corrupted group data from database")
 @commands.has_permissions(manage_messages=True)
 async def cleanup_groups(interaction: discord.Interaction):
@@ -5095,6 +5172,13 @@ async def on_ready():
         log.error("Wikidot login failed, bot will continue without authentication")
     
     await init_db()
+    
+    # Clean up any corrupted group data on startup
+    log.info("Performing startup cleanup of corrupted group data...")
+    cleaned = await cleanup_corrupted_groups()
+    if cleaned > 0:
+        log.info("Startup cleanup completed: %d corrupted groups removed", cleaned)
+    
     if not check_posts.is_running():
         check_posts.start()
     
