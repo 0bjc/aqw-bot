@@ -3828,10 +3828,20 @@ def merge_current_with_existing_items(current_items: list[dict], existing_items:
         if existing_item["title"] not in current_titles_map:
             merged_items.append(existing_item)
         else:
-            # For items that exist in both, preserve category from existing if current doesn't have one
+            # For items that exist in both, preserve important data from existing if current doesn't have it
             current_item = current_titles_map[existing_item["title"]]
+            
+            # Preserve category from existing if current doesn't have one
             if "category" in existing_item and "category" not in current_item:
                 current_item["category"] = existing_item["category"]
+            
+            # Preserve location and price from existing if current has no content (fell off recent changes)
+            # This prevents items from losing their grouping when they fall off the recent changes list
+            if not current_item.get("content") and not current_item.get("url"):
+                if existing_item.get("location") and not current_item.get("location"):
+                    current_item["location"] = existing_item["location"]
+                if existing_item.get("price") and not current_item.get("price"):
+                    current_item["price"] = existing_item["price"]
     
     return merged_items
 
