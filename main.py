@@ -109,8 +109,8 @@ def ensure_wikidot_session(session: requests.Session) -> bool:
 TOKEN = os.getenv("TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1484113318095622315"))
 
-WIKI_BASE = "https://silveraqworld.wikidot.com"
-RECENT_URL_HTTP = "http://silveraqworld.wikidot.com/system:recent-changes"
+WIKI_BASE = "https://reaqw.wikidot.com"
+RECENT_URL_HTTP = "http://reaqw.wikidot.com/system:recent-changes"
 RSS_URL = "http://aqwwiki.wikidot.com/feed/site-changes.xml"
 DB = "drops.db"
 
