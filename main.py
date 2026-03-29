@@ -695,6 +695,7 @@ def deduplicate_items(items: list[dict]) -> list[dict]:
     
     This function deduplicates items by URL, preferring items with more complete data.
     If multiple items have the same URL, the one with the most non-empty fields is kept.
+    As a fallback, it also deduplicates by title for items without URLs or with similar titles.
     
     Args:
         items (list[dict]): List of items to deduplicate
@@ -710,7 +711,7 @@ def deduplicate_items(items: list[dict]) -> list[dict]:
         >>> deduped = deduplicate_items(items)"""
     log.info("Deduplicating %d items", len(items))
     
-    # Group by URL, but handle items without URLs separately
+    # First pass: Group by URL, but handle items without URLs separately
     url_groups = {}
     
     for item in items:
@@ -727,16 +728,16 @@ def deduplicate_items(items: list[dict]) -> list[dict]:
         url_groups[key].append(item)
     
     # Select best item for each group
-    deduplicated = []
+    first_pass = []
     duplicates_removed = 0
     
     for key, duplicate_items in url_groups.items():
         if len(duplicate_items) == 1:
-            deduplicated.append(duplicate_items[0])
+            first_pass.append(duplicate_items[0])
         else:
             # Find the most complete item (most non-empty fields)
             best_item = max(duplicate_items, key=lambda x: sum(1 for v in x.values() if v and str(v).strip()))
-            deduplicated.append(best_item)
+            first_pass.append(best_item)
             duplicates_removed += len(duplicate_items) - 1
             
             if key.startswith("no_url:"):
@@ -747,6 +748,36 @@ def deduplicate_items(items: list[dict]) -> list[dict]:
                 log.debug("Deduplicated URL '%s': kept item with %d fields, discarded %d items", 
                          key[:50], sum(1 for v in best_item.values() if v and str(v).strip()), 
                          len(duplicate_items) - 1)
+    
+    # Second pass: Deduplicate by title for items that might have different URLs but same title
+    title_groups = {}
+    
+    for item in first_pass:
+        title = item.get("title", "").strip().lower()
+        if not title:
+            # If no title, keep as-is
+            title = f"no_title:{id(item)}"
+            
+        if title not in title_groups:
+            title_groups[title] = []
+        title_groups[title].append(item)
+    
+    # Final selection
+    deduplicated = []
+    
+    for title, items_with_same_title in title_groups.items():
+        if len(items_with_same_title) == 1:
+            deduplicated.append(items_with_same_title[0])
+        else:
+            # Find the most complete item
+            best_item = max(items_with_same_title, key=lambda x: sum(1 for v in x.values() if v and str(v).strip()))
+            deduplicated.append(best_item)
+            duplicates_removed += len(items_with_same_title) - 1
+            
+            log.debug("Deduplicated by title '%s': kept item with %d fields, discarded %d items", 
+                     items_with_same_title[0].get('title', 'Unknown')[:50], 
+                     sum(1 for v in best_item.values() if v and str(v).strip()), 
+                     len(items_with_same_title) - 1)
     
     log.info("Deduplication complete: %d items -> %d items (removed %d duplicates)", 
              len(items), len(deduplicated), duplicates_removed)
