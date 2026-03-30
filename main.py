@@ -2312,6 +2312,37 @@ async def mark_posted(pid: str, item: dict, message_id: int = None, channel_id: 
         await db.commit()
 
 
+async def cleanup_invalid_items():
+    """Remove items that have no URL or content - these are invalid entries that will never be processed."""
+    async with aiosqlite.connect(DB) as db:
+        # First, check how many invalid items exist
+        cursor = await db.execute("""
+            SELECT COUNT(*) FROM items 
+            WHERE (url IS NULL OR url = '') OR (content IS NULL OR content = '')
+        """)
+        invalid_count = (await cursor.fetchone())[0]
+        
+        if invalid_count > 0:
+            log.info(f"Cleaning up {invalid_count} invalid items with no URL or content")
+            
+            # Delete the invalid items
+            await db.execute("""
+                DELETE FROM items 
+                WHERE (url IS NULL OR url = '') OR (content IS NULL OR content = '')
+            """)
+            
+            # Also clean up any orphaned grouped_posts entries
+            await db.execute("""
+                DELETE FROM grouped_posts 
+                WHERE group_key NOT IN (SELECT DISTINCT id FROM items)
+            """)
+            
+            await db.commit()
+            log.info(f"Successfully cleaned up {invalid_count} invalid items")
+        else:
+            log.debug("No invalid items to clean up")
+
+
 async def update_discord_message_info(pid: str, message_id: int, channel_id: int):
     """Update Discord message info for an existing item."""
     log.debug("Updating discord_message_info: pid=%s, message_id=%s, channel_id=%s", pid, message_id, channel_id)
@@ -4193,6 +4224,14 @@ async def check_posts():
     
     while True:
         try:
+            # Run cleanup occasionally (every 100 cycles to avoid overhead)
+            if not hasattr(check_posts, 'cleanup_counter'):
+                check_posts.cleanup_counter = 0
+            check_posts.cleanup_counter += 1
+            
+            if check_posts.cleanup_counter % 100 == 0:
+                await cleanup_invalid_items()
+            
             posts = await asyncio.to_thread(fetch_recent_aegifts, limit=10)
             
             if posts is None:
@@ -5473,6 +5512,10 @@ async def on_ready():
         log.error("Wikidot login failed, bot will continue without authentication")
     
     await init_db()
+    
+    # Clean up invalid items on startup
+    log.info("Performing startup cleanup of invalid items...")
+    await cleanup_invalid_items()
     
     # Clean up any corrupted group data on startup
     log.info("Performing startup cleanup of corrupted group data...")
