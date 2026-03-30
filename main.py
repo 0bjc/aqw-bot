@@ -860,16 +860,29 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
         content = item.get("content", "")
         
         # For existing grouped items, preserve their original location/price from database
-        if not content and not item.get("url"):
+        log.info("DEBUG: Processing item '%s': content_length=%d, url='%s', has_location=%s, has_price=%s", 
+                 item['title'], len(content), item.get("url", "None"), 
+                 bool(item.get("location")), bool(item.get("price")))
+        
+        # Check if this is an existing grouped item (no content, no URL, but has stored location/price)
+        is_existing_grouped_item = (
+            not content and 
+            not item.get("url") and 
+            (item.get("location") or item.get("price"))
+        )
+        
+        if is_existing_grouped_item:
             # This is an existing grouped item without content - use database values
             location = item.get("location", "Unknown")
             price = item.get("price", "Unknown")
-            log.debug("Using database location/price for existing item '%s': Location='%s', Price='%s'", 
+            log.info("DEBUG: Using database location/price for existing item '%s': Location='%s', Price='%s'", 
                      item['title'], location, price)
         else:
             # This is a current item - extract from content
             location = "Unknown"
             price = "Unknown"
+            log.info("DEBUG: Extracting location/price from content for item '%s' (existing=%s)", 
+                     item['title'], is_existing_grouped_item)
             
             # Extract location with robust parsing
             try:
@@ -3908,11 +3921,11 @@ def merge_current_with_existing_items(current_items: list[dict], existing_items:
             if not current_item.get("content") and not current_item.get("url"):
                 if existing_item.get("location") and not current_item.get("location"):
                     current_item["location"] = existing_item["location"]
-                    log.debug("DEBUG: Preserved location for %s: %s", 
+                    log.info("DEBUG: Preserved location for %s: %s", 
                              existing_item["title"], existing_item["location"])
                 if existing_item.get("price") and not current_item.get("price"):
                     current_item["price"] = existing_item["price"]
-                    log.debug("DEBUG: Preserved price for %s: %s", 
+                    log.info("DEBUG: Preserved price for %s: %s", 
                              existing_item["title"], existing_item["price"])
     
     log.debug("DEBUG: merge_current_with_existing_items returning %d items", len(merged_items))
