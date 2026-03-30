@@ -2279,17 +2279,39 @@ async def has_item_changed(pid: str, new_item: dict) -> bool:
     new_hash = generate_content_hash(new_item)
     stored_hash = stored["content_hash"]
     
-    # Debug logging to understand why hashes might differ
-    if new_hash != stored_hash:
-        log.info("Item %s hash mismatch:", new_item.get("title", "Unknown"))
-        log.info("  Stored hash: %s", stored_hash)
-        log.info("  New hash: %s", new_hash)
-        log.info("  Stored title: %s", stored.get("title", "None"))
-        log.info("  New title: %s", new_item.get("title", "None"))
-        log.info("  Stored content length: %d", len(stored.get("content", "")))
-        log.info("  New content length: %d", len(new_item.get("content", "")))
+    # Check if hash is different
+    if new_hash == stored_hash:
+        return False  # No change
     
-    return stored_hash != new_hash
+    # Hash is different, but check if we recently updated this item to avoid spam
+    last_updated = stored.get("last_updated")
+    if last_updated:
+        try:
+            # Parse the timestamp from the stored item
+            if isinstance(last_updated, str):
+                from datetime import datetime
+                last_update_time = datetime.fromisoformat(last_updated.replace('Z', '+00:00'))
+                time_since_update = datetime.now(timezone.utc) - last_update_time
+                
+                # Only allow updates every 5 minutes to avoid spam
+                if time_since_update.total_seconds() < 300:  # 5 minutes
+                    log.info("Item %s changed but skipping update (last updated %s ago)", 
+                            new_item.get("title", "Unknown"), 
+                            f"{int(time_since_update.total_seconds())}s")
+                    return False
+        except Exception as e:
+            log.debug("Error parsing last_updated timestamp: %s", e)
+    
+    # Debug logging to understand why hashes might differ
+    log.info("Item %s hash mismatch:", new_item.get("title", "Unknown"))
+    log.info("  Stored hash: %s", stored_hash)
+    log.info("  New hash: %s", new_hash)
+    log.info("  Stored title: %s", stored.get("title", "None"))
+    log.info("  New title: %s", new_item.get("title", "None"))
+    log.info("  Stored content length: %d", len(stored.get("content", "")))
+    log.info("  New content length: %d", len(new_item.get("content", "")))
+    
+    return True
 
 async def update_stored_item(pid: str, item: dict):
     """Update stored item data with changes."""
