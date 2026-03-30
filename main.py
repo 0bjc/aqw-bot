@@ -19,6 +19,9 @@ import hashlib
 import discord
 from discord.ext import commands, tasks
 
+# ---------------- GLOBAL COUNTERS ----------------
+grouping_function_calls = 0
+
 # ---------------- WIKIDOT SESSION ----------------
 session = requests.Session()
 
@@ -805,7 +808,9 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
         >>> print(f"Created {len(groups)} groups")
         Created 3 groups
     """
-    log.info("Starting improved grouping of %d items", len(items))
+    global grouping_function_calls
+    grouping_function_calls += 1
+    log.info("Starting improved grouping of %d items (call #%d)", len(items), grouping_function_calls)
     
     # Step 1: Deduplicate items first
     deduplicated_items = deduplicate_items(items)
@@ -4257,9 +4262,6 @@ async def check_posts():
                         log.debug("  Group with %d items: %s", len(items), group_key)
                         for item in items:
                             log.debug("    - %s", item.get('title', 'Unknown'))
-                
-                # Also group changed items separately for new group creation
-                changed_groups = improved_group_items_by_location_price(changed_items) if changed_items else {}
                 
                 # Always process all groups to ensure items that fell off recent changes are handled
                 groups = all_groups
