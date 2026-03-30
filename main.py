@@ -886,7 +886,9 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
                 extraction_stats['price_failed'] += 1
                 log.error("✗ Error extracting price for %s: %s", item['title'], e)
         
-        # Store extracted data
+        # Store extracted data in both wrapper and item
+        item['location'] = location
+        item['price'] = price
         item_data.append({
             'item': item,
             'location': location,
@@ -2288,12 +2290,13 @@ async def mark_posted(pid: str, item: dict, message_id: int = None, channel_id: 
     async with aiosqlite.connect(DB) as db:
         await db.execute("""
             INSERT OR REPLACE INTO items 
-            (id, url, title, content, price, rarity, image, images, last_updated, content_hash, discord_message_id, discord_channel_id) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
+            (id, url, title, content, price, rarity, image, images, last_updated, content_hash, discord_message_id, discord_channel_id, location) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)
         """, (
             pid, item.get("url"), item.get("title"), item.get("content"), 
             item.get("price"), item.get("rarity"), item.get("image"), 
-            json.dumps(item.get("images", [])), content_hash, message_id, channel_id
+            json.dumps(item.get("images", [])), content_hash, message_id, channel_id,
+            item.get("location")
         ))
         await db.commit()
 
@@ -3767,19 +3770,29 @@ async def get_existing_grouped_items() -> list[dict]:
     """
     try:
         async with aiosqlite.connect(DB) as db:
+            # DEBUG: First check what's in grouped_posts
+            cursor = await db.execute("SELECT COUNT(*) FROM grouped_posts")
+            total_groups = await cursor.fetchone()
+            log.debug("DEBUG: Total groups in grouped_posts table: %d", total_groups[0] if total_groups else 0)
+            
             async with db.execute("""
-                SELECT item_titles, location, price, categories
+                SELECT group_key, item_titles, location, price, categories
                 FROM grouped_posts 
                 WHERE item_titles IS NOT NULL AND item_titles != '[]'
             """) as cur:
                 rows = await cur.fetchall()
+                log.debug("DEBUG: Retrieved %d rows from grouped_posts", len(rows))
                 
                 existing_items = []
                 for row in rows:
-                    item_titles = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-                    location = row[1]
-                    price = row[2]
-                    categories = json.loads(row[3]) if isinstance(row[3], str) else row[3]
+                    log.debug("DEBUG: Processing group key: %s", row[0])
+                    item_titles = json.loads(row[1]) if isinstance(row[1], str) else row[1]
+                    location = row[2]
+                    price = row[3]
+                    categories = json.loads(row[4]) if isinstance(row[4], str) else row[4]
+                    
+                    log.debug("DEBUG: Group has %d items, location='%s', price='%s'", 
+                             len(item_titles), location, price)
                     
                     # Create item dict for each title in the group
                     for title in item_titles:
@@ -3800,6 +3813,8 @@ async def get_existing_grouped_items() -> list[dict]:
                             item["category"] = categories[title]
                         
                         existing_items.append(item)
+                        log.debug("DEBUG: Created existing item: %s (Location: %s, Price: %s)", 
+                                 title, location, price)
                 
                 log.info("Retrieved %d existing items from %d groups", len(existing_items), len(rows))
                 return existing_items
@@ -3814,11 +3829,16 @@ def merge_current_with_existing_items(current_items: list[dict], existing_items:
     Merge current items with existing items, prioritizing current data for duplicates.
     This ensures group stability by preserving items no longer in recent changes.
     """
+    log.debug("DEBUG: merge_current_with_existing_items called with %d current, %d existing", 
+              len(current_items), len(existing_items))
+    
     # Create a map of current items by title for quick lookup
     current_titles_map = {item["title"]: item for item in current_items}
+    log.debug("DEBUG: Current titles map has %d entries", len(current_titles_map))
     
     # Create a map of existing items by title for category preservation
     existing_titles_map = {item["title"]: item for item in existing_items}
+    log.debug("DEBUG: Existing titles map has %d entries", len(existing_titles_map))
     
     # Start with current items (they have the most up-to-date data)
     merged_items = current_items.copy()
@@ -3827,6 +3847,7 @@ def merge_current_with_existing_items(current_items: list[dict], existing_items:
     for existing_item in existing_items:
         if existing_item["title"] not in current_titles_map:
             merged_items.append(existing_item)
+            log.debug("DEBUG: Added existing item not in current: %s", existing_item["title"])
         else:
             # For items that exist in both, preserve important data from existing if current doesn't have it
             current_item = current_titles_map[existing_item["title"]]
@@ -3834,15 +3855,22 @@ def merge_current_with_existing_items(current_items: list[dict], existing_items:
             # Preserve category from existing if current doesn't have one
             if "category" in existing_item and "category" not in current_item:
                 current_item["category"] = existing_item["category"]
+                log.debug("DEBUG: Preserved category for %s: %s", 
+                         existing_item["title"], existing_item["category"])
             
             # Preserve location and price from existing if current has no content (fell off recent changes)
-            # This prevents items from losing their grouping when they fall off the recent changes list
+            # This prevents items from losing their grouping when they fall off of recent changes list
             if not current_item.get("content") and not current_item.get("url"):
                 if existing_item.get("location") and not current_item.get("location"):
                     current_item["location"] = existing_item["location"]
+                    log.debug("DEBUG: Preserved location for %s: %s", 
+                             existing_item["title"], existing_item["location"])
                 if existing_item.get("price") and not current_item.get("price"):
                     current_item["price"] = existing_item["price"]
+                    log.debug("DEBUG: Preserved price for %s: %s", 
+                             existing_item["title"], existing_item["price"])
     
+    log.debug("DEBUG: merge_current_with_existing_items returning %d items", len(merged_items))
     return merged_items
 
 
@@ -4190,14 +4218,45 @@ async def check_posts():
                 existing_grouped_items = await get_existing_grouped_items()
                 log.info("Retrieved %d existing grouped items from database", len(existing_grouped_items))
                 
+                # DEBUG: Log details of existing grouped items
+                if existing_grouped_items:
+                    log.debug("=== DEBUG: Existing grouped items ===")
+                    for item in existing_grouped_items[:5]:  # Log first 5 to avoid spam
+                        log.debug("  - %s: Location='%s', Price='%s', URL=%s, Content=%s", 
+                                 item.get('title', 'Unknown'),
+                                 item.get('location', 'Unknown'),
+                                 item.get('price', 'Unknown'),
+                                 bool(item.get('url')),
+                                 bool(item.get('content')))
+                
                 # Merge current items with existing grouped items
                 # This preserves items that are no longer in recent changes
                 merged_items = merge_current_with_existing_items(all_current_items, existing_grouped_items)
                 log.info("Merged items: %d current + %d existing = %d total", 
                          len(all_current_items), len(existing_grouped_items), len(merged_items))
                 
+                # DEBUG: Log details of merged items
+                log.debug("=== DEBUG: Merged items before grouping ===")
+                for item in merged_items[:5]:  # Log first 5 to avoid spam
+                    log.debug("  - %s: Location='%s', Price='%s', URL=%s, Content=%s", 
+                             item.get('title', 'Unknown'),
+                             item.get('location', 'Unknown'),
+                             item.get('price', 'Unknown'),
+                             bool(item.get('url')),
+                             bool(item.get('content')))
+                
                 # Group ALL merged items by Location and Price to maintain stable groups
                 all_groups = improved_group_items_by_location_price(merged_items)
+                
+                # DEBUG: Log grouping results
+                log.debug("=== DEBUG: Grouping results ===")
+                total_grouped = sum(len(items) for items in all_groups.values())
+                log.debug("Total groups formed: %d, Total items grouped: %d", len(all_groups), total_grouped)
+                for group_key, items in all_groups.items():
+                    if len(items) >= 2:
+                        log.debug("  Group with %d items: %s", len(items), group_key)
+                        for item in items:
+                            log.debug("    - %s", item.get('title', 'Unknown'))
                 
                 # Also group changed items separately for new group creation
                 changed_groups = improved_group_items_by_location_price(changed_items) if changed_items else {}
@@ -4206,6 +4265,10 @@ async def check_posts():
                 groups = all_groups
                 
                 log.info("Total groups to process: %d", len(groups))
+                
+                # DEBUG: Count groups with 2+ items
+                groups_with_multiple = sum(1 for items in groups.values() if len(items) >= 2)
+                log.debug("Groups with 2+ items: %d", groups_with_multiple)
                 
                 # Process each group
                 for group_key_hash, items_in_group in groups.items():
