@@ -19,9 +19,6 @@ import hashlib
 import discord
 from discord.ext import commands, tasks
 
-# ---------------- GLOBAL COUNTERS ----------------
-grouping_function_calls = 0
-
 # ---------------- WIKIDOT SESSION ----------------
 session = requests.Session()
 
@@ -149,7 +146,8 @@ async def init_db() -> None:
                 content_hash TEXT,
                 discord_message_id INTEGER,
                 discord_channel_id INTEGER,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                location TEXT
             )
         """)
         
@@ -176,6 +174,16 @@ async def init_db() -> None:
                 last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Migration: Add location column to items table if it doesn't exist
+        try:
+            await db.execute("ALTER TABLE items ADD COLUMN location TEXT")
+            log.info("Added location column to items table (migration)")
+        except aiosqlite.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                log.debug("Location column already exists in items table")
+            else:
+                log.error(f"Error adding location column: {e}")
         
         # Initialize daily gift counter if it doesn't exist
         await db.execute("""
@@ -808,9 +816,7 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
         >>> print(f"Created {len(groups)} groups")
         Created 3 groups
     """
-    global grouping_function_calls
-    grouping_function_calls += 1
-    log.info("Starting improved grouping of %d items (call #%d)", len(items), grouping_function_calls)
+    log.info("Starting improved grouping of %d items", len(items))
     
     # Step 1: Deduplicate items first
     deduplicated_items = deduplicate_items(items)
