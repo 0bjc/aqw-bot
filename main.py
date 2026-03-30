@@ -4202,12 +4202,8 @@ async def check_posts():
                 # Also group changed items separately for new group creation
                 changed_groups = improved_group_items_by_location_price(changed_items) if changed_items else {}
                 
-                # Use all_groups when there are changed items to avoid duplication
-                # Use changed_groups when only processing updates to existing groups
-                if changed_items:
-                    groups = all_groups  # Process all current items as groups
-                else:
-                    groups = changed_groups  # Only process specific changed groups
+                # Always process all groups to ensure items that fell off recent changes are handled
+                groups = all_groups
                 
                 log.info("Total groups to process: %d", len(groups))
                 
