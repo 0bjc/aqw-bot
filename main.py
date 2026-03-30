@@ -19,6 +19,13 @@ import hashlib
 import discord
 from discord.ext import commands, tasks
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not installed, use system environment variables
+
 # ---------------- WIKIDOT SESSION ----------------
 session = requests.Session()
 
@@ -668,7 +675,7 @@ def validate_and_normalize_item_data(item: dict) -> dict:
     """
     log.debug("Validating item: %s", item.get("title", "Unknown"))
     
-    # Ensure required fields exist, preserving all original fields including pid
+    # Ensure required fields exist, preserving all original fields including pid and location
     normalized_item = {
         'title': item.get("title", "Unknown Item"),
         'url': item.get("url", ""),
@@ -684,6 +691,14 @@ def validate_and_normalize_item_data(item: dict) -> dict:
     if 'pid' in item:
         normalized_item['pid'] = item['pid']
     
+    # Preserve the location field if it exists
+    if 'location' in item:
+        normalized_item['location'] = item['location']
+    
+    # Preserve the category field if it exists
+    if 'category' in item:
+        normalized_item['category'] = item['category']
+    
     # Validate title
     if not normalized_item['title'] or normalized_item['title'].strip() == "Unknown":
         log.warning("Item has invalid title: %s", normalized_item['title'])
@@ -696,7 +711,10 @@ def validate_and_normalize_item_data(item: dict) -> dict:
     # Validate content
     if not normalized_item['content']:
         log.warning("Item '%s' has no content", normalized_item['title'])
-        normalized_item['content'] = "No content available"
+        # Don't set "No content available" for items that are supposed to be empty (existing grouped items)
+        # Only set it for items that should have content but don't
+        if normalized_item.get('url'):  # Only if it has a URL (current item)
+            normalized_item['content'] = "No content available"
     
     return normalized_item
 
@@ -860,7 +878,7 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
         content = item.get("content", "")
         
         # For existing grouped items, preserve their original location/price from database
-        log.info("DEBUG: Processing item '%s': content_length=%d, url='%s', has_location=%s, has_price=%s", 
+        log.debug("DEBUG: Processing item '%s': content_length=%d, url='%s', has_location=%s, has_price=%s", 
                  item['title'], len(content), item.get("url", "None"), 
                  bool(item.get("location")), bool(item.get("price")))
         
@@ -875,13 +893,13 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
             # This is an existing grouped item without content - use database values
             location = item.get("location", "Unknown")
             price = item.get("price", "Unknown")
-            log.info("DEBUG: Using database location/price for existing item '%s': Location='%s', Price='%s'", 
+            log.debug("DEBUG: Using database location/price for existing item '%s': Location='%s', Price='%s'", 
                      item['title'], location, price)
         else:
             # This is a current item - extract from content
             location = "Unknown"
             price = "Unknown"
-            log.info("DEBUG: Extracting location/price from content for item '%s' (existing=%s)", 
+            log.debug("DEBUG: Extracting location/price from content for item '%s' (existing=%s)", 
                      item['title'], is_existing_grouped_item)
             
             # Extract location with robust parsing
@@ -892,10 +910,11 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
                     log.debug("✓ Location extracted: '%s' for %s", location, item['title'])
                 else:
                     extraction_stats['location_failed'] += 1
-                    log.warning("✗ Failed to extract location for %s", item['title'])
+                    log.debug("✗ Failed to extract location for %s", item['title'])
             except Exception as e:
                 extraction_stats['location_failed'] += 1
-                log.error("✗ Error extracting location for %s: %s", item['title'], e)
+                log.debug("✗ Exception extracting location for %s: %s", item['title'], e)
+                location = "Unknown"
             
             # Extract price with robust parsing
             try:
@@ -3866,6 +3885,9 @@ async def get_existing_grouped_items() -> list[dict]:
                             "pid": title.lower().replace(" ", "-")  # Generate from title
                         }
                         
+                        log.debug("DEBUG: Created existing item '%s' with location='%s', price='%s'", 
+                                 title, location, price)
+                        
                         # Add category if available for this title
                         if categories and title in categories:
                             item["category"] = categories[title]
@@ -3904,8 +3926,16 @@ def merge_current_with_existing_items(current_items: list[dict], existing_items:
     # Add existing items that aren't in current items
     for existing_item in existing_items:
         if existing_item["title"] not in current_titles_map:
+            # This is an existing item that fell off recent changes
+            # Ensure it has location and price from database
+            if not existing_item.get("location"):
+                log.warning("DEBUG: Existing item '%s' missing location, this should not happen", existing_item["title"])
+            if not existing_item.get("price"):
+                log.warning("DEBUG: Existing item '%s' missing price, this should not happen", existing_item["title"])
+                
             merged_items.append(existing_item)
-            log.debug("DEBUG: Added existing item not in current: %s", existing_item["title"])
+            log.debug("DEBUG: Added existing item not in current: %s (Location: %s, Price: %s)", 
+                     existing_item["title"], existing_item.get("location", "MISSING"), existing_item.get("price", "MISSING"))
         else:
             # For items that exist in both, preserve important data from existing if current doesn't have it
             current_item = current_titles_map[existing_item["title"]]
@@ -3918,15 +3948,26 @@ def merge_current_with_existing_items(current_items: list[dict], existing_items:
             
             # Preserve location and price from existing if current has no content (fell off recent changes)
             # This prevents items from losing their grouping when they fall off of recent changes list
-            if not current_item.get("content") and not current_item.get("url"):
+            log.debug("DEBUG: Merge check for %s - current_content_length=%d, current_url='%s', existing_location='%s', existing_price='%s'", 
+                     existing_item["title"], 
+                     len(current_item.get("content", "")),
+                     current_item.get("url", ""),
+                     existing_item.get("location", ""),
+                     existing_item.get("price", ""))
+            
+            # Always preserve location and price from existing if current item has no content
+            # This handles items that fell off recent changes but still appear in current list (without content)
+            if not current_item.get("content"):
                 if existing_item.get("location") and not current_item.get("location"):
                     current_item["location"] = existing_item["location"]
-                    log.info("DEBUG: Preserved location for %s: %s", 
+                    log.debug("DEBUG: Preserved location for %s: %s", 
                              existing_item["title"], existing_item["location"])
                 if existing_item.get("price") and not current_item.get("price"):
                     current_item["price"] = existing_item["price"]
-                    log.info("DEBUG: Preserved price for %s: %s", 
+                    log.debug("DEBUG: Preserved price for %s: %s", 
                              existing_item["title"], existing_item["price"])
+            else:
+                log.debug("DEBUG: Skip merge for %s - has content", existing_item["title"])
     
     log.debug("DEBUG: merge_current_with_existing_items returning %d items", len(merged_items))
     return merged_items
