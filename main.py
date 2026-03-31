@@ -999,9 +999,11 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
         'failed': 0
     }
     
-    for (location, price), items_in_group in groups_by_location_price.items():
+    for key, items_in_group in groups_by_location_price.items():
         try:
-            # Generate stable hash key for the entire group
+            # Extract location and price from the key tuple
+            location, price = key
+            # Generate stable hash key for entire group
             group_key_hash = generate_stable_group_key(location, price, items_in_group)
             final_groups[group_key_hash] = items_in_group
             hash_generation_stats['successful'] += 1
