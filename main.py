@@ -4329,7 +4329,6 @@ async def check_posts():
                                  bool(item.get('content')))
                 
                 # Merge current items with existing grouped items
-                # This preserves items that are no longer in recent changes
                 merged_items = merge_current_with_existing_items(all_current_items, existing_grouped_items)
                 log.info("Merged items: %d current + %d existing = %d total", 
                          len(all_current_items), len(existing_grouped_items), len(merged_items))
@@ -4347,14 +4346,6 @@ async def check_posts():
                 # Group ALL merged items by Location and Price to maintain stable groups
                 all_groups = improved_group_items_by_location_price(merged_items)
                 
-                # DEBUG: Log grouping results
-                log.debug("=== DEBUG: Grouping results ===")
-                total_grouped = sum(len(items) for items in all_groups.values())
-                log.debug("Total groups formed: %d, Total items grouped: %d", len(all_groups), total_grouped)
-                for group_key, items in all_groups.items():
-                    if len(items) >= 2:
-                        log.debug("  Group with %d items: %s", len(items), group_key)
-                        for item in items:
                             log.debug("    - %s", item.get('title', 'Unknown'))
                 
                 # Always process all groups to ensure items that fell off recent changes are handled
