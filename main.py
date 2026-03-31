@@ -113,6 +113,7 @@ def ensure_wikidot_session(session: requests.Session) -> bool:
         return wikidot_login(session)
 
 # ---------------- CONFIG ----------------
+# Discord Configuration
 TOKEN = os.getenv("TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1484113318095622315"))
 
@@ -2907,7 +2908,7 @@ async def check_message_exists(msg_id: int, ch_id: int) -> bool:
         return False
 
 
-async def edit_existing_group_message(channel, stored_group: dict, group_key: tuple[str, str], 
+async def edit_existing_group_message(channel, stored_group: dict, group_key: str, 
                                     current_items: list[dict]) -> bool:
     """
     Edit an existing grouped message with improved error handling and retry logic.
@@ -2993,7 +2994,14 @@ async def edit_existing_group_message(channel, stored_group: dict, group_key: tu
             
             # Create updated embed and view
             log.info("    - Creating updated embed and view...")
-            location, price = group_key
+            # Extract location and price from first item since group_key is now a string hash
+            if all_items:
+                first_item = all_items[0]
+                location = first_item.get("location", "Unknown")
+                price = first_item.get("price", "Unknown")
+            else:
+                location = "Unknown"
+                price = "Unknown"
             updated_embed, updated_view = await create_grouped_embed(group_key, all_items)
             
             # Edit the message
@@ -3045,6 +3053,28 @@ async def edit_existing_group_message(channel, stored_group: dict, group_key: tu
     log.warning("❌ All retry attempts failed")
     log.info("🔧 EDIT MESSAGE DEBUG END (FAILED)")
     return False
+
+
+async def post_individual_item(channel, item: dict) -> bool:
+    """Post a single item as an individual message (not grouped)."""
+    try:
+        log.info("📝 Posting individual item: '%s'", item['title'])
+        
+        # Create individual embed
+        embed = create_embed(item)
+        
+        # Send individual message
+        message = await channel.send(embed=embed)
+        log.info("✅ Posted individual item '%s' - Message ID: %s", item['title'], message.id)
+        
+        # Store item in database
+        pid = item.get('pid', item.get('url', '').replace('/', '-'))
+        await mark_posted(pid, item, message.id, channel.id)
+        
+        return True
+    except Exception as e:
+        log.error("❌ Error posting individual item '%s': %s", item.get('title', 'Unknown'), e)
+        return False
 
 
 async def process_grouped_items(channel, group_key: str, items_in_group: list[dict]) -> bool:
@@ -3216,7 +3246,8 @@ async def process_grouped_items(channel, group_key: str, items_in_group: list[di
                 item["pid"] = pid
             
             # Store item with grouped message reference
-            await store_item(item, grouped_msg.id, channel.id)
+            pid = item.get('pid', item.get('url', '').replace('/', '-'))
+            await mark_posted(pid, item, grouped_msg.id, channel.id)
         
         log.info("✅ Successfully created and stored new grouped message")
         log.info("=" * 80)
@@ -4370,7 +4401,13 @@ async def check_posts():
                 
                 # Process each group
                 for group_key, items_in_group in all_groups.items():
-                    await process_grouped_items(channel, group_key, items_in_group)
+                    # Check if this is a single item - post individually instead of grouped
+                    if len(items_in_group) == 1:
+                        log.info("📝 Single item detected: '%s' - posting individually", items_in_group[0]['title'])
+                        await post_individual_item(channel, items_in_group[0])
+                    else:
+                        log.info("📝 Multiple items (%d) in same group - posting grouped", len(items_in_group))
+                        await process_grouped_items(channel, group_key, items_in_group)
             else:
                 log.info("No recent changes and no current items - skipping processing")
                 # Skip processing entirely when there are no changes and no current items
