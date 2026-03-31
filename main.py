@@ -3060,11 +3060,11 @@ async def post_individual_item(channel, item: dict) -> bool:
     try:
         log.info("📝 Posting individual item: '%s'", item['title'])
         
-        # Create individual embed
-        embed = create_embed(item)
+        # Create individual embed with image preview functionality
+        embed, view = await create_pane_embed(item)
         
         # Send individual message
-        message = await channel.send(embed=embed)
+        message = await channel.send(embed=embed, view=view)
         log.info("✅ Posted individual item '%s' - Message ID: %s", item['title'], message.id)
         
         # Store item in database
