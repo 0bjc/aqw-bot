@@ -2099,9 +2099,16 @@ def get_categories_from_items(items: list[dict]) -> dict[str, list[dict]]:
 
 
 # ---------------- EMBED CREATION ----------------
-async def create_grouped_embed(group_key: tuple[str, str], items: list[dict]) -> tuple[discord.Embed, CategoryButtonsView]:
+async def create_grouped_embed(group_key: str, items: list[dict]) -> tuple[discord.Embed, CategoryButtonsView]:
     """Create a grouped embed for items with same Location and Price with ephemeral images."""
-    location, price = group_key
+    # Extract location and price from first item since group_key is now a string hash
+    if items:
+        first_item = items[0]
+        location = first_item.get("location", "Unknown")
+        price = first_item.get("price", "Unknown")
+    else:
+        location = "Unknown"
+        price = "Unknown"
     
     # Get daily gift number and generate title
     gift_number = await get_and_increment_counter("daily_gift")
