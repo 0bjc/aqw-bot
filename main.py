@@ -2782,6 +2782,11 @@ def generate_content_hash(item: dict) -> str:
     ]
     
     content_str = "|".join(str(field) for field in content_fields)
+    
+    # Debug logging to identify hash mismatch issues
+    log.debug("HASH DEBUG: Item '%s' | Content length: %d | Hash: %s", 
+              item.get("title", "Unknown"), len(content_str), hashlib.md5(content_str.encode()).hexdigest()[:8])
+    
     return hashlib.md5(content_str.encode()).hexdigest()
 
 
@@ -4361,8 +4366,8 @@ async def check_posts():
                     has_new_changes = True
                     changed_items.append(post)
             
-            # Always check all current items for potential group updates
-            if changed_items or all_current_items:
+            # Only process if there are actually changed items
+            if changed_items:
                 log.info("Checking groups - Changed items: %d, All current items: %d", 
                          len(changed_items), len(all_current_items))
                 
