@@ -4346,16 +4346,9 @@ async def check_posts():
                 # Group ALL merged items by Location and Price to maintain stable groups
                 all_groups = improved_group_items_by_location_price(merged_items)
                 
-                            log.debug("    - %s", item.get('title', 'Unknown'))
-                
-                # Always process all groups to ensure items that fell off recent changes are handled
-                groups = all_groups
-                
-                log.info("Total groups to process: %d", len(groups))
-                
-                # DEBUG: Count groups with 2+ items
-                groups_with_multiple = sum(1 for items in groups.values() if len(items) >= 2)
-                log.debug("Groups with 2+ items: %d", groups_with_multiple)
+                # Process each group
+                for group_key, items_in_group in all_groups.items():
+                    await process_grouped_items(channel, group_key, items_in_group)
                 
                 # Process each group
                 for group_key_hash, items_in_group in groups.items():
