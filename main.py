@@ -3038,9 +3038,16 @@ async def edit_existing_group_message(channel, stored_group: dict, group_key: tu
     return False
 
 
-async def process_grouped_items(channel, group_key: tuple[str, str], items_in_group: list[dict]) -> bool:
+async def process_grouped_items(channel, group_key: str, items_in_group: list[dict]) -> bool:
     """Process grouped items with detailed debug logging."""
-    location, price = group_key
+    # group_key is now a string hash, extract location and price from first item
+    if items_in_group:
+        first_item = items_in_group[0]
+        location = first_item.get("location", "Unknown")
+        price = first_item.get("price", "Unknown")
+    else:
+        location = "Unknown"
+        price = "Unknown"
     
     # Comprehensive debugging start
     log.info("🚀 GROUPED POST PROCESSING START")
@@ -3216,12 +3223,18 @@ async def process_grouped_items(channel, group_key: tuple[str, str], items_in_gr
         return False
 
 
-async def safe_post_grouped_embed(channel, group_key: tuple[str, str], items_in_group: list[dict]) -> bool:
+async def safe_post_grouped_embed(channel, group_key: str, items_in_group: list[dict]) -> bool:
     """Safely post a grouped embed with proper locking and duplicate prevention with comprehensive debugging."""
     global posting_lock
     
-    # Comprehensive debugging start
-    location, price = group_key
+    # Extract location and price from first item since group_key is now a string hash
+    if items_in_group:
+        first_item = items_in_group[0]
+        location = first_item.get("location", "Unknown")
+        price = first_item.get("price", "Unknown")
+    else:
+        location = "Unknown"
+        price = "Unknown"
     log.info("🔒 SAFE POST GROUPED EMBED START")
     log.info("  ├─ Location: '%s'", location)
     log.info("  ├─ Price: '%s'", price)
