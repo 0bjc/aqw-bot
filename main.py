@@ -3080,6 +3080,12 @@ async def post_individual_item(channel, item: dict) -> bool:
     try:
         log.info("📝 Posting individual item: '%s'", item['title'])
         
+        # Check if item has changed before posting
+        pid = item.get('pid', item.get('url', '').replace('/', '-'))
+        if not await has_item_changed(pid, item):
+            log.info("✅ Individual item '%s' unchanged - skipping", item['title'])
+            return False
+        
         # Create individual embed with image preview functionality
         embed, view = await create_pane_embed(item)
         
@@ -3088,7 +3094,6 @@ async def post_individual_item(channel, item: dict) -> bool:
         log.info("✅ Posted individual item '%s' - Message ID: %s", item['title'], message.id)
         
         # Store item in database
-        pid = item.get('pid', item.get('url', '').replace('/', '-'))
         await mark_posted(pid, item, message.id, channel.id)
         
         return True
