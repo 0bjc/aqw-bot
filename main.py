@@ -4429,8 +4429,16 @@ async def check_posts():
                 for group_key, items_in_group in all_groups.items():
                     # Check if this is a single item - post individually instead of grouped
                     if len(items_in_group) == 1:
-                        log.info("📝 Single item detected: '%s' - posting individually", items_in_group[0]['title'])
-                        await post_individual_item(channel, items_in_group[0])
+                        item = items_in_group[0]
+                        # Only process individual item if it's actually changed
+                        item_pid = item.get('pid', item.get('url', '').replace('/', '-'))
+                        is_changed = any(changed_item.get('pid', changed_item.get('url', '').replace('/', '-')) == item_pid for changed_item in changed_items)
+                        
+                        if is_changed:
+                            log.info("📝 Single item detected: '%s' - posting individually", item['title'])
+                            await post_individual_item(channel, item)
+                        else:
+                            log.info("📝 Single item '%s' unchanged - skipping", item['title'])
                     else:
                         log.info("📝 Multiple items (%d) in same group - posting grouped", len(items_in_group))
                         await process_grouped_items(channel, group_key, items_in_group)
