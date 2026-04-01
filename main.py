@@ -2323,7 +2323,7 @@ async def has_item_changed(pid: str, new_item: dict) -> bool:
     stored_hash = stored["content_hash"]
     
     # Debug logging for hash comparison
-    log.debug("CHANGE DEBUG: Item '%s' | Stored hash: %s | New hash: %s | Changed: %s", 
+    log.info("HASH DEBUG: Item '%s' | Stored hash: %s | New hash: %s | Changed: %s", 
               new_item.get('title', 'Unknown'), stored_hash[:8], new_hash[:8], new_hash != stored_hash)
     
     # Check if hash is different
@@ -2788,14 +2788,14 @@ def generate_content_hash(item: dict) -> str:
     content_str = "|".join(str(field) for field in content_fields)
     
     # Debug logging to identify hash mismatch issues
-    log.debug("HASH DEBUG: Item '%s'", title)
-    log.debug("  Title: '%s' (len: %d)", title, len(title))
-    log.debug("  Content: '%s' (len: %d)", content[:50] + "..." if len(content) > 50 else content, len(content))
-    log.debug("  Price: '%s'", price)
-    log.debug("  Rarity: '%s'", rarity)
-    log.debug("  Image: '%s'", image)
-    log.debug("  Images: '%s'", images[:50] + "..." if len(images) > 50 else images)
-    log.debug("  Final hash: %s", hashlib.md5(content_str.encode()).hexdigest()[:8])
+    log.info("HASH DEBUG: Item '%s'", title)
+    log.info("  Title: '%s' (len: %d)", title, len(title))
+    log.info("  Content: '%s' (len: %d)", content[:50] + "..." if len(content) > 50 else content, len(content))
+    log.info("  Price: '%s'", price)
+    log.info("  Rarity: '%s'", rarity)
+    log.info("  Image: '%s'", image)
+    log.info("  Images: '%s'", images[:50] + "..." if len(images) > 50 else images)
+    log.info("  Final hash: %s", hashlib.md5(content_str.encode()).hexdigest()[:8])
     
     return hashlib.md5(content_str.encode()).hexdigest()
 
@@ -4358,8 +4358,6 @@ async def check_posts():
                 await asyncio.sleep(smart_polling.current_interval)
                 continue
             
-            log.info("DEBUG: About to start processing loop for %d posts", len(posts))
-            
             # Check for new changes and collect changed items
             has_new_changes = False
             changed_items = []
@@ -4375,18 +4373,12 @@ async def check_posts():
                 post["pid"] = pid
                 all_current_items.append(post)
                 
-                log.info("DEBUG: Processing item '%s' with PID '%s'", post.get("title", "Unknown"), pid)
-                
                 if await has_item_changed(pid, post):
-                    log.info("DEBUG: Item '%s' has CHANGED", post.get("title", "Unknown"))
                     has_new_changes = True
                     changed_items.append(post)
-                else:
-                    log.info("DEBUG: Item '%s' has NOT changed", post.get("title", "Unknown"))
             
-            # Process if there are changed items OR current items (to handle grouping)
-            log.info("DEBUG: About to check processing condition - changed_items: %d, all_current_items: %d", len(changed_items), len(all_current_items))
-            if changed_items or all_current_items:
+            # Only process if there are actually changed items
+            if changed_items:
                 log.info("Checking groups - Changed items: %d, All current items: %d", 
                          len(changed_items), len(all_current_items))
                 
