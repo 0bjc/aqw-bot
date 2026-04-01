@@ -2316,10 +2316,15 @@ async def has_item_changed(pid: str, new_item: dict) -> bool:
     """Check if item has changed since last posting."""
     stored = await get_stored_item(pid)
     if not stored:
+        log.debug("CHANGE DEBUG: Item '%s' not found in database - treating as new", pid)
         return True  # New item
     
     new_hash = generate_content_hash(new_item)
     stored_hash = stored["content_hash"]
+    
+    # Debug logging for hash comparison
+    log.debug("CHANGE DEBUG: Item '%s' | Stored hash: %s | New hash: %s | Changed: %s", 
+              new_item.get('title', 'Unknown'), stored_hash[:8], new_hash[:8], new_hash != stored_hash)
     
     # Check if hash is different
     if new_hash == stored_hash:
@@ -2772,20 +2777,25 @@ async def delete_group_post(group_key: str):
 def generate_content_hash(item: dict) -> str:
     """Generate a content hash for an individual item to detect changes."""
     # Use key fields that determine if content has changed
-    content_fields = [
-        item.get("title", ""),
-        item.get("content", ""),
-        item.get("price", ""),
-        item.get("rarity", ""),
-        item.get("image", ""),
-        json.dumps(sorted(item.get("images", []))) if item.get("images") else ""
-    ]
+    title = item.get("title", "")
+    content = item.get("content", "")
+    price = item.get("price", "")
+    rarity = item.get("rarity", "")
+    image = item.get("image", "")
+    images = json.dumps(sorted(item.get("images", []))) if item.get("images") else ""
     
+    content_fields = [title, content, price, rarity, image, images]
     content_str = "|".join(str(field) for field in content_fields)
     
     # Debug logging to identify hash mismatch issues
-    log.debug("HASH DEBUG: Item '%s' | Content length: %d | Hash: %s", 
-              item.get("title", "Unknown"), len(content_str), hashlib.md5(content_str.encode()).hexdigest()[:8])
+    log.debug("HASH DEBUG: Item '%s'", title)
+    log.debug("  Title: '%s' (len: %d)", title, len(title))
+    log.debug("  Content: '%s' (len: %d)", content[:50] + "..." if len(content) > 50 else content, len(content))
+    log.debug("  Price: '%s'", price)
+    log.debug("  Rarity: '%s'", rarity)
+    log.debug("  Image: '%s'", image)
+    log.debug("  Images: '%s'", images[:50] + "..." if len(images) > 50 else images)
+    log.debug("  Final hash: %s", hashlib.md5(content_str.encode()).hexdigest()[:8])
     
     return hashlib.md5(content_str.encode()).hexdigest()
 
@@ -4339,13 +4349,16 @@ async def check_posts():
     
     while True:
         try:
-            posts = await asyncio.to_thread(fetch_recent_aegifts, limit=10)
+            posts = await asyncio.wait_for(asyncio.to_thread(fetch_recent_aegifts, limit=10), timeout=30)
+            log.info("DEBUG: fetch_recent_aegifts returned %d posts", len(posts) if posts else 0)
             
             if posts is None:
                 # Request failed
                 smart_polling.update_interval(has_new_changes=False, has_error=True)
                 await asyncio.sleep(smart_polling.current_interval)
                 continue
+            
+            log.info("DEBUG: About to start processing loop for %d posts", len(posts))
             
             # Check for new changes and collect changed items
             has_new_changes = False
@@ -4362,12 +4375,18 @@ async def check_posts():
                 post["pid"] = pid
                 all_current_items.append(post)
                 
+                log.info("DEBUG: Processing item '%s' with PID '%s'", post.get("title", "Unknown"), pid)
+                
                 if await has_item_changed(pid, post):
+                    log.info("DEBUG: Item '%s' has CHANGED", post.get("title", "Unknown"))
                     has_new_changes = True
                     changed_items.append(post)
+                else:
+                    log.info("DEBUG: Item '%s' has NOT changed", post.get("title", "Unknown"))
             
-            # Only process if there are actually changed items
-            if changed_items:
+            # Process if there are changed items OR current items (to handle grouping)
+            log.info("DEBUG: About to check processing condition - changed_items: %d, all_current_items: %d", len(changed_items), len(all_current_items))
+            if changed_items or all_current_items:
                 log.info("Checking groups - Changed items: %d, All current items: %d", 
                          len(changed_items), len(all_current_items))
                 
