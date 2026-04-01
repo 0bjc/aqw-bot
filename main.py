@@ -2323,7 +2323,7 @@ async def has_item_changed(pid: str, new_item: dict) -> bool:
     stored_hash = stored["content_hash"]
     
     # Debug logging for hash comparison
-    log.info("HASH DEBUG: Item '%s' | Stored hash: %s | New hash: %s | Changed: %s", 
+    log.debug("CHANGE DEBUG: Item '%s' | Stored hash: %s | New hash: %s | Changed: %s", 
               new_item.get('title', 'Unknown'), stored_hash[:8], new_hash[:8], new_hash != stored_hash)
     
     # Check if hash is different
@@ -2784,18 +2784,23 @@ def generate_content_hash(item: dict) -> str:
     image = item.get("image", "")
     images = json.dumps(sorted(item.get("images", []))) if item.get("images") else ""
     
+    # Normalize content to remove inconsistencies
+    content = content.strip()
+    price = price.strip()
+    rarity = rarity.strip()
+    
     content_fields = [title, content, price, rarity, image, images]
     content_str = "|".join(str(field) for field in content_fields)
     
     # Debug logging to identify hash mismatch issues
-    log.info("HASH DEBUG: Item '%s'", title)
-    log.info("  Title: '%s' (len: %d)", title, len(title))
-    log.info("  Content: '%s' (len: %d)", content[:50] + "..." if len(content) > 50 else content, len(content))
-    log.info("  Price: '%s'", price)
-    log.info("  Rarity: '%s'", rarity)
-    log.info("  Image: '%s'", image)
-    log.info("  Images: '%s'", images[:50] + "..." if len(images) > 50 else images)
-    log.info("  Final hash: %s", hashlib.md5(content_str.encode()).hexdigest()[:8])
+    log.debug("HASH DEBUG: Item '%s'", title)
+    log.debug("  Title: '%s' (len: %d)", title, len(title))
+    log.debug("  Content: '%s' (len: %d)", content[:50] + "..." if len(content) > 50 else content, len(content))
+    log.debug("  Price: '%s'", price)
+    log.debug("  Rarity: '%s'", rarity)
+    log.debug("  Image: '%s'", image)
+    log.debug("  Images: '%s'", images[:50] + "..." if len(images) > 50 else images)
+    log.debug("  Final hash: %s", hashlib.md5(content_str.encode()).hexdigest()[:8])
     
     return hashlib.md5(content_str.encode()).hexdigest()
 
