@@ -199,6 +199,11 @@ async def init_db() -> None:
         """)
         
         await db.commit()
+        
+        # Run hash migration if needed (this will only update items with different hashes)
+        log.info("Running hash migration to robust hashing system...")
+        await migrate_item_hashes()
+        await migrate_group_hashes()
 
 
 async def get_and_increment_counter(counter_name: str) -> int:
@@ -2312,6 +2317,101 @@ async def get_stored_item(pid: str) -> dict | None:
                 }
             return None
 
+async def migrate_item_hashes():
+    """Migrate existing item hashes to the new robust hashing system."""
+    try:
+        async with aiosqlite.connect("drops.db") as db:
+            cursor = await db.execute("""
+                SELECT pid, title, content, price, rarity, image, images, url, location, content_hash 
+                FROM posted_items 
+                WHERE content_hash IS NOT NULL
+            """)
+            
+            items = await cursor.fetchall()
+            migrated_count = 0
+            
+            log.info("Starting hash migration for %d items...", len(items))
+            
+            for row in items:
+                (pid, title, content, price, rarity, image, images, url, location, old_hash) = row
+                
+                # Reconstruct item dict
+                item = {
+                    "title": title,
+                    "content": content,
+                    "price": price,
+                    "rarity": rarity,
+                    "image": image,
+                    "images": json.loads(images) if images else [],
+                    "url": url,
+                    "location": location
+                }
+                
+                # Generate new robust hash
+                new_hash = generate_content_hash(item)
+                
+                # Update if hash is different
+                if new_hash != old_hash:
+                    await db.execute("""
+                        UPDATE posted_items 
+                        SET content_hash = ? 
+                        WHERE pid = ?
+                    """, (new_hash, pid))
+                    migrated_count += 1
+                    log.info("Migrated hash for item '%s': %s -> %s", title, old_hash[:16], new_hash[:16])
+            
+            await db.commit()
+            log.info("Hash migration completed. Updated %d items.", migrated_count)
+            
+    except Exception as e:
+        log.error("Error during hash migration: %s", e)
+
+
+async def migrate_group_hashes():
+    """Migrate existing group hashes to the new robust hashing system."""
+    try:
+        async with aiosqlite.connect("drops.db") as db:
+            cursor = await db.execute("""
+                SELECT group_key, group_data, content_hash 
+                FROM grouped_posts 
+                WHERE content_hash IS NOT NULL
+            """)
+            
+            groups = await cursor.fetchall()
+            migrated_count = 0
+            
+            log.info("Starting group hash migration for %d groups...", len(groups))
+            
+            for row in groups:
+                (group_key, group_data, old_hash) = row
+                
+                # Parse group data
+                try:
+                    items = json.loads(group_data) if group_data else []
+                    
+                    # Generate new robust hash
+                    new_hash = generate_group_content_hash(items)
+                    
+                    # Update if hash is different
+                    if new_hash != old_hash:
+                        await db.execute("""
+                            UPDATE grouped_posts 
+                            SET content_hash = ? 
+                            WHERE group_key = ?
+                        """, (new_hash, group_key))
+                        migrated_count += 1
+                        log.info("Migrated hash for group %s: %s -> %s", group_key[:16], old_hash[:16], new_hash[:16])
+                        
+                except json.JSONDecodeError as e:
+                    log.warning("Could not parse group data for key %s: %s", group_key, e)
+            
+            await db.commit()
+            log.info("Group hash migration completed. Updated %d groups.", migrated_count)
+            
+    except Exception as e:
+        log.error("Error during group hash migration: %s", e)
+
+
 async def has_item_changed(pid: str, new_item: dict) -> bool:
     """Check if item has changed since last posting."""
     stored = await get_stored_item(pid)
@@ -2774,60 +2874,159 @@ async def delete_group_post(group_key: str):
         raise
 
 
+def normalize_field_value(value):
+    """Normalize a field value for consistent hashing."""
+    if value is None:
+        return ""
+    
+    # Convert to string if not already
+    if not isinstance(value, str):
+        value = str(value)
+    
+    # Normalize whitespace
+    value = value.strip()
+    
+    # Normalize multiple spaces to single space
+    import re
+    value = re.sub(r'\s+', ' ', value)
+    
+    # Normalize line endings
+    value = value.replace('\r\n', '\n').replace('\r', '\n')
+    
+    return value
+
+
+def normalize_list_field(items):
+    """Normalize a list field for consistent hashing."""
+    if not items:
+        return []
+    
+    normalized = []
+    for item in items:
+        if isinstance(item, dict):
+            # Sort dictionary keys and normalize values
+            normalized_dict = {}
+            for key in sorted(item.keys()):
+                normalized_dict[key] = normalize_field_value(item[key])
+            normalized.append(normalized_dict)
+        else:
+            normalized.append(normalize_field_value(item))
+    
+    # Sort the list if it contains strings or simple values
+    if all(not isinstance(x, dict) for x in normalized):
+        try:
+            return sorted(normalized, key=str.lower)
+        except:
+            pass
+    
+    return normalized
+
+
 def generate_content_hash(item: dict) -> str:
-    """Generate a content hash for an individual item to detect changes."""
-    # Use key fields that determine if content has changed
-    title = item.get("title", "")
-    content = item.get("content", "")
-    price = item.get("price", "")
-    rarity = item.get("rarity", "")
-    image = item.get("image", "")
-    images = json.dumps(sorted(item.get("images", []))) if item.get("images") else ""
+    """Generate a robust content hash for an individual item to detect changes.
     
-    # Normalize content to remove inconsistencies
-    content = content.strip()
-    price = price.strip()
-    rarity = rarity.strip()
-    
-    content_fields = [title, content, price, rarity, image, images]
-    content_str = "|".join(str(field) for field in content_fields)
-    
-    # Debug logging to identify hash mismatch issues
-    log.debug("HASH DEBUG: Item '%s'", title)
-    log.debug("  Title: '%s' (len: %d)", title, len(title))
-    log.debug("  Content: '%s' (len: %d)", content[:50] + "..." if len(content) > 50 else content, len(content))
-    log.debug("  Price: '%s'", price)
-    log.debug("  Rarity: '%s'", rarity)
-    log.debug("  Image: '%s'", image)
-    log.debug("  Images: '%s'", images[:50] + "..." if len(images) > 50 else images)
-    log.debug("  Final hash: %s", hashlib.md5(content_str.encode()).hexdigest()[:8])
-    
-    return hashlib.md5(content_str.encode()).hexdigest()
+    This advanced hashing system:
+    - Normalizes all field values to prevent inconsistencies
+    - Handles missing fields gracefully
+    - Sorts list items and dictionary keys for consistent ordering
+    - Uses a deterministic approach for complex data structures
+    """
+    try:
+        # Extract and normalize all relevant fields
+        title = normalize_field_value(item.get("title", ""))
+        content = normalize_field_value(item.get("content", ""))
+        price = normalize_field_value(item.get("price", ""))
+        rarity = normalize_field_value(item.get("rarity", ""))
+        image = normalize_field_value(item.get("image", ""))
+        
+        # Normalize images list with proper sorting
+        images_list = item.get("images", [])
+        if isinstance(images_list, list):
+            normalized_images = normalize_list_field(images_list)
+            images = json.dumps(normalized_images, sort_keys=True, separators=(',', ':'))
+        else:
+            images = normalize_field_value(images_list)
+        
+        # Normalize other potential fields that might affect content
+        url = normalize_field_value(item.get("url", ""))
+        location = normalize_field_value(item.get("location", ""))
+        
+        # Create a structured, ordered representation
+        content_structure = {
+            "title": title,
+            "content": content,
+            "price": price,
+            "rarity": rarity,
+            "image": image,
+            "images": images,
+            "url": url,
+            "location": location
+        }
+        
+        # Generate hash from the normalized structure
+        content_str = json.dumps(content_structure, sort_keys=True, separators=(',', ':'))
+        final_hash = hashlib.sha256(content_str.encode('utf-8')).hexdigest()
+        
+        # Debug logging to identify hash mismatch issues
+        log.info("HASH DEBUG: Item '%s'", title)
+        log.info("  Title: '%s' (len: %d)", title, len(title))
+        log.info("  Content: '%s' (len: %d)", content[:50] + "..." if len(content) > 50 else content, len(content))
+        log.info("  Price: '%s'", price)
+        log.info("  Rarity: '%s'", rarity)
+        log.info("  Image: '%s'", image)
+        log.info("  Images: '%s'", images[:50] + "..." if len(images) > 50 else images)
+        log.info("  URL: '%s'", url)
+        log.info("  Location: '%s'", location)
+        log.info("  Final hash: %s", final_hash[:16])
+        
+        return final_hash
+        
+    except Exception as e:
+        log.error("Error generating content hash for item '%s': %s", item.get('title', 'Unknown'), e)
+        # Fallback to simple hash on title only
+        fallback_content = normalize_field_value(item.get("title", ""))
+        return hashlib.sha256(fallback_content.encode('utf-8')).hexdigest()
 
 
 def generate_group_content_hash(items: list[dict]) -> str:
-    """Generate a more reliable hash for a group of items.
-    Uses item URLs for ordering and includes all item data.
+    """Generate a robust hash for a group of items.
+    
+    This advanced group hashing system:
+    - Uses the same robust individual item hashing
+    - Sorts items deterministically by URL
+    - Combines hashes in a consistent manner
+    - Uses SHA-256 for better collision resistance
     """
     if not items:
-        return hashlib.md5(b"empty_group").hexdigest()
+        return hashlib.sha256(b"empty_group").hexdigest()
     
-    # Sort items by URL for consistent ordering
-    sorted_items = sorted(items, key=lambda x: x.get("url", ""))
-    
-    # Generate hash for each item
-    item_hashes = []
-    for item in sorted_items:
-        item_hash = generate_content_hash(item)
-        item_hashes.append(item_hash)
-    
-    # Create group hash
-    combined = "||".join(item_hashes)
-    group_hash = hashlib.md5(combined.encode('utf-8')).hexdigest()
-    
-    log.debug("Generated group hash: %s from %d items", group_hash[:8], len(items))
-    
-    return group_hash
+    try:
+        # Sort items by URL for consistent ordering
+        sorted_items = sorted(items, key=lambda x: normalize_field_value(x.get("url", "")))
+        
+        # Generate hash for each item using the robust method
+        item_hashes = []
+        for item in sorted_items:
+            item_hash = generate_content_hash(item)
+            item_hashes.append(item_hash)
+        
+        # Create group hash from sorted item hashes
+        group_structure = {
+            "items": sorted(item_hashes),
+            "count": len(items)
+        }
+        
+        group_str = json.dumps(group_structure, sort_keys=True, separators=(',', ':'))
+        group_hash = hashlib.sha256(group_str.encode('utf-8')).hexdigest()
+        
+        log.info("Generated robust group hash: %s from %d items", group_hash[:16], len(items))
+        
+        return group_hash
+        
+    except Exception as e:
+        log.error("Error generating group hash: %s", e)
+        # Fallback to simple hash of item count
+        return hashlib.sha256(f"fallback_{len(items)}".encode('utf-8')).hexdigest()
 
 
 async def has_group_changed(group_key: str, items: list[dict]) -> tuple[bool, dict | None]:
