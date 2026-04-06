@@ -192,33 +192,35 @@ async def init_db() -> None:
 
 async def get_existing_post(source_id: str) -> dict | None:
     """Get existing post record by source_id."""
-    async with aiosqlite.connect(DB) as db:
-        cursor = await db.execute("""
-            SELECT message_id, channel_id, post_type 
-            FROM posts 
-            WHERE source_id = ?
-        """, (source_id,))
-        row = await cursor.fetchone()
-        
-        if row:
-            message_id, channel_id, post_type = row
-            return {
-                "message_id": message_id,
-                "channel_id": channel_id,
-                "post_type": post_type
-            }
-        return None
+    async with db_lock:
+        async with aiosqlite.connect(DB) as db:
+            cursor = await db.execute("""
+                SELECT message_id, channel_id, post_type 
+                FROM posts 
+                WHERE source_id = ?
+            """, (source_id,))
+            row = await cursor.fetchone()
+            
+            if row:
+                message_id, channel_id, post_type = row
+                return {
+                    "message_id": message_id,
+                    "channel_id": channel_id,
+                    "post_type": post_type
+                }
+            return None
 
 
 async def save_post_record(source_id: str, message, post_type: str) -> None:
     """Save or update post record with atomic operation."""
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            INSERT OR REPLACE INTO posts 
-            (source_id, message_id, channel_id, post_type, last_updated) 
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """, (source_id, message.id, message.channel.id, post_type))
-        await db.commit()
+    async with db_lock:
+        async with aiosqlite.connect(DB) as db:
+            await db.execute("""
+                INSERT OR REPLACE INTO posts 
+                (source_id, message_id, channel_id, post_type, last_updated) 
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (source_id, message.id, message.channel.id, post_type))
+            await db.commit()
 
 
 def extract_source_id_from_item(item: dict) -> str:
@@ -2362,6 +2364,29 @@ async def get_stored_item(pid: str) -> dict | None:
                 }
             return None
 
+async def get_stored_group(group_key: str) -> dict | None:
+    """Get stored group data for comparison."""
+    async with db_lock:
+        async with aiosqlite.connect(DB) as db:
+            async with db.execute("""
+                SELECT group_key, location, price, item_titles, categories, discord_message_id, discord_channel_id 
+                FROM grouped_posts WHERE group_key=?
+            """, (group_key,)) as cur:
+                row = await cur.fetchone()
+                
+                if row:
+                    group_key, location, price, item_titles_json, categories_json, discord_message_id, discord_channel_id = row
+                    return {
+                        "group_key": group_key,
+                        "location": location,
+                        "price": price,
+                        "item_titles": json.loads(item_titles_json) if item_titles_json else [],
+                        "categories": json.loads(categories_json) if categories_json else [],
+                        "discord_message_id": discord_message_id,
+                        "discord_channel_id": discord_channel_id
+                    }
+                return None
+
 async def migrate_item_hashes():
     """Migrate existing item hashes to the new ultra-stable hashing system."""
     try:
@@ -2891,12 +2916,13 @@ async def mark_group_posted(group_key: str, location: str, price: str, items: li
 
 async def update_group_discord_message_info(group_key: str, message_id: int, channel_id: int):
     """Update Discord message info for an existing group."""
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            UPDATE grouped_posts SET discord_message_id=?, discord_channel_id=?, last_updated=datetime('now')
-            WHERE group_key=?
-        """, (message_id, channel_id, group_key))
-        await db.commit()
+    async with db_lock:
+        async with aiosqlite.connect(DB) as db:
+            await db.execute("""
+                UPDATE grouped_posts SET discord_message_id=?, discord_channel_id=?, last_updated=datetime('now')
+                WHERE group_key=?
+            """, (message_id, channel_id, group_key))
+            await db.commit()
 
 
 async def delete_group_post(group_key: str):
@@ -3267,16 +3293,17 @@ async def update_stored_group_data(group_key: str, location: str, price: str, it
     # Store hash as first category entry with "hash:" prefix
     categories_with_hash = [f"hash:{content_hash}"] + categories
     
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            INSERT OR REPLACE INTO grouped_posts 
-            (group_key, location, price, item_titles, categories, discord_message_id, discord_channel_id, last_updated) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        """, (
-            group_key, location, price, json.dumps(item_titles), json.dumps(categories_with_hash),
-            message_id, channel_id
-        ))
-        await db.commit()
+    async with db_lock:
+        async with aiosqlite.connect(DB) as db:
+            await db.execute("""
+                INSERT OR REPLACE INTO grouped_posts 
+                (group_key, location, price, item_titles, categories, discord_message_id, discord_channel_id, last_updated) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            """, (
+                group_key, location, price, json.dumps(item_titles), json.dumps(categories_with_hash),
+                message_id, channel_id
+            ))
+            await db.commit()
 
 
 async def check_message_exists(msg_id: int, ch_id: int) -> bool:
