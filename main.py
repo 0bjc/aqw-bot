@@ -169,23 +169,14 @@ async def init_db() -> None:
             INSERT OR IGNORE INTO counters (name, value) VALUES ('daily_gift', 0)
         """)
         
-        # Create source ID tracking tables
+        # Create source-based posts table with race condition protection
         await db.execute("""
             CREATE TABLE IF NOT EXISTS posts (
-                source_id TEXT PRIMARY KEY,
+                source_id TEXT UNIQUE PRIMARY KEY,
                 message_id INTEGER NOT NULL,
                 channel_id INTEGER NOT NULL,
-                group_id TEXT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS groups (
-                group_id TEXT PRIMARY KEY,
-                message_id INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                post_type TEXT NOT NULL CHECK (post_type IN ('single', 'group')),
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         
@@ -194,111 +185,66 @@ async def init_db() -> None:
         log.info("Source ID tracking system initialized")
 
 
-# ==================== SOURCE ID TRACKING SYSTEM ====================
+# ==================== SOURCE-BASED POSTING SYSTEM ====================
 
-async def get_post(source_id: str) -> dict | None:
+async def get_existing_post(source_id: str) -> dict | None:
     """Get existing post record by source_id."""
     async with aiosqlite.connect(DB) as db:
         cursor = await db.execute("""
-            SELECT message_id, channel_id, group_id 
+            SELECT message_id, channel_id, post_type 
             FROM posts 
             WHERE source_id = ?
         """, (source_id,))
         row = await cursor.fetchone()
         
         if row:
-            message_id, channel_id, group_id = row
+            message_id, channel_id, post_type = row
             return {
                 "message_id": message_id,
                 "channel_id": channel_id,
-                "group_id": group_id
+                "post_type": post_type
             }
         return None
 
 
-async def save_single_post(source_id: str, message) -> None:
-    """Save a single post record (group_id = NULL)."""
+async def save_post_record(source_id: str, message, post_type: str) -> None:
+    """Save or update post record with atomic operation."""
     async with aiosqlite.connect(DB) as db:
         await db.execute("""
             INSERT OR REPLACE INTO posts 
-            (source_id, message_id, channel_id, group_id) 
-            VALUES (?, ?, ?, NULL)
-        """, (source_id, message.id, message.channel.id))
+            (source_id, message_id, channel_id, post_type, last_updated) 
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, (source_id, message.id, message.channel.id, post_type))
         await db.commit()
 
 
-async def get_group(group_id: str) -> dict | None:
-    """Get existing group record by group_id."""
-    async with aiosqlite.connect(DB) as db:
-        cursor = await db.execute("""
-            SELECT message_id, channel_id 
-            FROM groups 
-            WHERE group_id = ?
-        """, (group_id,))
-        row = await cursor.fetchone()
-        
-        if row:
-            message_id, channel_id = row
-            return {
-                "message_id": message_id,
-                "channel_id": channel_id
-            }
-        return None
+def extract_source_id_from_item(item: dict) -> str:
+    """Extract stable source_id from item (wiki page URL slug)."""
+    url = item.get('url', '')
+    if url:
+        # Extract page slug from URL for stability
+        parsed = urlparse(url)
+        path_parts = [part for part in parsed.path.strip('/').split('/') if part]
+        if path_parts:
+            return '/'.join(path_parts).lower()
+    
+    # Fallback to title if no URL
+    title = item.get('title', '').strip()
+    return title.lower().replace(' ', '_') if title else 'unknown'
 
 
-async def save_group(group_id: str, message) -> None:
-    """Save a new group record."""
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            INSERT OR REPLACE INTO groups 
-            (group_id, message_id, channel_id) 
-            VALUES (?, ?, ?)
-        """, (group_id, message.id, message.channel.id))
-        await db.commit()
-
-
-async def add_item_to_group(source_id: str, group_id: str, message) -> None:
-    """Add an item to a group (maps source_id to group's message)."""
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            INSERT OR REPLACE INTO posts 
-            (source_id, message_id, channel_id, group_id) 
-            VALUES (?, ?, ?, ?)
-        """, (source_id, message.id, message.channel.id, group_id))
-        await db.commit()
-
-
-async def get_group_items(group_id: str) -> list[str]:
-    """Get all source_ids that belong to a group."""
-    async with aiosqlite.connect(DB) as db:
-        cursor = await db.execute("""
-            SELECT source_id 
-            FROM posts 
-            WHERE group_id = ?
-            ORDER BY created_at
-        """, (group_id,))
-        rows = await cursor.fetchall()
-        return [row[0] for row in rows]
-
-
-async def delete_post_record(source_id: str) -> None:
-    """Delete a post record (when Discord message is deleted)."""
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("DELETE FROM posts WHERE source_id = ?", (source_id,))
-        await db.commit()
-
-
-async def delete_group_record(group_id: str) -> None:
-    """Delete a group record and all associated posts."""
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("DELETE FROM posts WHERE group_id = ?", (group_id,))
-        await db.execute("DELETE FROM groups WHERE group_id = ?", (group_id,))
-        await db.commit()
-
-
-def get_source_id_from_item(item: dict) -> str:
-    """Extract source_id from item (URL preferred, fallback to title)."""
-    return item.get('url', item.get('id', item.get('title', 'unknown')))
+def extract_group_source_id(items: list[dict]) -> str:
+    """Extract shared source_id for grouped items (event/page identifier)."""
+    if not items:
+        return 'unknown_group'
+    
+    # For grouped items, use the first item's source_id as the group identifier
+    # This assumes grouped items come from the same page/event
+    first_item = items[0]
+    base_source_id = extract_source_id_from_item(first_item)
+    
+    # Add group suffix to distinguish from single posts
+    return f"group_{base_source_id}"
 
 
 async def get_and_increment_counter(counter_name: str) -> int:
@@ -3491,129 +3437,135 @@ async def edit_existing_group_message(channel, stored_group: dict, group_key: st
     return False
 
 
-async def post_individual_item(channel, item: dict) -> bool:
-    """Post a single item as an individual message using source ID tracking."""
-    try:
-        log.info("📝 Posting individual item: '%s'", item['title'])
-        
-        # Get source ID from item
-        source_id = get_source_id_from_item(item)
-        
-        # Check if item already exists
-        existing = await get_post(source_id)
-        
-        if existing:
-            # Item exists - edit the existing message
-            try:
-                channel_obj = channel.guild.get_channel(existing['channel_id']) if hasattr(channel, 'guild') else channel
-                if not channel_obj:
-                    # Channel not found, treat as new
-                    existing = None
-                else:
-                    message = await channel_obj.fetch_message(existing['message_id'])
+async def post_single_item_atomic(channel, item: dict) -> bool:
+    """Post single item with atomic database operations and race condition protection."""
+    source_id = extract_source_id_from_item(item)
+    
+    async with aiosqlite.connect(DB) as db:
+        # Start atomic transaction
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            # Check if source_id exists in same transaction
+            cursor = await db.execute("""
+                SELECT message_id, channel_id 
+                FROM posts 
+                WHERE source_id = ?
+            """, (source_id,))
+            existing = await cursor.fetchone()
+            
+            if existing:
+                # Edit existing message
+                message_id, channel_id = existing
+                try:
+                    channel_obj = channel.guild.get_channel(channel_id) if hasattr(channel, 'guild') else channel
+                    if not channel_obj:
+                        raise discord.NotFound("Channel not found")
                     
-                    # Create new embed with updated content
+                    message = await channel_obj.fetch_message(message_id)
                     embed, view = await create_pane_embed(item)
-                    
-                    # Edit existing message
                     await message.edit(embed=embed, view=view)
-                    log.info(f"✅ Updated individual item '{item['title']}' (Message ID: {message.id})")
+                    
+                    # Update timestamp
+                    await db.execute("""
+                        UPDATE posts 
+                        SET last_updated = CURRENT_TIMESTAMP 
+                        WHERE source_id = ?
+                    """, (source_id,))
+                    
+                    await db.commit()
+                    log.info(f"✅ Updated single item '{item['title']}' (Message ID: {message_id})")
                     return True
                     
-            except discord.NotFound:
-                # Message was deleted, clean up and treat as new
-                await delete_post_record(source_id)
-                existing = None
-            except discord.Forbidden:
-                # No permission to edit, log and continue
-                log.warning(f"No permission to edit message for '{item['title']}'")
-                return False
-        
-        if not existing:
-            # Create new single post
+                except discord.NotFound:
+                    # Message deleted, remove record and continue to create new
+                    await db.execute("DELETE FROM posts WHERE source_id = ?", (source_id,))
+            
+            # Create new message
             embed, view = await create_pane_embed(item)
             message = await channel.send(embed=embed, view=view)
             
-            # Save the mapping
-            await save_single_post(source_id, message)
+            # Save new record in same transaction
+            await db.execute("""
+                INSERT INTO posts 
+                (source_id, message_id, channel_id, post_type) 
+                VALUES (?, ?, ?, 'single')
+            """, (source_id, message.id, message.channel.id))
             
-            log.info(f"✅ Posted new individual item '{item['title']}' (Message ID: {message.id})")
+            await db.commit()
+            log.info(f"✅ Created new single item '{item['title']}' (Message ID: {message.id})")
             return True
             
-    except Exception as e:
-        log.error("❌ Error posting individual item '%s': %s", item.get('title', 'Unknown'), e)
+        except Exception as e:
+            await db.rollback()
+            log.error(f"❌ Error in atomic single post for '{item.get('title', 'Unknown')}': {e}")
+            return False
+
+
+async def post_grouped_items_atomic(channel, items: list[dict]) -> bool:
+    """Post grouped items with atomic database operations and race condition protection."""
+    if not items:
         return False
-
-
-async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
-    """Post grouped items using source ID tracking."""
-    try:
-        log.info(f"📝 Posting grouped items: {len(items)} items in group '{group_id}'")
         
-        # Check if group already exists
-        existing_group = await get_group(group_id)
-        
-        if existing_group:
-            # Group exists - edit the existing message
-            try:
-                channel_obj = channel.guild.get_channel(existing_group['channel_id']) if hasattr(channel, 'guild') else channel
-                if not channel_obj:
-                    # Channel not found, treat as new
-                    existing_group = None
-                else:
-                    message = await channel_obj.fetch_message(existing_group['message_id'])
+    source_id = extract_group_source_id(items)
+    
+    async with aiosqlite.connect(DB) as db:
+        # Start atomic transaction
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            # Check if source_id exists in same transaction
+            cursor = await db.execute("""
+                SELECT message_id, channel_id 
+                FROM posts 
+                WHERE source_id = ?
+            """, (source_id,))
+            existing = await cursor.fetchone()
+            
+            if existing:
+                # Edit existing message
+                message_id, channel_id = existing
+                try:
+                    channel_obj = channel.guild.get_channel(channel_id) if hasattr(channel, 'guild') else channel
+                    if not channel_obj:
+                        raise discord.NotFound("Channel not found")
                     
-                    # Create new grouped embed with all items
-                    embed, view = await create_grouped_embed(group_id, items)
-                    
-                    # Edit existing message
+                    message = await channel_obj.fetch_message(message_id)
+                    embed, view = await create_grouped_embed(source_id, items)
                     await message.edit(embed=embed, view=view)
-                    log.info(f"✅ Updated group '{group_id}' (Message ID: {message.id})")
                     
-                    # Update all item mappings to point to this message
-                    for item in items:
-                        source_id = get_source_id_from_item(item)
-                        await add_item_to_group(source_id, group_id, message)
+                    # Update timestamp
+                    await db.execute("""
+                        UPDATE posts 
+                        SET last_updated = CURRENT_TIMESTAMP 
+                        WHERE source_id = ?
+                    """, (source_id,))
                     
+                    await db.commit()
+                    log.info(f"✅ Updated group '{source_id}' (Message ID: {message_id})")
                     return True
                     
-            except discord.NotFound:
-                # Message was deleted, clean up and treat as new
-                await delete_group_record(group_id)
-                existing_group = None
-            except discord.Forbidden:
-                log.warning(f"No permission to edit group message for '{group_id}'")
-                return False
-        
-        if not existing_group:
-            # Create new group post
-            embed, view = await create_grouped_embed(group_id, items)
+                except discord.NotFound:
+                    # Message deleted, remove record and continue to create new
+                    await db.execute("DELETE FROM posts WHERE source_id = ?", (source_id,))
+            
+            # Create new message
+            embed, view = await create_grouped_embed(source_id, items)
             message = await channel.send(embed=embed, view=view)
             
-            # Save the group
-            await save_group(group_id, message)
+            # Save new record in same transaction
+            await db.execute("""
+                INSERT INTO posts 
+                (source_id, message_id, channel_id, post_type) 
+                VALUES (?, ?, ?, 'group')
+            """, (source_id, message.id, message.channel.id))
             
-            # Save all item mappings
-            for item in items:
-                source_id = get_source_id_from_item(item)
-                await add_item_to_group(source_id, group_id, message)
-            
-            log.info(f"✅ Posted new group '{group_id}' (Message ID: {message.id})")
+            await db.commit()
+            log.info(f"✅ Created new group '{source_id}' (Message ID: {message.id})")
             return True
             
-    except Exception as e:
-        log.error(f"❌ Error posting group '{group_id}': {e}")
-        return False
-
-
-def get_group_id_from_items(items: list[dict]) -> str:
-    """Generate a consistent group_id from items (your existing grouping logic)."""
-    if items:
-        first_item = items[0]
-        location = first_item.get('location', 'unknown')
-        price = first_item.get('price', 'unknown')
-        return f"group_{location}_{price}".replace(' ', '_').replace('/', '_').lower()
-    return f"group_{len(items)}"
+        except Exception as e:
+            await db.rollback()
+            log.error(f"❌ Error in atomic group post for '{source_id}': {e}")
+            return False
 
 
 async def process_grouped_items(channel, group_key: str, items_in_group: list[dict]) -> bool:
@@ -4937,16 +4889,11 @@ async def check_posts():
                     # Check if this is a single item - post individually instead of grouped
                     if len(items_in_group) == 1:
                         item = items_in_group[0]
-                        # Always post individual items using source ID tracking
-                        # The tracking system will handle duplicates automatically
                         log.info("📝 Single item detected: '%s' - posting individually", item['title'])
-                        await post_individual_item(channel, item)
+                        await post_single_item_atomic(channel, item)
                     else:
-                        # Always post grouped items using source ID tracking
-                        # Generate group ID from items
-                        group_id = get_group_id_from_items(items_in_group)
                         log.info("📝 Multiple items (%d) in same group - posting grouped", len(items_in_group))
-                        await post_grouped_items(channel, group_id, items_in_group)
+                        await post_grouped_items_atomic(channel, items_in_group)
             else:
                 log.info("No recent changes and no current items - skipping processing")
                 # Skip processing entirely when there are no changes and no current items
