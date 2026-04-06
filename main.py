@@ -26,6 +26,9 @@ try:
 except ImportError:
     pass  # dotenv not installed, use system environment variables
 
+# Global database lock for race condition protection
+db_lock = asyncio.Lock()
+
 # ---------------- WIKIDOT SESSION ----------------
 session = requests.Session()
 
@@ -187,40 +190,9 @@ async def init_db() -> None:
 
 # ==================== SOURCE-BASED POSTING SYSTEM ====================
 
-async def execute_atomic(db_path: str, operation_callable, max_retries: int = 5):
-    """Execute atomic database operation with automatic retry on database locks."""
-    retry_delay = 0.3  # Start with 300ms
-    
-    for attempt in range(max_retries):
-        try:
-            async with aiosqlite.connect(db_path, timeout=30) as db:
-                await db.execute("BEGIN IMMEDIATE")
-                try:
-                    result = await operation_callable(db)
-                    await db.commit()
-                    return result
-                except Exception as e:
-                    await db.rollback()
-                    raise e
-                    
-        except aiosqlite.OperationalError as e:
-            if "database is locked" in str(e).lower() and attempt < max_retries - 1:
-                if attempt == 0:  # Only log first retry to avoid spam
-                    log.debug(f"Database locked, retrying in {retry_delay}s...")
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 3.0)  # Exponential backoff, max 3s
-                continue
-            else:
-                log.error(f"Database operation failed after {max_retries} attempts: {e}")
-                raise
-        except Exception as e:
-            log.error(f"Unexpected error in atomic operation: {e}")
-            raise
-
-
 async def get_existing_post(source_id: str) -> dict | None:
     """Get existing post record by source_id."""
-    async def operation(db):
+    async with aiosqlite.connect(DB) as db:
         cursor = await db.execute("""
             SELECT message_id, channel_id, post_type 
             FROM posts 
@@ -236,20 +208,17 @@ async def get_existing_post(source_id: str) -> dict | None:
                 "post_type": post_type
             }
         return None
-    
-    return await execute_atomic(DB, operation)
 
 
 async def save_post_record(source_id: str, message, post_type: str) -> None:
     """Save or update post record with atomic operation."""
-    async def operation(db):
+    async with aiosqlite.connect(DB) as db:
         await db.execute("""
             INSERT OR REPLACE INTO posts 
             (source_id, message_id, channel_id, post_type, last_updated) 
             VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
         """, (source_id, message.id, message.channel.id, post_type))
-    
-    await execute_atomic(DB, operation)
+        await db.commit()
 
 
 def extract_source_id_from_item(item: dict) -> str:
@@ -3475,60 +3444,70 @@ async def post_single_item_atomic(channel, item: dict) -> bool:
     """Post single item with atomic database operations and race condition protection."""
     source_id = extract_source_id_from_item(item)
     
-    async def posting_operation(db):
-        # Check if source_id exists in same transaction
-        cursor = await db.execute("""
-            SELECT message_id, channel_id 
-            FROM posts 
-            WHERE source_id = ?
-        """, (source_id,))
-        existing = await cursor.fetchone()
-        
-        if existing:
-            # Edit existing message
-            message_id, channel_id = existing
-            try:
-                channel_obj = channel.guild.get_channel(channel_id) if hasattr(channel, 'guild') else channel
-                if not channel_obj:
-                    raise discord.NotFound("Channel not found")
-                
-                message = await channel_obj.fetch_message(message_id)
-                embed, view = await create_pane_embed(item)
-                await message.edit(embed=embed, view=view)
-                
-                # Update timestamp
-                await db.execute("""
-                    UPDATE posts 
-                    SET last_updated = CURRENT_TIMESTAMP 
-                    WHERE source_id = ?
-                """, (source_id,))
-                
-                log.info(f"✅ Updated single item '{item['title']}' (Message ID: {message_id})")
-                return True
-                
-            except discord.NotFound:
-                # Message deleted, remove record and continue to create new
-                await db.execute("DELETE FROM posts WHERE source_id = ?", (source_id,))
-        
-        # Create new message
-        embed, view = await create_pane_embed(item)
-        message = await channel.send(embed=embed, view=view)
-        
-        # Save new record in same transaction
-        await db.execute("""
-            INSERT INTO posts 
-            (source_id, message_id, channel_id, post_type) 
-            VALUES (?, ?, ?, 'single')
-        """, (source_id, message.id, message.channel.id))
-        
-        log.info(f"✅ Created new single item '{item['title']}' (Message ID: {message.id})")
-        return True
-    
-    try:
-        return await execute_atomic(DB, posting_operation)
-    except Exception as e:
-        log.error(f"❌ Error in atomic single post for '{item.get('title', 'Unknown')}': {e}")
-        return False
+    # Use global database lock to prevent race conditions
+    async with db_lock:
+        try:
+            async with aiosqlite.connect(DB) as db:
+                # Start atomic transaction
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    # Check if source_id exists in same transaction
+                    cursor = await db.execute("""
+                        SELECT message_id, channel_id 
+                        FROM posts 
+                        WHERE source_id = ?
+                    """, (source_id,))
+                    existing = await cursor.fetchone()
+                    
+                    if existing:
+                        # Edit existing message
+                        message_id, channel_id = existing
+                        try:
+                            channel_obj = channel.guild.get_channel(channel_id) if hasattr(channel, 'guild') else channel
+                            if not channel_obj:
+                                raise discord.NotFound("Channel not found")
+                            
+                            message = await channel_obj.fetch_message(message_id)
+                            embed, view = await create_pane_embed(item)
+                            await message.edit(embed=embed, view=view)
+                            
+                            # Update timestamp
+                            await db.execute("""
+                                UPDATE posts 
+                                SET last_updated = CURRENT_TIMESTAMP 
+                                WHERE source_id = ?
+                            """, (source_id,))
+                            
+                            await db.commit()
+                            log.info(f"✅ Updated single item '{item['title']}' (Message ID: {message_id})")
+                            return True
+                            
+                        except discord.NotFound:
+                            # Message deleted, remove record and continue to create new
+                            await db.execute("DELETE FROM posts WHERE source_id = ?", (source_id,))
+                    
+                    # Create new message
+                    embed, view = await create_pane_embed(item)
+                    message = await channel.send(embed=embed, view=view)
+                    
+                    # Save new record in same transaction
+                    await db.execute("""
+                        INSERT INTO posts 
+                        (source_id, message_id, channel_id, post_type) 
+                        VALUES (?, ?, ?, 'single')
+                    """, (source_id, message.id, message.channel.id))
+                    
+                    await db.commit()
+                    log.info(f"✅ Created new single item '{item['title']}' (Message ID: {message.id})")
+                    return True
+                    
+                except Exception as e:
+                    await db.rollback()
+                    raise e
+                    
+        except Exception as e:
+            log.error(f"❌ Error in atomic single post for '{item.get('title', 'Unknown')}': {e}")
+            return False
 
 
 async def post_grouped_items_atomic(channel, items: list[dict]) -> bool:
@@ -3538,60 +3517,70 @@ async def post_grouped_items_atomic(channel, items: list[dict]) -> bool:
         
     source_id = extract_group_source_id(items)
     
-    async def posting_operation(db):
-        # Check if source_id exists in same transaction
-        cursor = await db.execute("""
-            SELECT message_id, channel_id 
-            FROM posts 
-            WHERE source_id = ?
-        """, (source_id,))
-        existing = await cursor.fetchone()
-        
-        if existing:
-            # Edit existing message
-            message_id, channel_id = existing
-            try:
-                channel_obj = channel.guild.get_channel(channel_id) if hasattr(channel, 'guild') else channel
-                if not channel_obj:
-                    raise discord.NotFound("Channel not found")
-                
-                message = await channel_obj.fetch_message(message_id)
-                embed, view = await create_grouped_embed(source_id, items)
-                await message.edit(embed=embed, view=view)
-                
-                # Update timestamp
-                await db.execute("""
-                    UPDATE posts 
-                    SET last_updated = CURRENT_TIMESTAMP 
-                    WHERE source_id = ?
-                """, (source_id,))
-                
-                log.info(f"✅ Updated group '{source_id}' (Message ID: {message_id})")
-                return True
-                
-            except discord.NotFound:
-                # Message deleted, remove record and continue to create new
-                await db.execute("DELETE FROM posts WHERE source_id = ?", (source_id,))
-        
-        # Create new message
-        embed, view = await create_grouped_embed(source_id, items)
-        message = await channel.send(embed=embed, view=view)
-        
-        # Save new record in same transaction
-        await db.execute("""
-            INSERT INTO posts 
-            (source_id, message_id, channel_id, post_type) 
-            VALUES (?, ?, ?, 'group')
-        """, (source_id, message.id, message.channel.id))
-        
-        log.info(f"✅ Created new group '{source_id}' (Message ID: {message.id})")
-        return True
-    
-    try:
-        return await execute_atomic(DB, posting_operation)
-    except Exception as e:
-        log.error(f"❌ Error in atomic group post for '{source_id}': {e}")
-        return False
+    # Use global database lock to prevent race conditions
+    async with db_lock:
+        try:
+            async with aiosqlite.connect(DB) as db:
+                # Start atomic transaction
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    # Check if source_id exists in same transaction
+                    cursor = await db.execute("""
+                        SELECT message_id, channel_id 
+                        FROM posts 
+                        WHERE source_id = ?
+                    """, (source_id,))
+                    existing = await cursor.fetchone()
+                    
+                    if existing:
+                        # Edit existing message
+                        message_id, channel_id = existing
+                        try:
+                            channel_obj = channel.guild.get_channel(channel_id) if hasattr(channel, 'guild') else channel
+                            if not channel_obj:
+                                raise discord.NotFound("Channel not found")
+                            
+                            message = await channel_obj.fetch_message(message_id)
+                            embed, view = await create_grouped_embed(source_id, items)
+                            await message.edit(embed=embed, view=view)
+                            
+                            # Update timestamp
+                            await db.execute("""
+                                UPDATE posts 
+                                SET last_updated = CURRENT_TIMESTAMP 
+                                WHERE source_id = ?
+                            """, (source_id,))
+                            
+                            await db.commit()
+                            log.info(f"✅ Updated group '{source_id}' (Message ID: {message_id})")
+                            return True
+                            
+                        except discord.NotFound:
+                            # Message deleted, remove record and continue to create new
+                            await db.execute("DELETE FROM posts WHERE source_id = ?", (source_id,))
+                    
+                    # Create new message
+                    embed, view = await create_grouped_embed(source_id, items)
+                    message = await channel.send(embed=embed, view=view)
+                    
+                    # Save new record in same transaction
+                    await db.execute("""
+                        INSERT INTO posts 
+                        (source_id, message_id, channel_id, post_type) 
+                        VALUES (?, ?, ?, 'group')
+                    """, (source_id, message.id, message.channel.id))
+                    
+                    await db.commit()
+                    log.info(f"✅ Created new group '{source_id}' (Message ID: {message.id})")
+                    return True
+                    
+                except Exception as e:
+                    await db.rollback()
+                    raise e
+                    
+        except Exception as e:
+            log.error(f"❌ Error in atomic group post for '{source_id}': {e}")
+            return False
 
 
 async def process_grouped_items(channel, group_key: str, items_in_group: list[dict]) -> bool:
