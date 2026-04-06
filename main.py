@@ -2682,72 +2682,73 @@ async def atomic_check_and_store_group(group_key: str, location: str, price: str
     content_hash = generate_group_content_hash(items)
     categories_with_hash = [f"hash:{content_hash}"] + categories
     
-    async with aiosqlite.connect(DB) as db:
-        # Use immediate lock for atomic operation
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            # Check if group exists
-            async with db.execute(
-                "SELECT group_key, item_titles, categories FROM grouped_posts WHERE group_key=?", 
-                (group_key,)
-            ) as cur:
-                existing_row = await cur.fetchone()
-            
-            if existing_row:
-                # Group exists - check if it changed
-                stored_titles = json.loads(existing_row[1]) if existing_row[1] else []
-                stored_categories = json.loads(existing_row[2]) if existing_row[2] else []
+    # Use global database lock to prevent race conditions
+    async with db_lock:
+        async with aiosqlite.connect(DB) as db:
+            # Use immediate lock for atomic operation
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                # Check if group exists
+                async with db.execute(
+                    "SELECT group_key, item_titles, categories FROM grouped_posts WHERE group_key=?", 
+                    (group_key,)
+                ) as cur:
+                    existing_row = await cur.fetchone()
                 
-                # Extract stored hash if present
-                stored_hash = None
-                for category in stored_categories:
-                    if category.startswith("hash:"):
-                        stored_hash = category[5:]  # Remove "hash:" prefix
-                        break
-                
-                # Check for changes
-                titles_changed = set(stored_titles) != set(item_titles)
-                hash_changed = stored_hash != content_hash
-                
-                if titles_changed or hash_changed:
-                    # Update existing group
+                if existing_row:
+                    # Group exists - check if it changed
+                    stored_titles = json.loads(existing_row[1]) if existing_row[1] else []
+                    stored_categories = json.loads(existing_row[2]) if existing_row[2] else []
+                    
+                    # Extract stored hash if present
+                    stored_hash = None
+                    for category in stored_categories:
+                        if category.startswith("hash:"):
+                            stored_hash = category[5:]  # Remove "hash:" prefix
+                            break
+                    
+                    # Check for changes
+                    titles_changed = set(stored_titles) != set(item_titles)
+                    hash_changed = stored_hash != content_hash
+                    
+                    if titles_changed or hash_changed:
+                        # Update existing group
+                        await db.execute("""
+                            UPDATE grouped_posts 
+                            SET item_titles=?, categories=?, discord_message_id=?, discord_channel_id=?, last_updated=datetime('now')
+                            WHERE group_key=?
+                        """, (
+                            json.dumps(item_titles), json.dumps(categories_with_hash),
+                            message_id, channel_id, group_key
+                        ))
+                        
+                        await db.commit()
+                        log.info("✅ Updated existing group %s: titles_changed=%s, hash_changed=%s", 
+                                group_key[:8], titles_changed, hash_changed)
+                        return True, "updated"
+                    else:
+                        # No changes needed
+                        await db.commit()
+                        log.debug("Group %s already exists and unchanged", group_key[:8])
+                        return True, "exists"
+                else:
+                    # New group - insert it
                     await db.execute("""
-                        UPDATE grouped_posts 
-                        SET item_titles=?, categories=?, discord_message_id=?, discord_channel_id=?, last_updated=datetime('now')
-                        WHERE group_key=?
+                        INSERT INTO grouped_posts 
+                        (group_key, location, price, item_titles, categories, discord_message_id, discord_channel_id, last_updated) 
+                        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
                     """, (
-                        json.dumps(item_titles), json.dumps(categories_with_hash),
-                        message_id, channel_id, group_key
+                        group_key, location, price, json.dumps(item_titles), json.dumps(categories_with_hash),
+                        message_id, channel_id
                     ))
                     
                     await db.commit()
-                    log.info("✅ Updated existing group %s: titles_changed=%s, hash_changed=%s", 
-                            group_key[:8], titles_changed, hash_changed)
-                    return True, "updated"
-                else:
-                    # No changes needed
-                    await db.commit()
-                    log.debug("Group %s already exists and unchanged", group_key[:8])
-                    return True, "exists"
-            else:
-                # New group - insert it
-                await db.execute("""
-                    INSERT INTO grouped_posts 
-                    (group_key, location, price, item_titles, categories, discord_message_id, discord_channel_id, last_updated) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                """, (
-                    group_key, location, price, json.dumps(item_titles), json.dumps(categories_with_hash),
-                    message_id, channel_id
-                ))
-                
-                await db.commit()
-                log.info("✅ Created new group %s with %d items", group_key[:8], len(items))
-                return True, "new"
-                
-        except Exception as e:
-            await db.rollback()
-            log.error("❌ Atomic group operation failed for key %s: %s", group_key[:8], e)
-            raise
+                    log.info("✅ Created new group %s with %d items", group_key[:8], len(items))
+                    return True, "new"
+            except Exception as e:
+                await db.rollback()
+                log.error("❌ Atomic group operation failed for key %s: %s", group_key[:8], e)
+                raise
 
 
 async def get_group_change_details(group_key: str, current_items: list[dict]) -> dict | None:
@@ -2868,22 +2869,24 @@ async def mark_group_posted(group_key: str, location: str, price: str, items: li
     item_titles = [item.get("title", "") for item in items]
     categories = list(set([categorize_item(item) for item in items]))  # Unique categories
     
-    async with aiosqlite.connect(DB) as db:
-        # Use immediate lock for atomic operation
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            await db.execute("""
-                INSERT OR REPLACE INTO grouped_posts 
-                (group_key, location, price, item_titles, categories, discord_message_id, discord_channel_id, last_updated) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-            """, (
-                group_key, location, price, json.dumps(item_titles), json.dumps(categories),
-                message_id, channel_id
-            ))
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+    # Use global database lock to prevent race conditions
+    async with db_lock:
+        async with aiosqlite.connect(DB) as db:
+            # Use immediate lock for atomic operation
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await db.execute("""
+                    INSERT OR REPLACE INTO grouped_posts 
+                    (group_key, location, price, item_titles, categories, discord_message_id, discord_channel_id, last_updated) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                """, (
+                    group_key, location, price, json.dumps(item_titles), json.dumps(categories),
+                    message_id, channel_id
+                ))
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
 
 
 async def update_group_discord_message_info(group_key: str, message_id: int, channel_id: int):
