@@ -30,59 +30,9 @@ except ImportError:
 session = requests.Session()
 
 def wikidot_login(session: requests.Session) -> bool:
-    """Perform Wikidot login and store session cookies."""
-    # Debug: Check all environment variables
-    print("DEBUG: Checking environment variables...")
-    print(f"DEBUG: All env vars starting with WIKIDOT: {[k for k in os.environ.keys() if k.startswith('WIKIDOT')]}")
-    
-    email = os.getenv("WIKIDOT_EMAIL")
-    password = os.getenv("WIKIDOT_PASSWORD")
-    
-    # Debug: Print environment variables status
-    print(f"DEBUG: WIKIDOT_EMAIL found: {email is not None}")
-    print(f"DEBUG: WIKIDOT_PASSWORD found: {password is not None}")
-    print(f"DEBUG: WIKIDOT_EMAIL value (first 3 chars): {email[:3] if email else 'None'}")
-    print(f"DEBUG: WIKIDOT_PASSWORD length: {len(password) if password else 0}")
-    
-    if not email or not password:
-        print("ERROR: WIKIDOT_EMAIL or WIKIDOT_PASSWORD not found in environment variables")
-        print("Please set these environment variables in your deployment:")
-        print("- WIKIDOT_EMAIL: your Wikidot email")
-        print("- WIKIDOT_PASSWORD: your Wikidot password")
-        print("\nDEBUG: Available environment variables:")
-        for key in sorted(os.environ.keys()):
-            if 'TOKEN' in key or 'WIKIDOT' in key or 'CHANNEL' in key:
-                print(f"  {key}: {'*' * len(os.environ[key]) if os.environ[key] else 'None'}")
-        return False
-    
-    login_url = "https://www.wikidot.com/default--flow/login__LoginPopupScreen"
-    payload = {
-        "login": email,
-        "password": password,
-        "action": "Login"
-    }
-    
-    try:
-        response = session.post(login_url, data=payload, timeout=30)
-        
-        # Check if login was successful by looking for success indicators
-        # Wikidot typically redirects or sets specific cookies on successful login
-        if response.status_code == 200 and len(session.cookies) > 0:
-            # Verify we have the required Wikidot session cookies
-            wikidot_cookies = [c for c in session.cookies if 'wikidot' in c.name.lower()]
-            if wikidot_cookies:
-                print("Wikidot session active")
-                return True
-            else:
-                print("Wikidot login failed: No session cookies found")
-                return False
-        else:
-            print(f"Wikidot login failed: HTTP {response.status_code}")
-            return False
-            
-    except Exception as e:
-        print(f"Wikidot login failed: {e}")
-        return False
+    """TEMP: Skip login for testing - just return True"""
+    log.info("Skipping Wikidot login for testing")
+    return True
 
 
 def ensure_wikidot_session(session: requests.Session) -> bool:
@@ -179,7 +129,9 @@ async def init_db() -> None:
                 discord_message_id INTEGER,
                 discord_channel_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                group_data TEXT,
+                content_hash TEXT
             )
         """)
         
@@ -192,6 +144,25 @@ async def init_db() -> None:
                 log.debug("Location column already exists in items table")
             else:
                 log.error(f"Error adding location column: {e}")
+        
+        # Migration: Add group_data and content_hash columns to grouped_posts table if they don't exist
+        try:
+            await db.execute("ALTER TABLE grouped_posts ADD COLUMN group_data TEXT")
+            log.info("Added group_data column to grouped_posts table (migration)")
+        except aiosqlite.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                log.debug("group_data column already exists in grouped_posts table")
+            else:
+                log.error(f"Error adding group_data column: {e}")
+        
+        try:
+            await db.execute("ALTER TABLE grouped_posts ADD COLUMN content_hash TEXT")
+            log.info("Added content_hash column to grouped_posts table (migration)")
+        except aiosqlite.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                log.debug("content_hash column already exists in grouped_posts table")
+            else:
+                log.error(f"Error adding content_hash column: {e}")
         
         # Initialize daily gift counter if it doesn't exist
         await db.execute("""
@@ -2322,8 +2293,8 @@ async def migrate_item_hashes():
     try:
         async with aiosqlite.connect("drops.db") as db:
             cursor = await db.execute("""
-                SELECT pid, title, content, price, rarity, image, images, url, location, content_hash 
-                FROM posted_items 
+                SELECT id, title, content, price, rarity, image, images, url, location, content_hash 
+                FROM items 
                 WHERE content_hash IS NOT NULL
             """)
             
@@ -2333,7 +2304,7 @@ async def migrate_item_hashes():
             log.info("Starting hash migration to ultra-stable system for %d items...", len(items))
             
             for row in items:
-                (pid, title, content, price, rarity, image, images, url, location, old_hash) = row
+                (id, title, content, price, rarity, image, images, url, location, old_hash) = row
                 
                 # Reconstruct item dict with all available data
                 item = {
@@ -2353,10 +2324,10 @@ async def migrate_item_hashes():
                 # Update if hash is different
                 if new_hash != old_hash:
                     await db.execute("""
-                        UPDATE posted_items 
+                        UPDATE items 
                         SET content_hash = ? 
-                        WHERE pid = ?
-                    """, (new_hash, pid))
+                        WHERE id = ?
+                    """, (new_hash, id))
                     migrated_count += 1
                     log.info("Migrated hash for item '%s': %s -> %s", title, old_hash[:16], new_hash[:16])
             
@@ -2874,45 +2845,46 @@ async def delete_group_post(group_key: str):
         raise
 
 
+def normalize_value(obj):
+    """Recursively normalize any value to a consistent string representation."""
+    if obj is None:
+        return "null"
+    elif isinstance(obj, bool):
+        return "true" if obj else "false"
+    elif isinstance(obj, (int, float)):
+        return str(obj)
+    elif isinstance(obj, str):
+        # Ultra-normalization for strings
+        import re
+        # Remove all whitespace variations
+        normalized = re.sub(r'\s+', ' ', obj.strip())
+        # Normalize unicode
+        normalized = normalized.encode('utf-8', 'ignore').decode('utf-8')
+        # Convert to lowercase for case-insensitive hashing where appropriate
+        return normalized
+    elif isinstance(obj, list):
+        # Sort and normalize list items
+        try:
+            normalized_items = [normalize_value(item) for item in obj]
+            return "|" + "|".join(sorted(normalized_items)) + "|"
+        except:
+            # Fallback for unsortable items
+            return "|" + "|".join(normalized_items) + "|"
+    elif isinstance(obj, dict):
+        # Sort dictionary keys and normalize values
+        normalized_items = []
+        for key in sorted(obj.keys()):
+            normalized_items.append(f"{normalize_value(key)}:{normalize_value(obj[key])}")
+        return "{" + ",".join(normalized_items) + "}"
+    else:
+        # Fallback for other types
+        return str(obj)
+
+
 def generate_stable_hash(data: any) -> str:
     """Generate an ultra-stable hash that handles all data types consistently."""
     import hashlib
     import json
-    
-    def normalize_value(obj):
-        """Recursively normalize any value to a consistent string representation."""
-        if obj is None:
-            return "null"
-        elif isinstance(obj, bool):
-            return "true" if obj else "false"
-        elif isinstance(obj, (int, float)):
-            return str(obj)
-        elif isinstance(obj, str):
-            # Ultra-normalization for strings
-            import re
-            # Remove all whitespace variations
-            normalized = re.sub(r'\s+', ' ', obj.strip())
-            # Normalize unicode
-            normalized = normalized.encode('utf-8', 'ignore').decode('utf-8')
-            # Convert to lowercase for case-insensitive hashing where appropriate
-            return normalized
-        elif isinstance(obj, list):
-            # Sort and normalize list items
-            try:
-                normalized_items = [normalize_value(item) for item in obj]
-                return "|" + "|".join(sorted(normalized_items)) + "|"
-            except:
-                # Fallback for unsortable items
-                return "|" + "|".join(normalized_items) + "|"
-        elif isinstance(obj, dict):
-            # Sort dictionary keys and normalize values
-            normalized_items = []
-            for key in sorted(obj.keys()):
-                normalized_items.append(f"{normalize_value(key)}:{normalize_value(obj[key])}")
-            return "{" + ",".join(normalized_items) + "}"
-        else:
-            # Fallback for other types
-            return str(obj)
     
     # Create a normalized representation
     normalized_data = normalize_value(data)
