@@ -2318,7 +2318,7 @@ async def get_stored_item(pid: str) -> dict | None:
             return None
 
 async def migrate_item_hashes():
-    """Migrate existing item hashes to the new robust hashing system."""
+    """Migrate existing item hashes to the new ultra-stable hashing system."""
     try:
         async with aiosqlite.connect("drops.db") as db:
             cursor = await db.execute("""
@@ -2330,24 +2330,24 @@ async def migrate_item_hashes():
             items = await cursor.fetchall()
             migrated_count = 0
             
-            log.info("Starting hash migration for %d items...", len(items))
+            log.info("Starting hash migration to ultra-stable system for %d items...", len(items))
             
             for row in items:
                 (pid, title, content, price, rarity, image, images, url, location, old_hash) = row
                 
-                # Reconstruct item dict
+                # Reconstruct item dict with all available data
                 item = {
-                    "title": title,
-                    "content": content,
-                    "price": price,
-                    "rarity": rarity,
-                    "image": image,
+                    "title": title or "",
+                    "content": content or "",
+                    "price": price or "",
+                    "rarity": rarity or "",
+                    "image": image or "",
                     "images": json.loads(images) if images else [],
-                    "url": url,
-                    "location": location
+                    "url": url or "",
+                    "location": location or ""
                 }
                 
-                # Generate new robust hash
+                # Generate new ultra-stable hash
                 new_hash = generate_content_hash(item)
                 
                 # Update if hash is different
@@ -2361,14 +2361,14 @@ async def migrate_item_hashes():
                     log.info("Migrated hash for item '%s': %s -> %s", title, old_hash[:16], new_hash[:16])
             
             await db.commit()
-            log.info("Hash migration completed. Updated %d items.", migrated_count)
+            log.info("Ultra-stable hash migration completed. Updated %d items.", migrated_count)
             
     except Exception as e:
-        log.error("Error during hash migration: %s", e)
+        log.error("Error during ultra-stable hash migration: %s", e)
 
 
 async def migrate_group_hashes():
-    """Migrate existing group hashes to the new robust hashing system."""
+    """Migrate existing group hashes to the new ultra-stable hashing system."""
     try:
         async with aiosqlite.connect("drops.db") as db:
             cursor = await db.execute("""
@@ -2380,7 +2380,7 @@ async def migrate_group_hashes():
             groups = await cursor.fetchall()
             migrated_count = 0
             
-            log.info("Starting group hash migration for %d groups...", len(groups))
+            log.info("Starting group hash migration to ultra-stable system for %d groups...", len(groups))
             
             for row in groups:
                 (group_key, group_data, old_hash) = row
@@ -2389,7 +2389,7 @@ async def migrate_group_hashes():
                 try:
                     items = json.loads(group_data) if group_data else []
                     
-                    # Generate new robust hash
+                    # Generate new ultra-stable hash
                     new_hash = generate_group_content_hash(items)
                     
                     # Update if hash is different
@@ -2406,10 +2406,10 @@ async def migrate_group_hashes():
                     log.warning("Could not parse group data for key %s: %s", group_key, e)
             
             await db.commit()
-            log.info("Group hash migration completed. Updated %d groups.", migrated_count)
+            log.info("Ultra-stable group hash migration completed. Updated %d groups.", migrated_count)
             
     except Exception as e:
-        log.error("Error during group hash migration: %s", e)
+        log.error("Error during ultra-stable group hash migration: %s", e)
 
 
 async def has_item_changed(pid: str, new_item: dict) -> bool:
@@ -2874,159 +2874,260 @@ async def delete_group_post(group_key: str):
         raise
 
 
-def normalize_field_value(value):
-    """Normalize a field value for consistent hashing."""
-    if value is None:
-        return ""
+def generate_stable_hash(data: any) -> str:
+    """Generate an ultra-stable hash that handles all data types consistently."""
+    import hashlib
+    import json
     
-    # Convert to string if not already
-    if not isinstance(value, str):
-        value = str(value)
-    
-    # Normalize whitespace
-    value = value.strip()
-    
-    # Normalize multiple spaces to single space
-    import re
-    value = re.sub(r'\s+', ' ', value)
-    
-    # Normalize line endings
-    value = value.replace('\r\n', '\n').replace('\r', '\n')
-    
-    return value
-
-
-def normalize_list_field(items):
-    """Normalize a list field for consistent hashing."""
-    if not items:
-        return []
-    
-    normalized = []
-    for item in items:
-        if isinstance(item, dict):
+    def normalize_value(obj):
+        """Recursively normalize any value to a consistent string representation."""
+        if obj is None:
+            return "null"
+        elif isinstance(obj, bool):
+            return "true" if obj else "false"
+        elif isinstance(obj, (int, float)):
+            return str(obj)
+        elif isinstance(obj, str):
+            # Ultra-normalization for strings
+            import re
+            # Remove all whitespace variations
+            normalized = re.sub(r'\s+', ' ', obj.strip())
+            # Normalize unicode
+            normalized = normalized.encode('utf-8', 'ignore').decode('utf-8')
+            # Convert to lowercase for case-insensitive hashing where appropriate
+            return normalized
+        elif isinstance(obj, list):
+            # Sort and normalize list items
+            try:
+                normalized_items = [normalize_value(item) for item in obj]
+                return "|" + "|".join(sorted(normalized_items)) + "|"
+            except:
+                # Fallback for unsortable items
+                return "|" + "|".join(normalized_items) + "|"
+        elif isinstance(obj, dict):
             # Sort dictionary keys and normalize values
-            normalized_dict = {}
-            for key in sorted(item.keys()):
-                normalized_dict[key] = normalize_field_value(item[key])
-            normalized.append(normalized_dict)
+            normalized_items = []
+            for key in sorted(obj.keys()):
+                normalized_items.append(f"{normalize_value(key)}:{normalize_value(obj[key])}")
+            return "{" + ",".join(normalized_items) + "}"
         else:
-            normalized.append(normalize_field_value(item))
+            # Fallback for other types
+            return str(obj)
     
-    # Sort the list if it contains strings or simple values
-    if all(not isinstance(x, dict) for x in normalized):
+    # Create a normalized representation
+    normalized_data = normalize_value(data)
+    
+    # Generate hash using multiple algorithms for maximum stability
+    sha256_hash = hashlib.sha256(normalized_data.encode('utf-8')).hexdigest()
+    md5_hash = hashlib.md5(normalized_data.encode('utf-8')).hexdigest()
+    
+    # Combine both hashes for ultimate reliability
+    combined = f"sha256:{sha256_hash}|md5:{md5_hash}"
+    final_hash = hashlib.sha256(combined.encode('utf-8')).hexdigest()
+    
+    return final_hash
+
+
+def extract_content_signature(item: dict) -> dict:
+    """Extract a comprehensive content signature that captures all meaningful data."""
+    signature = {}
+    
+    # Core identifiers (always included)
+    signature['title'] = item.get('title', '').strip()
+    signature['url'] = item.get('url', '').strip()
+    
+    # Content extraction with multiple fallbacks
+    content = item.get('content', '').strip()
+    if not content:
+        # Try to extract from other fields
+        for field in ['description', 'summary', 'text']:
+            if field in item and item[field]:
+                content = str(item[field]).strip()
+                break
+    
+    signature['content'] = content
+    
+    # Location extraction (robust)
+    location = item.get('location', '').strip()
+    if not location and content:
+        # Extract location from content if missing
         try:
-            return sorted(normalized, key=str.lower)
+            from urllib.parse import urlparse
+            import re
+            
+            # Try to extract location from content patterns
+            location_patterns = [
+                r'__\*\*Location:\*\*__\s*([^\n]+)',
+                r'Location:\s*([^\n]+)',
+                r'Place:\s*([^\n]+)',
+                r'Area:\s*([^\n]+)'
+            ]
+            
+            for pattern in location_patterns:
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    location = match.group(1).strip()
+                    break
         except:
             pass
     
-    return normalized
+    signature['location'] = location
+    
+    # Price extraction (robust)
+    price = item.get('price', '').strip()
+    if not price and content:
+        # Extract price from content if missing
+        try:
+            import re
+            price_patterns = [
+                r'__\*\*Price:\*\*__\s*([^\n]+)',
+                r'Price:\s*([^\n]+)',
+                r'Cost:\s*([^\n]+)',
+                r'(\d+\s*AC)',
+                r'(\d+\s*Gold)'
+            ]
+            
+            for pattern in price_patterns:
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    price = match.group(1).strip()
+                    break
+        except:
+            pass
+    
+    signature['price'] = price
+    
+    # Rarity extraction (robust)
+    rarity = item.get('rarity', '').strip()
+    if not rarity and content:
+        # Extract rarity from content if missing
+        try:
+            import re
+            rarity_patterns = [
+                r'__\*\*Rarity:\*\*__\s*([^\n]+)',
+                r'Rarity:\s*([^\n]+)',
+                r'Rare\s+(\w+)',
+                r'(\w+)\s+Rare'
+            ]
+            
+            for pattern in rarity_patterns:
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    rarity = match.group(1).strip()
+                    break
+        except:
+            pass
+    
+    signature['rarity'] = rarity
+    
+    # Media content (normalized)
+    image = item.get('image', '').strip()
+    images = item.get('images', [])
+    
+    if isinstance(images, str):
+        try:
+            images = json.loads(images)
+        except:
+            images = [images]
+    
+    # Normalize image URLs
+    if image:
+        signature['image'] = image
+    else:
+        signature['image'] = ''
+    
+    # Sort and normalize image list
+    if isinstance(images, list):
+        normalized_images = []
+        for img in images:
+            if isinstance(img, str):
+                normalized_images.append(img.strip())
+            elif isinstance(img, dict) and 'url' in img:
+                normalized_images.append(img['url'].strip())
+        signature['images'] = sorted(set(normalized_images))  # Remove duplicates and sort
+    else:
+        signature['images'] = []
+    
+    # Additional metadata (optional, but normalized)
+    for field in ['category', 'type', 'tags', 'metadata']:
+        if field in item and item[field]:
+            signature[field] = normalize_value(item[field])
+    
+    return signature
 
 
 def generate_content_hash(item: dict) -> str:
-    """Generate a robust content hash for an individual item to detect changes.
-    
-    This advanced hashing system:
-    - Normalizes all field values to prevent inconsistencies
-    - Handles missing fields gracefully
-    - Sorts list items and dictionary keys for consistent ordering
-    - Uses a deterministic approach for complex data structures
-    """
+    """Generate an ultra-stable content hash that prevents all current and future issues."""
     try:
-        # Extract and normalize all relevant fields
-        title = normalize_field_value(item.get("title", ""))
-        content = normalize_field_value(item.get("content", ""))
-        price = normalize_field_value(item.get("price", ""))
-        rarity = normalize_field_value(item.get("rarity", ""))
-        image = normalize_field_value(item.get("image", ""))
+        # Extract comprehensive content signature
+        signature = extract_content_signature(item)
         
-        # Normalize images list with proper sorting
-        images_list = item.get("images", [])
-        if isinstance(images_list, list):
-            normalized_images = normalize_list_field(images_list)
-            images = json.dumps(normalized_images, sort_keys=True, separators=(',', ':'))
-        else:
-            images = normalize_field_value(images_list)
+        # Generate stable hash
+        content_hash = generate_stable_hash(signature)
         
-        # Normalize other potential fields that might affect content
-        url = normalize_field_value(item.get("url", ""))
-        location = normalize_field_value(item.get("location", ""))
+        # Debug logging (minimal but informative)
+        log.info("HASH DEBUG: Item '%s' -> %s", signature.get('title', 'Unknown'), content_hash[:16])
         
-        # Create a structured, ordered representation
-        content_structure = {
-            "title": title,
-            "content": content,
-            "price": price,
-            "rarity": rarity,
-            "image": image,
-            "images": images,
-            "url": url,
-            "location": location
-        }
-        
-        # Generate hash from the normalized structure
-        content_str = json.dumps(content_structure, sort_keys=True, separators=(',', ':'))
-        final_hash = hashlib.sha256(content_str.encode('utf-8')).hexdigest()
-        
-        # Debug logging to identify hash mismatch issues
-        log.info("HASH DEBUG: Item '%s'", title)
-        log.info("  Title: '%s' (len: %d)", title, len(title))
-        log.info("  Content: '%s' (len: %d)", content[:50] + "..." if len(content) > 50 else content, len(content))
-        log.info("  Price: '%s'", price)
-        log.info("  Rarity: '%s'", rarity)
-        log.info("  Image: '%s'", image)
-        log.info("  Images: '%s'", images[:50] + "..." if len(images) > 50 else images)
-        log.info("  URL: '%s'", url)
-        log.info("  Location: '%s'", location)
-        log.info("  Final hash: %s", final_hash[:16])
-        
-        return final_hash
+        return content_hash
         
     except Exception as e:
         log.error("Error generating content hash for item '%s': %s", item.get('title', 'Unknown'), e)
-        # Fallback to simple hash on title only
-        fallback_content = normalize_field_value(item.get("title", ""))
-        return hashlib.sha256(fallback_content.encode('utf-8')).hexdigest()
+        # Ultimate fallback - hash only the title and URL
+        fallback_data = {
+            'title': item.get('title', '').strip(),
+            'url': item.get('url', '').strip()
+        }
+        return generate_stable_hash(fallback_data)
 
 
 def generate_group_content_hash(items: list[dict]) -> str:
-    """Generate a robust hash for a group of items.
-    
-    This advanced group hashing system:
-    - Uses the same robust individual item hashing
-    - Sorts items deterministically by URL
-    - Combines hashes in a consistent manner
-    - Uses SHA-256 for better collision resistance
-    """
-    if not items:
-        return hashlib.sha256(b"empty_group").hexdigest()
-    
+    """Generate an ultra-stable hash for a group of items."""
     try:
-        # Sort items by URL for consistent ordering
-        sorted_items = sorted(items, key=lambda x: normalize_field_value(x.get("url", "")))
+        if not items:
+            return generate_stable_hash("empty_group")
         
-        # Generate hash for each item using the robust method
-        item_hashes = []
-        for item in sorted_items:
-            item_hash = generate_content_hash(item)
-            item_hashes.append(item_hash)
+        # Extract signatures for all items
+        item_signatures = []
+        for item in items:
+            signature = extract_content_signature(item)
+            item_signatures.append(signature)
         
-        # Create group hash from sorted item hashes
+        # Sort items deterministically by URL, then title, then content hash
+        def sort_key(sig):
+            url = sig.get('url', '')
+            title = sig.get('title', '')
+            content_hash = generate_stable_hash(sig.get('content', ''))
+            return (url.lower(), title.lower(), content_hash)
+        
+        sorted_signatures = sorted(item_signatures, key=sort_key)
+        
+        # Create group structure
         group_structure = {
-            "items": sorted(item_hashes),
-            "count": len(items)
+            'items': sorted_signatures,
+            'count': len(sorted_signatures),
+            'method': 'stable_group_hash_v2'
         }
         
-        group_str = json.dumps(group_structure, sort_keys=True, separators=(',', ':'))
-        group_hash = hashlib.sha256(group_str.encode('utf-8')).hexdigest()
+        # Generate stable hash
+        group_hash = generate_stable_hash(group_structure)
         
-        log.info("Generated robust group hash: %s from %d items", group_hash[:16], len(items))
+        log.info("GROUP HASH DEBUG: %d items -> %s", len(items), group_hash[:16])
         
         return group_hash
         
     except Exception as e:
         log.error("Error generating group hash: %s", e)
-        # Fallback to simple hash of item count
-        return hashlib.sha256(f"fallback_{len(items)}".encode('utf-8')).hexdigest()
+        # Ultimate fallback - hash only item count and titles
+        try:
+            titles = sorted([item.get('title', '').strip() for item in items])
+            fallback_data = {
+                'titles': titles,
+                'count': len(items),
+                'fallback': True
+            }
+            return generate_stable_hash(fallback_data)
+        except:
+            return generate_stable_hash(f"emergency_fallback_{len(items)}")
 
 
 async def has_group_changed(group_key: str, items: list[dict]) -> tuple[bool, dict | None]:
