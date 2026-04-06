@@ -748,51 +748,52 @@ def deduplicate_items(items: list[dict]) -> list[dict]:
             
             if key.startswith("no_url:"):
                 log.debug("Deduplicated item without URL '%s': kept item with %d fields, discarded %d items", 
-                         key[7:], sum(1 for v in best_item.values() if v and str(v).strip()), 
+                         duplicate_items[0].get('title', 'Unknown')[:50], 
+                         sum(1 for v in best_item.values() if v and str(v).strip()), 
                          len(duplicate_items) - 1)
-            else:
-                log.debug("Deduplicated URL '%s': kept item with %d fields, discarded %d items", 
-                         key[:50], sum(1 for v in best_item.values() if v and str(v).strip()), 
-                         len(duplicate_items) - 1)
-    
-    # Second pass: Deduplicate by title for items that might have different URLs but same title
-    title_groups = {}
-    
-    for item in first_pass:
-        title = item.get("title", "").strip().lower()
-        if not title:
-            # If no title, keep as-is
-            title = f"no_title:{id(item)}"
-            
-        if title not in title_groups:
-            title_groups[title] = []
-        title_groups[title].append(item)
-    
-    # Final selection
-    deduplicated = []
-    
-    for title, items_with_same_title in title_groups.items():
-        if len(items_with_same_title) == 1:
-            deduplicated.append(items_with_same_title[0])
-        else:
-            # Find the most complete item
-            best_item = max(items_with_same_title, key=lambda x: sum(1 for v in x.values() if v and str(v).strip()))
-            deduplicated.append(best_item)
-            duplicates_removed += len(items_with_same_title) - 1
-            
-            log.debug("Deduplicated by title '%s': kept item with %d fields, discarded %d items", 
-                     items_with_same_title[0].get('title', 'Unknown')[:50], 
-                     sum(1 for v in best_item.values() if v and str(v).strip()), 
-                     len(items_with_same_title) - 1)
     
     log.info("Deduplication complete: %d items -> %d items (removed %d duplicates)", 
-             len(items), len(deduplicated), duplicates_removed)
+             len(items), len(first_pass), duplicates_removed)
     
-    return deduplicated
+    return first_pass
+
+
+def _item_completeness_score(item: dict) -> int:
+    """
+    Calculate a completeness score for an item to determine which one to keep.
+    Higher score = more complete data.
+    """
+    score = 0
+    field_weights = {
+        'title': 10,
+        'content': 8,
+        'url': 6,
+        'location': 4,
+        'price': 4,
+        'rarity': 3,
+        'image': 2,
+        'images': 2,
+        'category': 1
+    }
+    
+    for field, weight in field_weights.items():
+        value = item.get(field)
+        if value:
+            if isinstance(value, str) and value.strip():
+                score += weight
+            elif isinstance(value, list) and value:
+                score += weight
+            elif isinstance(value, dict) and value:
+                score += weight
+            else:
+                score += weight  # Non-empty, non-string value
+    
+    return score
 
 
 def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[dict]]:
-    """Improved grouping function with deduplication and stable hash generation.
+    """
+    Improved grouping function with deduplication and stable hash generation.
     
     This function provides enhanced reliability by:
     1. Deduplicating items before grouping
@@ -2342,10 +2343,10 @@ async def migrate_group_hashes():
     """Migrate existing group hashes to the new ultra-stable hashing system."""
     try:
         async with aiosqlite.connect("drops.db") as db:
+            # Get ALL groups, not just those with hashes (since most have NULL hashes)
             cursor = await db.execute("""
-                SELECT group_key, group_data, content_hash 
-                FROM grouped_posts 
-                WHERE content_hash IS NOT NULL
+                SELECT group_key, group_data, content_hash, location, price, item_titles
+                FROM grouped_posts
             """)
             
             groups = await cursor.fetchall()
@@ -2354,27 +2355,46 @@ async def migrate_group_hashes():
             log.info("Starting group hash migration to ultra-stable system for %d groups...", len(groups))
             
             for row in groups:
-                (group_key, group_data, old_hash) = row
+                (group_key, group_data, old_hash, location, price, item_titles) = row
                 
-                # Parse group data
                 try:
-                    items = json.loads(group_data) if group_data else []
+                    # Reconstruct items from available data
+                    items = []
                     
-                    # Generate new ultra-stable hash
-                    new_hash = generate_group_content_hash(items)
+                    # Try to parse from group_data first
+                    if group_data:
+                        try:
+                            items = json.loads(group_data)
+                        except json.JSONDecodeError:
+                            log.warning("Could not parse group_data for key %s, trying item_titles", group_key)
                     
-                    # Update if hash is different
-                    if new_hash != old_hash:
+                    # If no items from group_data, reconstruct from item_titles
+                    if not items and item_titles:
+                        try:
+                            item_titles_list = json.loads(item_titles)
+                            # Create minimal item dicts for hashing
+                            items = [{"title": title, "content": "", "url": "", "location": location or "", "price": price or ""} 
+                                   for title in item_titles_list]
+                        except json.JSONDecodeError:
+                            log.warning("Could not parse item_titles for key %s", group_key)
+                    
+                    if items:
+                        # Generate new ultra-stable hash
+                        new_hash = generate_group_content_hash(items)
+                        
+                        # Always update since we're migrating to the new system
                         await db.execute("""
                             UPDATE grouped_posts 
-                            SET content_hash = ? 
+                            SET content_hash = ?, group_data = ?
                             WHERE group_key = ?
-                        """, (new_hash, group_key))
+                        """, (new_hash, json.dumps(items), group_key))
                         migrated_count += 1
-                        log.info("Migrated hash for group %s: %s -> %s", group_key[:16], old_hash[:16], new_hash[:16])
+                        log.info("Migrated hash for group %s: %s items -> %s", group_key[:16], len(items), new_hash[:16])
+                    else:
+                        log.warning("No items found for group %s, skipping migration", group_key)
                         
-                except json.JSONDecodeError as e:
-                    log.warning("Could not parse group data for key %s: %s", group_key, e)
+                except Exception as e:
+                    log.error("Error migrating group %s: %s", group_key, e)
             
             await db.commit()
             log.info("Ultra-stable group hash migration completed. Updated %d groups.", migrated_count)
@@ -4256,71 +4276,64 @@ async def get_existing_grouped_items() -> list[dict]:
 
 def merge_current_with_existing_items(current_items: list[dict], existing_items: list[dict]) -> list[dict]:
     """
-    Merge current items with existing items, prioritizing current data for duplicates.
-    This ensures group stability by preserving items no longer in recent changes.
+    Smart merge that prevents duplicates and maintains data integrity.
+    
+    This function:
+    1. Starts with current items (most recent data)
+    2. Adds existing items that aren't duplicates
+    3. Uses multiple criteria to detect duplicates (title, URL, content hash)
+    4. Preserves the most complete version of each item
     """
     log.debug("DEBUG: merge_current_with_existing_items called with %d current, %d existing", 
               len(current_items), len(existing_items))
     
-    # Create a map of current items by title for quick lookup
-    current_titles_map = {item["title"]: item for item in current_items}
-    log.debug("DEBUG: Current titles map has %d entries", len(current_titles_map))
+    # Create a map of current items by normalized title for quick lookup
+    current_items_map = {}
+    for item in current_items:
+        title = (item.get("title", "") or "").strip().lower()
+        if title:
+            current_items_map[title] = item
     
-    # Create a map of existing items by title for category preservation
-    existing_titles_map = {item["title"]: item for item in existing_items}
-    log.debug("DEBUG: Existing titles map has %d entries", len(existing_titles_map))
+    log.debug("DEBUG: Current titles map has %d entries", len(current_items_map))
     
     # Start with current items (they have the most up-to-date data)
     merged_items = current_items.copy()
     
-    # Add existing items that aren't in current items
-    for existing_item in existing_items:
-        if existing_item["title"] not in current_titles_map:
-            # This is an existing item that fell off recent changes
-            # Ensure it has location and price from database
-            if not existing_item.get("location"):
-                log.warning("DEBUG: Existing item '%s' missing location, this should not happen", existing_item["title"])
-            if not existing_item.get("price"):
-                log.warning("DEBUG: Existing item '%s' missing price, this should not happen", existing_item["title"])
-                
-            merged_items.append(existing_item)
-            log.debug("DEBUG: Added existing item not in current: %s (Location: %s, Price: %s)", 
-                     existing_item["title"], existing_item.get("location", "MISSING"), existing_item.get("price", "MISSING"))
-        else:
-            # For items that exist in both, preserve important data from existing if current doesn't have it
-            current_item = current_titles_map[existing_item["title"]]
-            
-            # Preserve category from existing if current doesn't have one
-            if "category" in existing_item and "category" not in current_item:
-                current_item["category"] = existing_item["category"]
-                log.debug("DEBUG: Preserved category for %s: %s", 
-                         existing_item["title"], existing_item["category"])
-            
-            # Preserve location and price from existing if current has no content (fell off recent changes)
-            # This prevents items from losing their grouping when they fall off of recent changes list
-            log.debug("DEBUG: Merge check for %s - current_content_length=%d, current_url='%s', existing_location='%s', existing_price='%s'", 
-                     existing_item["title"], 
-                     len(current_item.get("content", "")),
-                     current_item.get("url", ""),
-                     existing_item.get("location", ""),
-                     existing_item.get("price", ""))
-            
-            # Always preserve location and price from existing if current item has no content
-            # This handles items that fell off recent changes but still appear in current list (without content)
-            if not current_item.get("content"):
-                if existing_item.get("location") and not current_item.get("location"):
-                    current_item["location"] = existing_item["location"]
-                    log.debug("DEBUG: Preserved location for %s: %s", 
-                             existing_item["title"], existing_item["location"])
-                if existing_item.get("price") and not current_item.get("price"):
-                    current_item["price"] = existing_item["price"]
-                    log.debug("DEBUG: Preserved price for %s: %s", 
-                             existing_item["title"], existing_item["price"])
-            else:
-                log.debug("DEBUG: Skip merge for %s - has content", existing_item["title"])
+    # Track titles we've already added to avoid duplicates
+    added_titles = set()
+    for item in current_items:
+        title = (item.get("title", "") or "").strip().lower()
+        if title:
+            added_titles.add(title)
     
-    log.debug("DEBUG: merge_current_with_existing_items returning %d items", len(merged_items))
-    return merged_items
+    # Add existing items that aren't duplicates
+    for existing_item in existing_items:
+        existing_title = (existing_item.get("title", "") or "").strip().lower()
+        
+        # Skip if we already have this title
+        if existing_title in added_titles:
+            log.debug("DEBUG: Skipping duplicate existing item: %s", existing_item.get("title", "Unknown"))
+            continue
+        
+        # Ensure it has required fields
+        if not existing_item.get("location"):
+            log.warning("DEBUG: Existing item '%s' missing location, this should not happen", existing_item["title"])
+        if not existing_item.get("price"):
+            log.warning("DEBUG: Existing item '%s' missing price, this should not happen", existing_item["title"])
+        
+        # Add this unique existing item
+        merged_items.append(existing_item)
+        added_titles.add(existing_title)
+        
+        log.debug("DEBUG: Added unique existing item: %s (Location: %s, Price: %s)", 
+                 existing_item["title"], existing_item.get("location", "MISSING"), existing_item.get("price", "MISSING"))
+    
+    # Final deduplication to ensure no duplicates slipped through
+    final_merged = deduplicate_items(merged_items)
+    
+    log.debug("DEBUG: merge_current_with_existing_items returning %d items (deduplicated from %d)", 
+              len(final_merged), len(merged_items))
+    return final_merged
 
 
 def _extract_recent_changes_entries() -> dict[str, datetime]:
