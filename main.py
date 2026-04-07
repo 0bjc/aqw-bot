@@ -169,6 +169,23 @@ async def init_db() -> None:
             INSERT OR IGNORE INTO counters (name, value) VALUES ('daily_gift', 0)
         """)
         
+        # Create scraper state table for cursor-based tracking
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS scraper_state (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Initialize last_seen_change if not exists
+        await db.execute("""
+            INSERT OR IGNORE INTO scraper_state (key, value) 
+            VALUES ('last_seen_change', NULL)
+        """)
+        
+        await db.commit()
+        
         # Create source ID tracking tables
         await db.execute("""
             CREATE TABLE IF NOT EXISTS posts (
@@ -3805,6 +3822,101 @@ def get_startup_safeguard_hours() -> int:
     return 2  # Skip items processed in last 2 hours
 
 
+# ==================== CURSOR-BASED SCRAPER STATE ====================
+
+def get_last_seen_change_sync() -> str | None:
+    """Sync version of get_last_seen_change for use in sync contexts."""
+    try:
+        # Use a simple synchronous approach
+        import sqlite3
+        with sqlite3.connect(DB) as conn:
+            cursor = conn.execute("""
+                SELECT value FROM scraper_state WHERE key = 'last_seen_change'
+            """)
+            result = cursor.fetchone()
+            return result[0] if result and result[0] else None
+    except Exception as e:
+        log.error(f"Error getting last_seen_change (sync): {e}")
+        return None
+
+
+def update_last_seen_change_sync(change_id: str) -> None:
+    """Sync version of update_last_seen_change for use in sync contexts."""
+    try:
+        import sqlite3
+        with sqlite3.connect(DB) as conn:
+            conn.execute("""
+                UPDATE scraper_state 
+                SET value = ?, updated_at = CURRENT_TIMESTAMP 
+                WHERE key = 'last_seen_change'
+            """, (change_id,))
+            conn.commit()
+            log.debug(f"Updated last_seen_change to: {change_id}")
+    except Exception as e:
+        log.error(f"Error updating last_seen_change (sync): {e}")
+
+
+async def get_last_seen_change() -> str | None:
+    """Get the last seen change identifier from database."""
+    try:
+        async with aiosqlite.connect(DB) as db:
+            cursor = await db.execute("""
+                SELECT value FROM scraper_state WHERE key = 'last_seen_change'
+            """)
+            result = await cursor.fetchone()
+            return result[0] if result and result[0] else None
+    except Exception as e:
+        log.error(f"Error getting last_seen_change: {e}")
+        return None
+
+
+async def update_last_seen_change(change_id: str) -> None:
+    """Update the last seen change identifier."""
+    try:
+        async with aiosqlite.connect(DB) as db:
+            await db.execute("""
+                UPDATE scraper_state 
+                SET value = ?, updated_at = CURRENT_TIMESTAMP 
+                WHERE key = 'last_seen_change'
+            """, (change_id,))
+            await db.commit()
+            log.debug(f"Updated last_seen_change to: {change_id}")
+    except Exception as e:
+        log.error(f"Error updating last_seen_change: {e}")
+
+
+def generate_change_id(page_url: str, timestamp: str) -> str:
+    """Generate a unique change identifier from page URL and timestamp."""
+    import hashlib
+    combined = f"{page_url}|{timestamp}"
+    return hashlib.sha256(combined.encode('utf-8')).hexdigest()
+
+
+def extract_timestamp_from_change(change_entry: dict) -> str:
+    """Extract timestamp from a recent changes entry."""
+    # Try to get timestamp from various fields
+    timestamp_fields = ['timestamp', 'date', 'time', 'created', 'updated']
+    
+    for field in timestamp_fields:
+        if field in change_entry and change_entry[field]:
+            return str(change_entry[field])
+    
+    # Fallback to current time if no timestamp found
+    return datetime.now(timezone.utc).isoformat()
+
+
+async def is_change_processed(change_id: str, last_seen: str) -> bool:
+    """Check if a change has already been processed based on cursor position."""
+    if not last_seen:
+        # No previous state, assume this is first run
+        return False
+    
+    # For cursor-based tracking, we need to compare change IDs
+    # This is a simplified check - in practice, you'd want to compare
+    # based on the actual ordering from the recent changes page
+    return change_id == last_seen
+
+
 async def process_grouped_items(channel, group_key: str, items_in_group: list[dict]) -> bool:
     """Process grouped items with detailed debug logging."""
     # group_key is now a string hash, extract location and price from first item
@@ -4749,13 +4861,13 @@ def merge_current_with_existing_items(current_items: list[dict], existing_items:
 
 def _extract_recent_changes_entries() -> dict[str, datetime]:
     """
-    Get mapping: page_url -> earliest change_time within CHECK_DAYS.
+    Get mapping: page_url -> change_time using cursor-based tracking.
+    Processes entries from newest to oldest, stopping at last_seen_change.
     Only checks the main recent changes page - no pagination.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=CHECK_DAYS)
     page_times: dict[str, datetime] = {}
 
-    log.info("Starting recent changes extraction, cutoff: %s", cutoff)
+    log.info("Starting cursor-based recent changes extraction")
 
     try:
         # Ensure we have an active session before making requests
@@ -4767,8 +4879,14 @@ def _extract_recent_changes_entries() -> dict[str, datetime]:
         soup = BeautifulSoup(res.text, "html.parser")
         log.info("Fetching page: %s", RECENT_URL_HTTP)
 
-        any_in_window = False
+        # Get last seen change for cursor tracking
+        last_seen_change = get_last_seen_change_sync()
+        log.debug(f"Last seen change: {last_seen_change}")
+        
+        # Collect all entries first to determine newest
+        all_entries: list[tuple[str, str, datetime]] = []  # (href, time_text, change_time)
         rows_found = 0
+        
         for row in soup.select("table tr"):
             cols = row.find_all("td")
             if len(cols) < 3:
@@ -4789,18 +4907,53 @@ def _extract_recent_changes_entries() -> dict[str, datetime]:
                 log.debug("Failed to parse time: %s", time_text)
                 continue
 
-            if change_time < cutoff:
-                log.debug("Skipping old entry: %s (changed %s)", href, change_time)
-                continue
-
-            any_in_window = True
             page_url = _make_absolute(href).rstrip("/")
+            all_entries.append((page_url, time_text, change_time))
+
+        # Sort by time (newest first) for cursor-based processing
+        all_entries.sort(key=lambda x: x[2], reverse=True)
+        
+        # Process entries from newest to oldest
+        newest_change_id = None
+        processed_count = 0
+        stop_processing = False
+        
+        for page_url, time_text, change_time in all_entries:
+            # Generate change ID for cursor tracking
+            change_id = generate_change_id(page_url, change_time.isoformat())
+            
+            # Store the newest change ID for later update
+            if newest_change_id is None:
+                newest_change_id = change_id
+            
+            # Stop if we've reached the last seen change
+            if last_seen_change and change_id == last_seen_change:
+                log.info(f"Reached last seen change: {change_id}, stopping processing")
+                stop_processing = True
+                break
+            
+            # Add to results (only entries newer than last_seen_change)
             prev = page_times.get(page_url)
             if prev is None or change_time < prev:
                 page_times[page_url] = change_time
-                log.debug("Found recent page: %s (changed %s)", page_url, change_time)
+                log.debug("Found new page: %s (changed %s)", page_url, change_time)
+                processed_count += 1
 
-        log.info("Main page: %d rows found, %d in window, %d total pages", rows_found, any_in_window, len(page_times))
+        # Update cursor position if we processed anything
+        if newest_change_id and processed_count > 0:
+            update_last_seen_change_sync(newest_change_id)
+            log.info(f"Updated cursor to newest change: {newest_change_id}")
+        elif not last_seen_change and newest_change_id:
+            # First run - only process the newest entry
+            update_last_seen_change_sync(newest_change_id)
+            # Keep only the newest entry for first run
+            newest_entry = min(page_times.items(), key=lambda x: x[1])
+            page_times = {newest_entry[0]: newest_entry[1]}
+            log.info(f"First run - processing only newest entry: {newest_entry[0]}")
+            processed_count = 1
+
+        log.info("Cursor-based extraction: %d rows found, %d processed, %d total pages", 
+                rows_found, processed_count, len(page_times))
 
     except Exception as e:
         log.warning("Failed to fetch recent changes: %s", e)
