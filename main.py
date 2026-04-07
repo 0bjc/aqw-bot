@@ -176,7 +176,9 @@ async def init_db() -> None:
                 message_id INTEGER NOT NULL,
                 channel_id INTEGER NOT NULL,
                 group_id TEXT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                content_hash TEXT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         
@@ -185,9 +187,49 @@ async def init_db() -> None:
                 group_id TEXT PRIMARY KEY,
                 message_id INTEGER NOT NULL,
                 channel_id INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                content_hash TEXT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Add content_hash column to existing posts table if it doesn't exist
+        try:
+            await db.execute("ALTER TABLE posts ADD COLUMN content_hash TEXT")
+            log.info("Added content_hash column to posts table (migration)")
+        except aiosqlite.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                log.debug("content_hash column already exists in posts table")
+            else:
+                log.error(f"Error adding content_hash column to posts: {e}")
+        
+        try:
+            await db.execute("ALTER TABLE groups ADD COLUMN content_hash TEXT")
+            log.info("Added content_hash column to groups table (migration)")
+        except aiosqlite.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                log.debug("content_hash column already exists in groups table")
+            else:
+                log.error(f"Error adding content_hash column to groups: {e}")
+        
+        # Add updated_at column if it doesn't exist
+        try:
+            await db.execute("ALTER TABLE posts ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            log.info("Added updated_at column to posts table (migration)")
+        except aiosqlite.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                log.debug("updated_at column already exists in posts table")
+            else:
+                log.error(f"Error adding updated_at column to posts: {e}")
+        
+        try:
+            await db.execute("ALTER TABLE groups ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            log.info("Added updated_at column to groups table (migration)")
+        except aiosqlite.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                log.debug("updated_at column already exists in groups table")
+            else:
+                log.error(f"Error adding updated_at column to groups: {e}")
         
         await db.commit()
         
@@ -216,14 +258,14 @@ async def get_post(source_id: str) -> dict | None:
         return None
 
 
-async def save_single_post(source_id: str, message) -> None:
-    """Save a single post record (group_id = NULL)."""
+async def save_single_post(source_id: str, message, content_hash: str = None) -> None:
+    """Save a single post record (group_id = NULL) with content hash."""
     async with aiosqlite.connect(DB) as db:
         await db.execute("""
             INSERT OR REPLACE INTO posts 
-            (source_id, message_id, channel_id, group_id) 
-            VALUES (?, ?, ?, NULL)
-        """, (source_id, message.id, message.channel.id))
+            (source_id, message_id, channel_id, group_id, content_hash, updated_at) 
+            VALUES (?, ?, ?, NULL, ?, CURRENT_TIMESTAMP)
+        """, (source_id, message.id, message.channel.id, content_hash))
         await db.commit()
 
 
@@ -231,40 +273,41 @@ async def get_group(group_id: str) -> dict | None:
     """Get existing group record by group_id."""
     async with aiosqlite.connect(DB) as db:
         cursor = await db.execute("""
-            SELECT message_id, channel_id 
+            SELECT message_id, channel_id, content_hash 
             FROM groups 
             WHERE group_id = ?
         """, (group_id,))
         row = await cursor.fetchone()
         
         if row:
-            message_id, channel_id = row
+            message_id, channel_id, content_hash = row
             return {
                 "message_id": message_id,
-                "channel_id": channel_id
+                "channel_id": channel_id,
+                "content_hash": content_hash
             }
         return None
 
 
-async def save_group(group_id: str, message) -> None:
-    """Save a new group record."""
+async def save_group(group_id: str, message, content_hash: str = None) -> None:
+    """Save a new group record with content hash."""
     async with aiosqlite.connect(DB) as db:
         await db.execute("""
             INSERT OR REPLACE INTO groups 
-            (group_id, message_id, channel_id) 
-            VALUES (?, ?, ?)
-        """, (group_id, message.id, message.channel.id))
+            (group_id, message_id, channel_id, content_hash, updated_at) 
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, (group_id, message.id, message.channel.id, content_hash))
         await db.commit()
 
 
-async def add_item_to_group(source_id: str, group_id: str, message) -> None:
-    """Add an item to a group (maps source_id to group's message)."""
+async def add_item_to_group(source_id: str, group_id: str, message, content_hash: str = None) -> None:
+    """Add an item to a group (maps source_id to group's message) with content hash."""
     async with aiosqlite.connect(DB) as db:
         await db.execute("""
             INSERT OR REPLACE INTO posts 
-            (source_id, message_id, channel_id, group_id) 
-            VALUES (?, ?, ?, ?)
-        """, (source_id, message.id, message.channel.id, group_id))
+            (source_id, message_id, channel_id, group_id, content_hash, updated_at) 
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, (source_id, message.id, message.channel.id, group_id, content_hash))
         await db.commit()
 
 
@@ -299,6 +342,65 @@ async def delete_group_record(group_id: str) -> None:
 def get_source_id_from_item(item: dict) -> str:
     """Extract source_id from item (URL preferred, fallback to title)."""
     return item.get('url', item.get('id', item.get('title', 'unknown')))
+
+
+def generate_content_signature(item: dict) -> str:
+    """Generate a stable content signature for change detection."""
+    import hashlib
+    import json
+    
+    # Extract only the relevant fields that affect embed content
+    content_fields = {
+        'title': item.get('title', ''),
+        'content': item.get('content', ''),
+        'location': item.get('location', ''),
+        'price': item.get('price', ''),
+        'rarity': item.get('rarity', ''),
+        'image_url': item.get('image_url', ''),
+        'url': item.get('url', '')
+    }
+    
+    # Create a normalized JSON string
+    content_json = json.dumps(content_fields, sort_keys=True, separators=(',', ':'))
+    
+    # Generate hash
+    return hashlib.sha256(content_json.encode('utf-8')).hexdigest()
+
+
+async def has_content_changed(source_id: str, item: dict) -> bool:
+    """Check if item content has actually changed."""
+    try:
+        # Get current content signature
+        current_signature = generate_content_signature(item)
+        
+        # Get stored signature from database
+        async with aiosqlite.connect(DB) as db:
+            cursor = await db.execute("""
+                SELECT content_hash FROM posts WHERE source_id = ?
+            """, (source_id,))
+            result = await cursor.fetchone()
+            
+            if not result:
+                # No stored hash, treat as new
+                return True
+            
+            stored_signature = result[0]
+            
+            # Compare signatures
+            if stored_signature != current_signature:
+                # Update stored signature
+                await db.execute("""
+                    UPDATE posts SET content_hash = ? WHERE source_id = ?
+                """, (current_signature, source_id))
+                await db.commit()
+                return True
+            
+            return False
+            
+    except Exception as e:
+        log.error(f"Error checking content changes for {source_id}: {e}")
+        # If error, assume content changed to be safe
+        return True
 
 
 async def get_and_increment_counter(counter_name: str) -> int:
@@ -3487,27 +3589,34 @@ async def edit_existing_group_message(channel, stored_group: dict, group_key: st
                 continue
     
     log.warning("❌ All retry attempts failed")
-    log.info("🔧 EDIT MESSAGE DEBUG END (FAILED)")
     return False
 
 
 async def post_individual_item(channel, item: dict) -> bool:
-    """Post a single item as an individual message using source ID tracking."""
+    """Post a single item with robust duplicate prevention and change detection."""
     try:
-        log.info("📝 Posting individual item: '%s'", item['title'])
+        log.info("Processing individual item: '%s'", item['title'])
         
         # Get source ID from item
         source_id = get_source_id_from_item(item)
+        log.debug(f"Source ID: {source_id}")
         
         # Check if item already exists
         existing = await get_post(source_id)
         
         if existing:
-            # Item exists - edit the existing message
+            log.debug(f"Found existing post for {source_id}")
+            
+            # Check if content actually changed
+            if not await has_content_changed(source_id, item):
+                log.info(f"Item '{item['title']}' unchanged - skipping")
+                return False
+            
+            # Content changed - try to edit existing message
             try:
                 channel_obj = channel.guild.get_channel(existing['channel_id']) if hasattr(channel, 'guild') else channel
                 if not channel_obj:
-                    # Channel not found, treat as new
+                    log.warning(f"Channel {existing['channel_id']} not found, treating as new post")
                     existing = None
                 else:
                     message = await channel_obj.fetch_message(existing['message_id'])
@@ -3517,48 +3626,83 @@ async def post_individual_item(channel, item: dict) -> bool:
                     
                     # Edit existing message
                     await message.edit(embed=embed, view=view)
-                    log.info(f"✅ Updated individual item '{item['title']}' (Message ID: {message.id})")
+                    
+                    # Update content hash in database
+                    content_hash = generate_content_signature(item)
+                    await save_single_post(source_id, message, content_hash)
+                    
+                    log.info(f"Updated individual item '{item['title']}' (Message ID: {message.id})")
                     return True
                     
             except discord.NotFound:
-                # Message was deleted, clean up and treat as new
+                log.warning(f"Message {existing['message_id']} not found, cleaning up and treating as new")
                 await delete_post_record(source_id)
                 existing = None
             except discord.Forbidden:
-                # No permission to edit, log and continue
                 log.warning(f"No permission to edit message for '{item['title']}'")
                 return False
         
         if not existing:
             # Create new single post
+            log.info(f"Creating new post for '{item['title']}'")
             embed, view = await create_pane_embed(item)
             message = await channel.send(embed=embed, view=view)
             
-            # Save the mapping
-            await save_single_post(source_id, message)
+            # Save the mapping with content hash
+            content_hash = generate_content_signature(item)
+            await save_single_post(source_id, message, content_hash)
             
-            log.info(f"✅ Posted new individual item '{item['title']}' (Message ID: {message.id})")
+            log.info(f"Posted new individual item '{item['title']}' (Message ID: {message.id})")
             return True
             
     except Exception as e:
-        log.error("❌ Error posting individual item '%s': %s", item.get('title', 'Unknown'), e)
+        log.error(f"Error processing individual item '{item.get('title', 'Unknown')}': {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
 async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
-    """Post grouped items using source ID tracking."""
+    """Post grouped items with robust duplicate prevention and change detection."""
     try:
-        log.info(f"📝 Posting grouped items: {len(items)} items in group '{group_id}'")
+        log.info(f"Processing grouped items: {len(items)} items in group '{group_id}'")
+        
+        # Generate content signature for the entire group
+        group_content = {
+            'items': [
+                {
+                    'title': item.get('title', ''),
+                    'content': item.get('content', ''),
+                    'location': item.get('location', ''),
+                    'price': item.get('price', ''),
+                    'rarity': item.get('rarity', ''),
+                    'image_url': item.get('image_url', ''),
+                    'url': item.get('url', '')
+                }
+                for item in items
+            ]
+        }
+        import json
+        import hashlib
+        group_json = json.dumps(group_content, sort_keys=True, separators=(',', ':'))
+        group_content_hash = hashlib.sha256(group_json.encode('utf-8')).hexdigest()
         
         # Check if group already exists
         existing_group = await get_group(group_id)
         
         if existing_group:
-            # Group exists - edit the existing message
+            log.debug(f"Found existing group for {group_id}")
+            
+            # Check if group content actually changed
+            if existing_group.get('content_hash') == group_content_hash:
+                log.info(f"Group '{group_id}' unchanged - skipping")
+                return False
+            
+            # Content changed - try to edit existing message
             try:
                 channel_obj = channel.guild.get_channel(existing_group['channel_id']) if hasattr(channel, 'guild') else channel
                 if not channel_obj:
-                    # Channel not found, treat as new
+                    log.warning(f"Channel {existing_group['channel_id']} not found, treating as new group")
                     existing_group = None
                 else:
                     message = await channel_obj.fetch_message(existing_group['message_id'])
@@ -3568,17 +3712,21 @@ async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
                     
                     # Edit existing message
                     await message.edit(embed=embed, view=view)
-                    log.info(f"✅ Updated group '{group_id}' (Message ID: {message.id})")
+                    
+                    # Update group content hash
+                    await save_group(group_id, message, group_content_hash)
                     
                     # Update all item mappings to point to this message
                     for item in items:
                         source_id = get_source_id_from_item(item)
-                        await add_item_to_group(source_id, group_id, message)
+                        item_content_hash = generate_content_signature(item)
+                        await add_item_to_group(source_id, group_id, message, item_content_hash)
                     
+                    log.info(f"Updated group '{group_id}' (Message ID: {message.id})")
                     return True
                     
             except discord.NotFound:
-                # Message was deleted, clean up and treat as new
+                log.warning(f"Group message {existing_group['message_id']} not found, cleaning up and treating as new")
                 await delete_group_record(group_id)
                 existing_group = None
             except discord.Forbidden:
@@ -3587,22 +3735,26 @@ async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
         
         if not existing_group:
             # Create new group post
+            log.info(f"Creating new group post for '{group_id}'")
             embed, view = await create_grouped_embed(group_id, items)
             message = await channel.send(embed=embed, view=view)
             
-            # Save the group
-            await save_group(group_id, message)
+            # Save the group with content hash
+            await save_group(group_id, message, group_content_hash)
             
-            # Save all item mappings
+            # Save all item mappings with their content hashes
             for item in items:
                 source_id = get_source_id_from_item(item)
-                await add_item_to_group(source_id, group_id, message)
+                item_content_hash = generate_content_signature(item)
+                await add_item_to_group(source_id, group_id, message, item_content_hash)
             
-            log.info(f"✅ Posted new group '{group_id}' (Message ID: {message.id})")
+            log.info(f"Posted new group '{group_id}' (Message ID: {message.id})")
             return True
             
     except Exception as e:
-        log.error(f"❌ Error posting group '{group_id}': {e}")
+        log.error(f"Error processing group '{group_id}': {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -3614,6 +3766,43 @@ def get_group_id_from_items(items: list[dict]) -> str:
         price = first_item.get('price', 'unknown')
         return f"group_{location}_{price}".replace(' ', '_').replace('/', '_').lower()
     return f"group_{len(items)}"
+
+
+async def get_recently_processed_items(hours: int = 24) -> set[str]:
+    """Get set of source IDs processed in the last N hours to prevent startup reposts."""
+    try:
+        async with aiosqlite.connect(DB) as db:
+            cursor = await db.execute("""
+                SELECT source_id FROM posts 
+                WHERE created_at > datetime('now', '-{} hours')
+                UNION
+                SELECT p.source_id FROM posts p
+                JOIN groups g ON p.group_id = g.group_id
+                WHERE g.created_at > datetime('now', '-{} hours')
+            """.format(hours, hours))
+            rows = await cursor.fetchall()
+            return {row[0] for row in rows}
+    except Exception as e:
+        log.error(f"Error getting recently processed items: {e}")
+        return set()
+
+
+async def is_startup_safe(item: dict, recently_processed: set[str]) -> bool:
+    """Check if it's safe to process an item during startup (avoid reposts)."""
+    source_id = get_source_id_from_item(item)
+    
+    # If item was processed recently, skip it during startup
+    if source_id in recently_processed:
+        log.debug(f"Skipping recently processed item: {source_id}")
+        return False
+    
+    return True
+
+
+def get_startup_safeguard_hours() -> int:
+    """Get hours for startup safeguard - longer during first minutes after restart."""
+    # You can adjust this based on your bot's polling frequency
+    return 2  # Skip items processed in last 2 hours
 
 
 async def process_grouped_items(channel, group_key: str, items_in_group: list[dict]) -> bool:
@@ -4932,20 +5121,41 @@ async def check_posts():
                 # Group ALL merged items by Location and Price to maintain stable groups
                 all_groups = improved_group_items_by_location_price(merged_items)
                 
-                # Process each group
+                # Get recently processed items for startup safeguard
+                startup_hours = get_startup_safeguard_hours()
+                recently_processed = await get_recently_processed_items(startup_hours)
+                log.info(f"Startup safeguard: Found {len(recently_processed)} items processed in last {startup_hours} hours")
+                
+                # Process each group with startup safeguards
                 for group_key, items_in_group in all_groups.items():
                     # Check if this is a single item - post individually instead of grouped
                     if len(items_in_group) == 1:
                         item = items_in_group[0]
-                        # Always post individual items using source ID tracking
-                        # The tracking system will handle duplicates automatically
-                        log.info("📝 Single item detected: '%s' - posting individually", item['title'])
+                        
+                        # Apply startup safeguard
+                        if not await is_startup_safe(item, recently_processed):
+                            log.info("Startup safeguard: Skipping recently processed individual item '%s'", item['title'])
+                            continue
+                        
+                        log.info("Single item detected: '%s' - posting individually", item['title'])
                         await post_individual_item(channel, item)
                     else:
+                        # Apply startup safeguard to grouped items
+                        # Check if any item in the group was recently processed
+                        group_safe = True
+                        for item in items_in_group:
+                            if not await is_startup_safe(item, recently_processed):
+                                log.info("Startup safeguard: Group contains recently processed item, skipping group")
+                                group_safe = False
+                                break
+                        
+                        if not group_safe:
+                            continue
+                        
                         # Always post grouped items using source ID tracking
                         # Generate group ID from items
                         group_id = get_group_id_from_items(items_in_group)
-                        log.info("📝 Multiple items (%d) in same group - posting grouped", len(items_in_group))
+                        log.info("Multiple items (%d) in same group - posting grouped", len(items_in_group))
                         await post_grouped_items(channel, group_id, items_in_group)
             else:
                 log.info("No recent changes and no current items - skipping processing")
