@@ -48,6 +48,26 @@ ITEM_TYPE_EMOJIS = {
 # Fallback emoji for unknown types
 DEFAULT_EMOJI = '<:aqwmisc:1491402592884887612>'
 
+def parse_discord_emoji(emoji_string: str) -> discord.PartialEmoji:
+    """Parse emoji string into discord.PartialEmoji object."""
+    if not emoji_string:
+        return None
+    
+    # Check if it's a custom emoji format <:name:id>
+    if emoji_string.startswith('<:') and emoji_string.endswith('>'):
+        try:
+            # Remove <: and > to get name:id
+            inner = emoji_string[2:-1]
+            if ':' in inner:
+                name, emoji_id = inner.split(':', 1)
+                return discord.PartialEmoji(name=name, id=int(emoji_id))
+        except (ValueError, IndexError):
+            pass
+    
+    # Fallback: try to use as emoji name
+    return discord.PartialEmoji(name=emoji_string)
+
+
 def get_item_type_emoji(item_type: str) -> str:
     """Get the custom emoji for an item type, with fallback."""
     if not item_type:
@@ -1933,10 +1953,13 @@ class ItemCategoryButton(discord.ui.Button):
         self.items = items
         self.view_ref = view
         
+        # Parse the emoji string into a proper discord.PartialEmoji
+        parsed_emoji = parse_discord_emoji(emoji)
+        
         super().__init__(
             label=f"{category_name} ({count})",  # Category name with count
             style=discord.ButtonStyle.secondary,
-            emoji=emoji
+            emoji=parsed_emoji
         )
     
     async def callback(self, interaction: discord.Interaction):
@@ -2025,8 +2048,7 @@ class PreviousButton(discord.ui.Button):
         self.view_ref = view
         super().__init__(
             label="Previous",
-            style=discord.ButtonStyle.secondary,
-            emoji="Previous"
+            style=discord.ButtonStyle.secondary
         )
     
     async def callback(self, interaction: discord.Interaction):
@@ -2047,8 +2069,7 @@ class NextButton(discord.ui.Button):
         self.view_ref = view
         super().__init__(
             label="Next",
-            style=discord.ButtonStyle.secondary,
-            emoji="Next"
+            style=discord.ButtonStyle.secondary
         )
     
     async def callback(self, interaction: discord.Interaction):
@@ -5453,13 +5474,10 @@ async def create_pane_embed(post: dict) -> tuple[discord.Embed, discord.ui.View]
 
     embed = discord.Embed(
         title=title.upper(),
-        description=f"⠀\n**[{post['title']}]({post['url']})**\n\n{desc}",
+        description=f"___\n**[{post['title']}]({post['url']})**\n\n{desc}",
         color=0xFF4500,
     )
-    # Set thumbnail for single posts
-    if post.get("image"):
-        embed.set_thumbnail(url=post["image"])
-    # Note: Full image will be shown in ephemeral message only
+    # Note: No thumbnail in main post - image will be shown in ephemeral message only
     embed.set_footer(text="AQW Daily Gift")
     
     # Create view with item-type button
@@ -5493,10 +5511,16 @@ class SingleItemButton(discord.ui.Button):
     """Button for single item with custom emoji."""
     def __init__(self, item: dict, emoji: str):
         self.item = item
+        # Parse the emoji string into a proper discord.PartialEmoji
+        parsed_emoji = parse_discord_emoji(emoji)
+        
+        # Use item type instead of item name for button label
+        item_type = item.get('type', 'misc').capitalize()
+        
         super().__init__(
-            label=item.get('name', 'Unknown')[:20],  # Truncate if too long
+            label=item_type,  # Show item type instead of item name
             style=discord.ButtonStyle.secondary,
-            emoji=emoji
+            emoji=parsed_emoji
         )
     
     async def callback(self, interaction: discord.Interaction):
