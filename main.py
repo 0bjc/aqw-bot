@@ -2089,8 +2089,7 @@ class CloseButton(discord.ui.Button):
     def __init__(self):
         super().__init__(
             label="Close",
-            style=discord.ButtonStyle.secondary,
-            emoji="Close"
+            style=discord.ButtonStyle.secondary
         )
     
     async def callback(self, interaction: discord.Interaction):
@@ -5474,7 +5473,7 @@ async def create_pane_embed(post: dict) -> tuple[discord.Embed, discord.ui.View]
 
     embed = discord.Embed(
         title=title.upper(),
-        description=f"___\n**[{post['title']}]({post['url']})**\n\n{desc}",
+        description=f"**[{post['title']}]({post['url']})**\n\n{desc}",
         color=0xFF4500,
     )
     # Note: No thumbnail in main post - image will be shown in ephemeral message only
