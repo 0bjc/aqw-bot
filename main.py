@@ -28,25 +28,25 @@ except ImportError:
 
 # ==================== CUSTOM EMOJI SYSTEM ====================
 
-# Custom emoji mapping for item types (Server ID: 1484111683809968149)
+# Custom emoji mapping for item types (using actual Discord emoji IDs)
 ITEM_TYPE_EMOJIS = {
-    'sword': '<:aqwsword:1484111683809968149>',
-    'helm': '<:aqwhelm:1484111683809968149>',
-    'armor': '<:aqwarmor:1484111683809968149>',
-    'cape': '<:aqwcape:1484111683809968149>',
-    'pet': '<:aqwpet:1484111683809968149>',
-    'class': '<:aqwclass:1484111683809968149>',
-    'house': '<:aqwhouse:1484111683809968149>',
-    'floor': '<:aqwfloor:1484111683809968149>',
-    'wall': '<:aqwwall:1484111683809968149>',
-    'ground': '<:aqwground:1484111683809968149>',
-    'necklace': '<:aqwnecklace:1484111683809968149>',
-    'misc': '<:aqwmisc:1484111683809968149>',
-    'gift': '<:aqwgift:1484111683809968149>'
+    'sword': '<:aqwsword:1491402704822468690>',
+    'helm': '<:aqwhelm:1491402425683284078>',
+    'armor': '<:aqwarmor:1491402207894179850>',
+    'cape': '<:aqwcape:1491402257449877565>',
+    'pet': '<:aqwpet:1491402662829359124>',
+    'class': '<:aqwclass:1491402373833293936>',
+    'house': '<:aqwhouse:1491402472688718068>',
+    'floor': '<:aqwfloor:1491402510911410347>',
+    'wall': '<:aqwwall:1491402554381172787>',
+    'ground': '<:aqwground:1491402322318721074>',
+    'necklace': '<:aqwnecklace:1491402627244884103>',
+    'misc': '<:aqwmisc:1491402592884887612>',
+    'gift': '<:aqwgift:1491402775009955950>'
 }
 
 # Fallback emoji for unknown types
-DEFAULT_EMOJI = '<:aqwmisc:1484111683809968149>'
+DEFAULT_EMOJI = '<:aqwmisc:1491402592884887612>'
 
 def get_item_type_emoji(item_type: str) -> str:
     """Get the custom emoji for an item type, with fallback."""
@@ -3848,6 +3848,11 @@ async def post_individual_item(channel, item: dict) -> bool:
                     await save_single_post(source_id, message, content_hash)
                     
                     log.info(f"Updated individual item '{item['title']}' (Message ID: {message.id})")
+                    
+                    # Update cursor AFTER successful processing
+                    if item.get('page_url') and item.get('change_time'):
+                        update_cursor_after_successful_processing(item['page_url'], item['change_time'])
+                    
                     return True
                     
             except discord.NotFound:
@@ -3869,6 +3874,11 @@ async def post_individual_item(channel, item: dict) -> bool:
             await save_single_post(source_id, message, content_hash)
             
             log.info(f"Posted new individual item '{item['title']}' (Message ID: {message.id})")
+            
+            # Update cursor AFTER successful processing
+            if item.get('page_url') and item.get('change_time'):
+                update_cursor_after_successful_processing(item['page_url'], item['change_time'])
+            
             return True
             
     except Exception as e:
@@ -3948,6 +3958,12 @@ async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
                         await add_item_to_group(source_id, group_id, message, item_content_hash)
                     
                     log.info(f"Updated group '{group_id}' (Message ID: {message.id})")
+                    
+                    # Update cursor AFTER successful processing for the newest item
+                    newest_item = max(merged_items, key=lambda x: x.get('change_time', datetime.min))
+                    if newest_item.get('page_url') and newest_item.get('change_time'):
+                        update_cursor_after_successful_processing(newest_item['page_url'], newest_item['change_time'])
+                    
                     return True
                     
             except discord.NotFound:
@@ -3994,6 +4010,12 @@ async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
                 await add_item_to_group(source_id, group_id, message, item_content_hash)
             
             log.info(f"Posted new group '{group_id}' (Message ID: {message.id})")
+            
+            # Update cursor AFTER successful processing for the newest item
+            newest_item = max(items, key=lambda x: x.get('change_time', datetime.min))
+            if newest_item.get('page_url') and newest_item.get('change_time'):
+                update_cursor_after_successful_processing(newest_item['page_url'], newest_item['change_time'])
+            
             return True
             
     except Exception as e:
@@ -5111,11 +5133,36 @@ def merge_current_with_existing_items(current_items: list[dict], existing_items:
     return final_merged
 
 
+def update_cursor_after_successful_processing(page_url: str, change_time: datetime) -> bool:
+    """
+    Update cursor ONLY after successful processing of aegift item.
+    This ensures cursor represents last successfully processed change, not newest seen change.
+    
+    Args:
+        page_url: The URL that was successfully processed
+        change_time: The time of the change
+        
+    Returns:
+        bool: True if cursor was updated successfully
+    """
+    try:
+        change_id = generate_change_id(page_url, change_time.isoformat())
+        update_last_seen_change_sync(change_id)
+        log.info(f"Cursor updated to successfully processed change: {change_id}")
+        log.info(f"Processing success -> {change_id}")
+        return True
+    except Exception as e:
+        log.error(f"Failed to update cursor after successful processing: {e}")
+        return False
+
+
 def _extract_recent_changes_entries() -> dict[str, datetime]:
     """
     Get mapping: page_url -> change_time using cursor-based tracking.
-    Processes entries from newest to oldest, stopping at last_seen_change.
+    Processes entries from newest to oldest, stopping at last_successfully_processed_change.
     Only checks the main recent changes page - no pagination.
+    
+    IMPORTANT: Cursor is NOT updated here. Cursor is only updated after successful processing.
     """
     page_times: dict[str, datetime] = {}
 
@@ -5131,9 +5178,9 @@ def _extract_recent_changes_entries() -> dict[str, datetime]:
         soup = BeautifulSoup(res.text, "html.parser")
         log.info("Fetching page: %s", RECENT_URL_HTTP)
 
-        # Get last seen change for cursor tracking
-        last_seen_change = get_last_seen_change_sync()
-        log.debug(f"Last seen change: {last_seen_change}")
+        # Get last successfully processed change for cursor tracking
+        last_successfully_processed_change = get_last_seen_change_sync()
+        log.debug(f"Last successfully processed change: {last_successfully_processed_change}")
         
         # Collect all entries first to determine newest
         all_entries: list[tuple[str, str, datetime]] = []  # (href, time_text, change_time)
@@ -5166,7 +5213,6 @@ def _extract_recent_changes_entries() -> dict[str, datetime]:
         all_entries.sort(key=lambda x: x[2], reverse=True)
         
         # Process entries from newest to oldest with optimization
-        newest_change_id = None
         processed_count = 0
         stop_processing = False
         max_entries_per_run = 50  # Limit processing to prevent timeouts
@@ -5175,13 +5221,9 @@ def _extract_recent_changes_entries() -> dict[str, datetime]:
             # Generate change ID for cursor tracking
             change_id = generate_change_id(page_url, change_time.isoformat())
             
-            # Store the newest change ID for later update
-            if newest_change_id is None:
-                newest_change_id = change_id
-            
-            # Stop if we've reached the last seen change OR max entries limit
-            if last_seen_change and change_id == last_seen_change:
-                log.info(f"Reached last seen change: {change_id}, stopping processing")
+            # Stop if we've reached the last successfully processed change OR max entries limit
+            if last_successfully_processed_change and change_id == last_successfully_processed_change:
+                log.info(f"Reached last successfully processed change: {change_id}, stopping processing")
                 stop_processing = True
                 break
             
@@ -5190,25 +5232,18 @@ def _extract_recent_changes_entries() -> dict[str, datetime]:
                 log.info(f"Reached max entries limit ({max_entries_per_run}), will continue next run")
                 break
             
-            # Add to results (only entries newer than last_seen_change)
+            # Add to results (only entries newer than last_successfully_processed_change)
             prev = page_times.get(page_url)
             if prev is None or change_time < prev:
                 page_times[page_url] = change_time
                 log.debug("Found new page: %s (changed %s)", page_url, change_time)
                 processed_count += 1
 
-        # Update cursor position if we processed anything
-        if newest_change_id and processed_count > 0:
-            update_last_seen_change_sync(newest_change_id)
-            log.info(f"Updated cursor to newest change: {newest_change_id}")
-        elif not last_seen_change and newest_change_id:
-            # First run - process more entries for better initial coverage
-            update_last_seen_change_sync(newest_change_id)
+        # First run special handling - do NOT update cursor yet
+        if not last_successfully_processed_change and len(page_times) > 10:
             # Keep up to 10 newest entries for first run
-            if len(page_times) > 10:
-                # Sort by time and keep 10 newest
-                sorted_entries = sorted(page_times.items(), key=lambda x: x[1], reverse=True)
-                page_times = dict(sorted_entries[:10])
+            sorted_entries = sorted(page_times.items(), key=lambda x: x[1], reverse=True)
+            page_times = dict(sorted_entries[:10])
             log.info(f"First run - processing {len(page_times)} newest entries")
             processed_count = len(page_times)
 
@@ -5308,7 +5343,13 @@ def fetch_recent_aegifts_fast(limit: int = MAX_POSTS_PER_RUN, newest_first: bool
 
 def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = False) -> list[dict]:
     """
-    Fetch aegift pages from the main recent changes page only.
+    Fetch aegift pages with proper cursor workflow.
+    
+    Processing flow:
+    1. Fetch Recent Changes page (NO cursor update)
+    2. For each row: open page -> parse tags -> detect aegift -> extract data
+    3. Return items with cursor tracking info for later processing
+    4. Cursor will be updated AFTER successful processing in main loop
     """
     page_times = _extract_recent_changes_entries()  # Check main page only
     if not page_times:
@@ -5322,20 +5363,29 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
     results: list[dict] = []
     seen_ids: set[str] = set()
 
-    for page_url, _t in sorted_pages:
+    for page_url, change_time in sorted_pages:
         pid = urlparse(page_url).path.strip("/").replace("/", "-") or page_url
         if pid in seen_ids:
             continue
 
-        log.info("Checking page: %s", page_url)
+        log.info(f"AEGIFT CHECK -> {page_url}")
 
         # Try the page itself first
         details = extract_item_details(page_url)
         if details:
-            results.append({"id": pid, **details})
+            log.info(f"Tags detected -> aegift confirmed")
+            # Include cursor tracking info but DO NOT update cursor yet
+            results.append({
+                "id": pid, 
+                **details, 
+                "change_time": change_time, 
+                "page_url": page_url,
+                "change_id": generate_change_id(page_url, change_time.isoformat())
+            })
             seen_ids.add(pid)
-            log.info("✓ Found aegift: %s", details["title"])
+            log.info("Found aegift: %s", details["title"])
         else:
+            log.info(f"Tags detected -> no aegift tag")
             # If not a direct item page, try its child links
             child_links = _extract_related_item_links(page_url, max_links=3)
             log.debug("Found %d child links for %s", len(child_links), page_url)
@@ -5343,13 +5393,26 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
                 child_pid = urlparse(child_url).path.strip("/").replace("/", "-") or child_url
                 if child_pid in seen_ids:
                     continue
+                
+                log.info(f"AEGIFT CHECK -> {child_url}")
                 child_details = extract_item_details(child_url)
                 if child_details:
-                    results.append({"id": child_pid, **child_details})
+                    log.info(f"Tags detected -> aegift confirmed")
+                    # Include cursor tracking info but DO NOT update cursor yet
+                    results.append({
+                        "id": child_pid, 
+                        **child_details, 
+                        "change_time": change_time, 
+                        "page_url": child_url,
+                        "change_id": generate_change_id(child_url, change_time.isoformat())
+                    })
                     seen_ids.add(child_pid)
-                    log.info("✓ Found aegift child: %s", child_details["title"])
-                    if len(results) >= limit:
-                        break
+                    log.info("Found aegift child: %s", child_details["title"])
+                else:
+                    log.info(f"Tags detected -> no aegift tag")
+                    
+                if len(results) >= limit:
+                    break
 
         if len(results) >= limit:
             break
