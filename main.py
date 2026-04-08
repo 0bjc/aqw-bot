@@ -5709,9 +5709,6 @@ async def check_posts():
                     log.info(f"Cursor saved -> {last_successful_change_id}")
                 else:
                     log.info("No successful processing - cursor not updated")
-            else:
-                log.info("No changed items found - no processing needed")
-                # No processing means no cursor advancement
             elif not posts:  # This handles the case where fetch_recent_aegifts returns empty
                 log.info("No recent changes found - checking existing grouped posts for updates")
                 # Even with no recent changes, we need to check if existing grouped posts need updates
@@ -5724,6 +5721,9 @@ async def check_posts():
                 if not existing_grouped_items:
                     log.info("No existing grouped items found - skipping")
                     continue
+            else:
+                log.info("No changed items found - no processing needed")
+                # No processing means no cursor advancement
                 
                 # Process existing grouped items to ensure they're still valid
                 all_groups = improved_group_items_by_location_price(existing_grouped_items)
