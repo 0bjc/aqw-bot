@@ -3868,11 +3868,6 @@ async def post_individual_item(channel, item: dict) -> bool:
                     await save_single_post(source_id, message, content_hash)
                     
                     log.info(f"Updated individual item '{item['title']}' (Message ID: {message.id})")
-                    
-                    # Update cursor AFTER successful processing
-                    if item.get('page_url') and item.get('change_time'):
-                        update_cursor_after_successful_processing(item['page_url'], item['change_time'])
-                    
                     return True
                     
             except discord.NotFound:
@@ -3978,12 +3973,6 @@ async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
                         await add_item_to_group(source_id, group_id, message, item_content_hash)
                     
                     log.info(f"Updated group '{group_id}' (Message ID: {message.id})")
-                    
-                    # Update cursor AFTER successful processing for the newest item
-                    newest_item = max(merged_items, key=lambda x: x.get('change_time', datetime.min))
-                    if newest_item.get('page_url') and newest_item.get('change_time'):
-                        update_cursor_after_successful_processing(newest_item['page_url'], newest_item['change_time'])
-                    
                     return True
                     
             except discord.NotFound:
@@ -4030,12 +4019,6 @@ async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
                 await add_item_to_group(source_id, group_id, message, item_content_hash)
             
             log.info(f"Posted new group '{group_id}' (Message ID: {message.id})")
-            
-            # Update cursor AFTER successful processing for the newest item
-            newest_item = max(items, key=lambda x: x.get('change_time', datetime.min))
-            if newest_item.get('page_url') and newest_item.get('change_time'):
-                update_cursor_after_successful_processing(newest_item['page_url'], newest_item['change_time'])
-            
             return True
             
     except Exception as e:
@@ -5376,6 +5359,7 @@ def fetch_recent_aegifts(limit: int = MAX_POSTS_PER_RUN, newest_first: bool = Fa
         log.info("No recent changes found")
         return []
 
+    # Sort by time (chronological order - oldest first for proper cursor advancement)
     sorted_pages = sorted(page_times.items(), key=lambda kv: kv[1])
     if newest_first:
         sorted_pages = list(reversed(sorted_pages))
@@ -5638,6 +5622,10 @@ async def check_posts():
             # Store the timestamp at the start of processing to detect race conditions
             processing_start_time = datetime.now()
             
+            # Track the last successfully processed change_id for cursor advancement
+            last_successful_change_id = None
+            
+            # Process items in chronological order (oldest first) to ensure proper cursor advancement
             for post in posts:
                 pid = urlparse(post["url"]).path.strip("/").replace("/", "-") or post["url"]
                 
@@ -5658,31 +5646,10 @@ async def check_posts():
                 existing_grouped_items = await get_existing_grouped_items()
                 log.info("Retrieved %d existing grouped items from database", len(existing_grouped_items))
                 
-                # DEBUG: Log details of existing grouped items
-                if existing_grouped_items:
-                    log.debug("=== DEBUG: Existing grouped items ===")
-                    for item in existing_grouped_items[:5]:  # Log first 5 to avoid spam
-                        log.debug("  - %s: Location='%s', Price='%s', URL=%s, Content=%s", 
-                                 item.get('title', 'Unknown'),
-                                 item.get('location', 'Unknown'),
-                                 item.get('price', 'Unknown'),
-                                 bool(item.get('url')),
-                                 bool(item.get('content')))
-                
                 # Merge current items with existing grouped items
                 merged_items = merge_current_with_existing_items(all_current_items, existing_grouped_items)
                 log.info("Merged items: %d current + %d existing = %d total", 
                          len(all_current_items), len(existing_grouped_items), len(merged_items))
-                
-                # DEBUG: Log details of merged items
-                log.debug("=== DEBUG: Merged items before grouping ===")
-                for item in merged_items[:5]:  # Log first 5 to avoid spam
-                    log.debug("  - %s: Location='%s', Price='%s', URL=%s, Content=%s", 
-                             item.get('title', 'Unknown'),
-                             item.get('location', 'Unknown'),
-                             item.get('price', 'Unknown'),
-                             bool(item.get('url')),
-                             bool(item.get('content')))
                 
                 # Group ALL merged items by Location and Price to maintain stable groups
                 all_groups = improved_group_items_by_location_price(merged_items)
@@ -5704,10 +5671,14 @@ async def check_posts():
                             continue
                         
                         log.info("Single item detected: '%s' - posting individually", item['title'])
-                        await post_individual_item(channel, item)
+                        success = await post_individual_item(channel, item)
+                        
+                        # Update cursor tracking after successful processing
+                        if success and item.get('change_id'):
+                            last_successful_change_id = item['change_id']
+                            log.info(f"Cursor candidate -> {item['change_id']}")
                     else:
                         # Apply startup safeguard to grouped items
-                        # Check if any item in the group was recently processed
                         group_safe = True
                         for item in items_in_group:
                             if not await is_startup_safe(item, recently_processed):
@@ -5722,8 +5693,26 @@ async def check_posts():
                         # Generate group ID from items
                         group_id = get_group_id_from_items(items_in_group)
                         log.info("Multiple items (%d) in same group - posting grouped", len(items_in_group))
-                        await post_grouped_items(channel, group_id, items_in_group)
+                        success = await post_grouped_items(channel, group_id, items_in_group)
+                        
+                        # Update cursor tracking after successful processing
+                        if success and items_in_group:
+                            # Find the newest item in the group for cursor tracking
+                            newest_item = max(items_in_group, key=lambda x: x.get('change_time', datetime.min))
+                            if newest_item.get('change_id'):
+                                last_successful_change_id = newest_item['change_id']
+                                log.info(f"Cursor candidate -> {newest_item['change_id']}")
+                
+                # Update cursor ONLY after successful processing
+                if last_successful_change_id:
+                    update_last_seen_change_sync(last_successful_change_id)
+                    log.info(f"Cursor saved -> {last_successful_change_id}")
+                else:
+                    log.info("No successful processing - cursor not updated")
             else:
+                log.info("No changed items found - no processing needed")
+                # No processing means no cursor advancement
+            elif not posts:  # This handles the case where fetch_recent_aegifts returns empty
                 log.info("No recent changes found - checking existing grouped posts for updates")
                 # Even with no recent changes, we need to check if existing grouped posts need updates
                 # This handles cases where items fall off the recent changes page
