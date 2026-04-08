@@ -26,6 +26,80 @@ try:
 except ImportError:
     pass  # dotenv not installed, use system environment variables
 
+# ==================== CUSTOM EMOJI SYSTEM ====================
+
+# Custom emoji mapping for item types
+ITEM_TYPE_EMOJIS = {
+    'sword': ':aqwsword:',
+    'helm': ':aqwhelm:',
+    'armor': ':aqwarmor:',
+    'cape': ':aqwcape:',
+    'pet': ':aqwpet:',
+    'class': ':aqwclass:',
+    'house': ':aqwhouse:',
+    'floor': ':aqwfloor:',
+    'wall': ':aqwwall:',
+    'ground': ':aqwground:',
+    'necklace': ':aqwnecklace:',
+    'misc': ':aqwmisc:',
+    'gift': ':aqwgift:'
+}
+
+# Fallback emoji for unknown types
+DEFAULT_EMOJI = ':aqwmisc:'
+
+def get_item_type_emoji(item_type: str) -> str:
+    """Get the custom emoji for an item type, with fallback."""
+    if not item_type:
+        return DEFAULT_EMOJI
+    
+    # Normalize item type to lowercase
+    normalized_type = item_type.lower().strip()
+    
+    # Direct mapping
+    if normalized_type in ITEM_TYPE_EMOJIS:
+        return ITEM_TYPE_EMOJIS[normalized_type]
+    
+    # Check if any keyword matches the type
+    for key, emoji in ITEM_TYPE_EMOJIS.items():
+        if key in normalized_type:
+            return emoji
+    
+    # Fallback to misc
+    return DEFAULT_EMOJI
+
+def detect_item_type_from_title(title: str) -> str:
+    """Detect item type from title or content."""
+    if not title:
+        return 'misc'
+    
+    title_lower = title.lower()
+    
+    # Check for daily gift
+    if 'daily gift' in title_lower or 'gift' in title_lower:
+        return 'gift'
+    
+    # Check for specific item types
+    type_keywords = {
+        'sword': ['sword', 'blade', 'dagger', 'weapon'],
+        'helm': ['helm', 'helmet', 'hat', 'cap'],
+        'armor': ['armor', 'armour', 'chest', 'plate'],
+        'cape': ['cape', 'cloak', 'mantle'],
+        'pet': ['pet', 'companion', 'mount'],
+        'class': ['class', 'enhancement'],
+        'house': ['house', 'home', 'building'],
+        'floor': ['floor', 'tile', 'carpet'],
+        'wall': ['wall', 'decoration'],
+        'ground': ['ground', 'terrain'],
+        'necklace': ['necklace', 'amulet', 'pendant']
+    }
+    
+    for item_type, keywords in type_keywords.items():
+        if any(keyword in title_lower for keyword in keywords):
+            return item_type
+    
+    return 'misc'
+
 # ---------------- WIKIDOT SESSION ----------------
 session = requests.Session()
 
@@ -1215,6 +1289,7 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
     
     # Step 5: Generate stable hash keys for each group
     final_groups = {}
+    final_groups = {}
     hash_generation_stats = {
         'successful': 0,
         'failed': 0
@@ -1228,17 +1303,13 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
             group_key_hash = generate_stable_group_key(location, price, items_in_group)
             final_groups[group_key_hash] = items_in_group
             hash_generation_stats['successful'] += 1
-            
-            log.debug("✓ Generated stable hash key for group: Location='%s', Price='%s', Items=%d, Hash=%s",
+                
+            log.debug("Generated stable hash key for group: Location='%s', Price='%s', Items=%d, Hash=%s",
                      location, price, len(items_in_group), group_key_hash[:8])
-            
-            # Log item titles in this group for debugging
-            item_titles = [item['title'] for item in items_in_group]
-            log.debug("Group items: %s", item_titles)
-            
+                
         except Exception as e:
             hash_generation_stats['failed'] += 1
-            log.error("✗ Failed to generate hash key for group (Location='%s', Price='%s'): %s",
+            log.error("Failed to generate hash key for group (Location='%s', Price='%s'): %s",
                      location, price, e)
     
     # Log final statistics
@@ -1251,40 +1322,33 @@ def improved_group_items_by_location_price(items: list[dict]) -> dict[str, list[
 
 
 def create_categorized_item_list(items: list[dict]) -> str:
-    """Create a categorized list of items with clickable links including specific weapon types."""
-    # Define category order - weapon types first, then main categories
-    category_order = [
-        # Weapon Types (specific)
-        "Axes", "Bows", "Daggers", "Gauntlets", "Guns", "HandGuns", 
-        "Maces", "Polearms", "Rifles", "Staffs", "Swords", "Wands", "Whips",
-        # Main Categories
-        "Weapon", "Armor", "Helm", "Cape", "Pet", 
-        # Fallback
-        "Misc"
-    ]
-    
-    # Categorize items
+    """Create a categorized list of items with custom emojis and no prices."""
+    # Group items by detected type
     categorized = {}
     for item in items:
-        category = categorize_item(item)
-        if category not in categorized:
-            categorized[category] = []
-        categorized[category].append(item)
+        # Detect item type from title
+        item_type = detect_item_type_from_title(item.get('title', ''))
+        if item_type not in categorized:
+            categorized[item_type] = []
+        categorized[item_type].append(item)
     
-    # Build output in order
+    # Build output with custom emojis
     sections = []
-    for category in category_order:
-        if category in categorized and categorized[category]:
-            category_items = categorized[category]
-            sections.append(f"__**{get_category_form(category, len(category_items))}:**__")
-            for item in category_items:
-                title = item.get("title", "Unknown")
-                url = item.get("url", "")
-                if url:
-                    sections.append(f"• [{title}]({url})")
-                else:
-                    sections.append(f"• {title}")
-            sections.append("")  # Empty line between categories
+    
+    # Process each category with custom emoji
+    for item_type, type_items in categorized.items():
+        emoji = get_item_type_emoji(item_type)
+        
+        # Format category name with emoji
+        category_name = item_type.capitalize()
+        sections.append(f"{emoji} {category_name}:")
+        
+        # Add items in this category
+        for item in type_items:
+            title = item.get("title", "Unknown")
+            sections.append(f"  {title}")
+        
+        sections.append("")  # Empty line between categories
     
     # Remove trailing empty line and join
     if sections and sections[-1] == "":
@@ -1838,38 +1902,184 @@ class CategoryButton(discord.ui.Button):
 
 
 class CategoryButtonsView(discord.ui.View):
-    """Dynamic view with category buttons for grouped items."""
-    def __init__(self, items: list[dict], location: str, price: str, timeout: float = None, 
-                 include_close_button: bool = False):
+    """Dynamic view with category buttons for grouped items using custom emojis."""
+    def __init__(self, items: list[dict], location: str, timeout: float = None):
         super().__init__(timeout=timeout)
-        self.items = items
+        self.items = items  # Structured items with name, image, price, location, rarity, type
         self.location = location
-        self.price = price
         
-        # Categorize items and create buttons dynamically
+        # Group items by type
         categories = {}
         for item in items:
-            category = categorize_item(item)
-            if category not in categories:
-                categories[category] = []
-            categories[category].append(item)
+            item_type = item.get('type', 'misc')
+            if item_type not in categories:
+                categories[item_type] = []
+            categories[item_type].append(item)
         
-        # Define category order for button layout
-        category_order = [
-            "Axes", "Bows", "Daggers", "Gauntlets", "Guns", "HandGuns", 
-            "Maces", "Polearms", "Rifles", "Staffs", "Swords", "Wands", "Whips",
-            "Weapon", "Armor", "Helm", "Cape", "Pet", "Misc"
-        ]
+        # Add buttons for each category with custom emojis
+        for item_type, type_items in categories.items():
+            emoji = get_item_type_emoji(item_type)
+            # Get a representative item name for the button label
+            first_item_name = type_items[0].get('name', 'Unknown')
+            # Truncate if too long
+            display_name = first_item_name[:20] + "..." if len(first_item_name) > 20 else first_item_name
+            button = ItemCategoryButton(item_type, type_items, self, emoji, display_name, len(type_items))
+            self.add_item(button)
+
+
+class ItemCategoryButton(discord.ui.Button):
+    """Button for item category with custom emoji and ephemeral pagination."""
+    def __init__(self, item_type: str, items: list[dict], view: CategoryButtonsView, 
+                 emoji: str, display_name: str, count: int):
+        self.item_type = item_type
+        self.items = items
+        self.view_ref = view
         
-        # Add buttons in order, but only for categories that have items
-        for category in category_order:
-            if category in categories:
-                button = CategoryButton(category, categories[category], self)
-                self.add_item(button)
+        super().__init__(
+            label=f"{display_name} ({count})",
+            style=discord.ButtonStyle.secondary,
+            emoji=emoji
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        """Show ephemeral item viewer for this category."""
+        await interaction.response.send_message(
+            embed=self.create_item_embed(0),
+            view=ItemPaginationView(self.items),
+            ephemeral=True
+        )
+    
+    def create_item_embed(self, index: int) -> discord.Embed:
+        """Create embed for item at specific index."""
+        if index >= len(self.items):
+            return discord.Embed(title="No items", color=discord.Color.red())
         
-        # Add close button only if explicitly requested (for ephemeral messages)
-        if include_close_button:
-            self.add_item(ClosePaneButton())
+        item = self.items[index]
+        
+        embed = discord.Embed(
+            title=item.get('name', 'Unknown'),
+            description=f"Item {index + 1} of {len(self.items)}",
+            color=discord.Color.blue()
+        )
+        
+        # Add fields
+        if item.get('location') and item.get('location') != 'Unknown':
+            embed.add_field(name="Location", value=item['location'], inline=True)
+        
+        if item.get('rarity') and item.get('rarity') != 'Unknown':
+            embed.add_field(name="Rarity", value=item['rarity'], inline=True)
+        
+        if item.get('price') and item.get('price') != 'Unknown':
+            embed.add_field(name="Price", value=item['price'], inline=True)
+        
+        # Add image if available
+        if item.get('image'):
+            embed.set_image(url=item['image'])
+        
+        return embed
+
+
+class ItemPaginationView(discord.ui.View):
+    """Ephemeral pagination view for items."""
+    def __init__(self, items: list[dict], timeout: float = 180.0):
+        super().__init__(timeout=timeout)
+        self.items = items
+        self.current_index = 0
+        
+        # Add navigation buttons
+        self.add_item(PreviousButton(self))
+        self.add_item(NextButton(self))
+        self.add_item(CloseButton())
+    
+    def get_current_embed(self) -> discord.Embed:
+        """Get embed for current item index."""
+        if not self.items:
+            return discord.Embed(title="No items available", color=discord.Color.red())
+        
+        item = self.items[self.current_index]
+        
+        embed = discord.Embed(
+            title=item.get('name', 'Unknown'),
+            description=f"Item {self.current_index + 1} of {len(self.items)}",
+            color=discord.Color.blue()
+        )
+        
+        # Add fields
+        if item.get('location') and item.get('location') != 'Unknown':
+            embed.add_field(name="Location", value=item['location'], inline=True)
+        
+        if item.get('rarity') and item.get('rarity') != 'Unknown':
+            embed.add_field(name="Rarity", value=item['rarity'], inline=True)
+        
+        if item.get('price') and item.get('price') != 'Unknown':
+            embed.add_field(name="Price", value=item['price'], inline=True)
+        
+        # Add image if available
+        if item.get('image'):
+            embed.set_image(url=item['image'])
+        
+        return embed
+
+
+class PreviousButton(discord.ui.Button):
+    """Button to go to previous item."""
+    def __init__(self, view: ItemPaginationView):
+        self.view_ref = view
+        super().__init__(
+            label="Previous",
+            style=discord.ButtonStyle.secondary,
+            emoji="Previous"
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view_ref
+        if view.current_index > 0:
+            view.current_index -= 1
+            await interaction.response.edit_message(
+                embed=view.get_current_embed(),
+                view=view
+            )
+        else:
+            await interaction.response.defer()
+
+
+class NextButton(discord.ui.Button):
+    """Button to go to next item."""
+    def __init__(self, view: ItemPaginationView):
+        self.view_ref = view
+        super().__init__(
+            label="Next",
+            style=discord.ButtonStyle.secondary,
+            emoji="Next"
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view_ref
+        if view.current_index < len(view.items) - 1:
+            view.current_index += 1
+            await interaction.response.edit_message(
+                embed=view.get_current_embed(),
+                view=view
+            )
+        else:
+            await interaction.response.defer()
+
+
+class CloseButton(discord.ui.Button):
+    """Button to close ephemeral message."""
+    def __init__(self):
+        super().__init__(
+            label="Close",
+            style=discord.ButtonStyle.secondary,
+            emoji="Close"
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content="Item viewer closed.",
+            embed=None,
+            view=None
+        )
 
 
 class EphemeralCategoryView(CategoryButtonsView):
@@ -2320,28 +2530,26 @@ def get_categories_from_items(items: list[dict]) -> dict[str, list[dict]]:
 
 
 # ---------------- EMBED CREATION ----------------
-async def create_grouped_embed(group_key: str, items: list[dict]) -> tuple[discord.Embed, CategoryButtonsView]:
-    """Create a grouped embed for items with same Location and Price with ephemeral images."""
-    # Extract location and price from first item since group_key is now a string hash
+async def create_grouped_embed(group_key: str, items: list[dict]) -> tuple[discord.Embed, discord.ui.View]:
+    """Create a grouped embed with custom emojis and no prices."""
+    # Extract location from first item
     if items:
         first_item = items[0]
         location = first_item.get("location", "Unknown")
-        price = first_item.get("price", "Unknown")
     else:
         location = "Unknown"
-        price = "Unknown"
     
     # Get daily gift number and generate title
     gift_number = await get_and_increment_counter("daily_gift")
     title = generate_daily_gift_title(gift_number)
     
-    # Create categorized item list
+    # Create categorized item list with custom emojis
     item_list = create_categorized_item_list(items)
     
-    # Build description
+    # Build description with new formatting
     description_parts = [
-        f"**Location:** {location}",
-        f"**Price:** {price}",
+        f"**Location:**",
+        location,
         "",
         item_list
     ]
@@ -2358,29 +2566,22 @@ async def create_grouped_embed(group_key: str, items: list[dict]) -> tuple[disco
         color=0xFF4500,
     )
     
-    # NO thumbnail for grouped embeds (as requested)
-    # Only single-item posts get thumbnail images
-    
     embed.set_footer(text=f"AQW Daily Gift - {len(items)} items grouped")
     
-    # Collect all images from all items for ephemeral view
-    all_images = []
+    # Create structured items for the view
+    structured_items = []
     for item in items:
-        if item.get("images"):
-            all_images.extend(item.get("images", []))
-        elif item.get("image"):
-            all_images.append(item["image"])
-    
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_images = []
-    for img in all_images:
-        if img and img not in seen:
-            seen.add(img)
-            unique_images.append(img)
+        structured_items.append({
+            'name': item.get('title', 'Unknown'),
+            'image': item.get('image_url', item.get('image', '')),
+            'price': item.get('price', 'Unknown'),
+            'location': item.get('location', 'Unknown'),
+            'rarity': item.get('rarity', 'Unknown'),
+            'type': detect_item_type_from_title(item.get('title', ''))
+        })
     
     # Create category buttons view for grouped items
-    view = CategoryButtonsView(items, location, price)
+    view = CategoryButtonsView(structured_items, location)
     
     return embed, view
     
@@ -5116,7 +5317,7 @@ def create_embed(post: dict) -> discord.Embed:
     embed.set_footer(text="AQW Daily Gift")
     return embed
 
-async def create_pane_embed(post: dict) -> tuple[discord.Embed, PublicPaneView]:
+async def create_pane_embed(post: dict) -> tuple[discord.Embed, discord.ui.View]:
     """Create an embed with Show Pane functionality for images."""
     wrapped_content = _wrap_lines(post["content"])
     # Remove title_icons to eliminate aegift hyperlink below item name
@@ -5133,15 +5334,82 @@ async def create_pane_embed(post: dict) -> tuple[discord.Embed, PublicPaneView]:
         description=f"⠀\n**[{post['title']}]({post['url']})**\n\n{desc}",
         color=0xFF4500,
     )
-    # Note: Image will be shown in ephemeral message only
+    # Set thumbnail for single posts
+    if post.get("image"):
+        embed.set_thumbnail(url=post["image"])
+    # Note: Full image will be shown in ephemeral message only
     embed.set_footer(text="AQW Daily Gift")
     
-    # Create view with image URL if available
-    view = None
-    if post.get("image"):
-        view = PublicPaneView(post["image"], post["title"])
+    # Create view with item-type button
+    item_type = detect_item_type_from_title(post.get('title', ''))
+    structured_item = {
+        'name': post.get('title', 'Unknown'),
+        'image': post.get('image', ''),
+        'price': post.get('price', 'Unknown'),
+        'location': post.get('location', 'Unknown'),
+        'rarity': post.get('rarity', 'Unknown'),
+        'type': item_type
+    }
+    view = SingleItemView(structured_item)
     
     return embed, view
+
+
+class SingleItemView(discord.ui.View):
+    """View for single items with item-type button."""
+    def __init__(self, item: dict, timeout: float = None):
+        super().__init__(timeout=timeout)
+        self.item = item
+        
+        # Add item-type button
+        emoji = get_item_type_emoji(item.get('type', 'misc'))
+        button = SingleItemButton(item, emoji)
+        self.add_item(button)
+
+
+class SingleItemButton(discord.ui.Button):
+    """Button for single item with custom emoji."""
+    def __init__(self, item: dict, emoji: str):
+        self.item = item
+        super().__init__(
+            label=item.get('name', 'Unknown')[:20],  # Truncate if too long
+            style=discord.ButtonStyle.secondary,
+            emoji=emoji
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        """Show ephemeral item viewer."""
+        await interaction.response.send_message(
+            embed=self.create_item_embed(),
+            view=ItemPaginationView([self.item]),
+            ephemeral=True
+        )
+    
+    def create_item_embed(self) -> discord.Embed:
+        """Create embed for this item."""
+        item = self.item
+        
+        embed = discord.Embed(
+            title=item.get('name', 'Unknown'),
+            description="Item Details",
+            color=discord.Color.blue()
+        )
+        
+        # Add fields
+        if item.get('location') and item.get('location') != 'Unknown':
+            embed.add_field(name="Location", value=item['location'], inline=True)
+        
+        if item.get('rarity') and item.get('rarity') != 'Unknown':
+            embed.add_field(name="Rarity", value=item['rarity'], inline=True)
+        
+        if item.get('price') and item.get('price') != 'Unknown':
+            embed.add_field(name="Price", value=item['price'], inline=True)
+        
+        # Add image if available
+        if item.get('image'):
+            embed.set_image(url=item['image'])
+        
+        return embed
 
 
 # ---------------- SMART POLLING STATE ----------------
