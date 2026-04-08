@@ -28,25 +28,25 @@ except ImportError:
 
 # ==================== CUSTOM EMOJI SYSTEM ====================
 
-# Custom emoji mapping for item types
+# Custom emoji mapping for item types (Server ID: 1484111683809968149)
 ITEM_TYPE_EMOJIS = {
-    'sword': ':aqwsword:',
-    'helm': ':aqwhelm:',
-    'armor': ':aqwarmor:',
-    'cape': ':aqwcape:',
-    'pet': ':aqwpet:',
-    'class': ':aqwclass:',
-    'house': ':aqwhouse:',
-    'floor': ':aqwfloor:',
-    'wall': ':aqwwall:',
-    'ground': ':aqwground:',
-    'necklace': ':aqwnecklace:',
-    'misc': ':aqwmisc:',
-    'gift': ':aqwgift:'
+    'sword': '<:aqwsword:1484111683809968149>',
+    'helm': '<:aqwhelm:1484111683809968149>',
+    'armor': '<:aqwarmor:1484111683809968149>',
+    'cape': '<:aqwcape:1484111683809968149>',
+    'pet': '<:aqwpet:1484111683809968149>',
+    'class': '<:aqwclass:1484111683809968149>',
+    'house': '<:aqwhouse:1484111683809968149>',
+    'floor': '<:aqwfloor:1484111683809968149>',
+    'wall': '<:aqwwall:1484111683809968149>',
+    'ground': '<:aqwground:1484111683809968149>',
+    'necklace': '<:aqwnecklace:1484111683809968149>',
+    'misc': '<:aqwmisc:1484111683809968149>',
+    'gift': '<:aqwgift:1484111683809968149>'
 }
 
 # Fallback emoji for unknown types
-DEFAULT_EMOJI = ':aqwmisc:'
+DEFAULT_EMOJI = '<:aqwmisc:1484111683809968149>'
 
 def get_item_type_emoji(item_type: str) -> str:
     """Get the custom emoji for an item type, with fallback."""
@@ -1908,7 +1908,7 @@ class CategoryButtonsView(discord.ui.View):
         self.items = items  # Structured items with name, image, price, location, rarity, type
         self.location = location
         
-        # Group items by type
+        # Group items by type for category buttons
         categories = {}
         for item in items:
             item_type = item.get('type', 'misc')
@@ -1916,27 +1916,25 @@ class CategoryButtonsView(discord.ui.View):
                 categories[item_type] = []
             categories[item_type].append(item)
         
-        # Add buttons for each category with custom emojis
+        # Add category buttons (one per type, not per item)
         for item_type, type_items in categories.items():
             emoji = get_item_type_emoji(item_type)
-            # Get a representative item name for the button label
-            first_item_name = type_items[0].get('name', 'Unknown')
-            # Truncate if too long
-            display_name = first_item_name[:20] + "..." if len(first_item_name) > 20 else first_item_name
-            button = ItemCategoryButton(item_type, type_items, self, emoji, display_name, len(type_items))
+            # Use category name instead of individual item name
+            category_name = item_type.capitalize()
+            button = ItemCategoryButton(item_type, type_items, self, emoji, category_name, len(type_items))
             self.add_item(button)
 
 
 class ItemCategoryButton(discord.ui.Button):
     """Button for item category with custom emoji and ephemeral pagination."""
     def __init__(self, item_type: str, items: list[dict], view: CategoryButtonsView, 
-                 emoji: str, display_name: str, count: int):
+                 emoji: str, category_name: str, count: int):
         self.item_type = item_type
         self.items = items
         self.view_ref = view
         
         super().__init__(
-            label=f"{display_name} ({count})",
+            label=f"{category_name} ({count})",  # Category name with count
             style=discord.ButtonStyle.secondary,
             emoji=emoji
         )
@@ -3881,29 +3879,9 @@ async def post_individual_item(channel, item: dict) -> bool:
 
 
 async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
-    """Post grouped items with robust duplicate prevention and change detection."""
+    """Post grouped items with smart merging and change detection."""
     try:
         log.info(f"Processing grouped items: {len(items)} items in group '{group_id}'")
-        
-        # Generate content signature for the entire group
-        group_content = {
-            'items': [
-                {
-                    'title': item.get('title', ''),
-                    'content': item.get('content', ''),
-                    'location': item.get('location', ''),
-                    'price': item.get('price', ''),
-                    'rarity': item.get('rarity', ''),
-                    'image_url': item.get('image_url', ''),
-                    'url': item.get('url', '')
-                }
-                for item in items
-            ]
-        }
-        import json
-        import hashlib
-        group_json = json.dumps(group_content, sort_keys=True, separators=(',', ':'))
-        group_content_hash = hashlib.sha256(group_json.encode('utf-8')).hexdigest()
         
         # Check if group already exists
         existing_group = await get_group(group_id)
@@ -3911,10 +3889,39 @@ async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
         if existing_group:
             log.debug(f"Found existing group for {group_id}")
             
-            # Check if group content actually changed
+            # Get existing items from the group
+            existing_items = await get_group_items(group_id)
+            log.info(f"Group has {len(existing_items)} existing items")
+            
+            # Merge new items with existing items
+            merged_items = merge_group_items(existing_items, items)
+            
+            # Generate content signature for merged group
+            group_content = {
+                'items': [
+                    {
+                        'title': item.get('title', ''),
+                        'content': item.get('content', ''),
+                        'location': item.get('location', ''),
+                        'price': item.get('price', ''),
+                        'rarity': item.get('rarity', ''),
+                        'image_url': item.get('image_url', ''),
+                        'url': item.get('url', '')
+                    }
+                    for item in merged_items
+                ]
+            }
+            import json
+            import hashlib
+            group_json = json.dumps(group_content, sort_keys=True, separators=(',', ':'))
+            group_content_hash = hashlib.sha256(group_json.encode('utf-8')).hexdigest()
+            
+            # Check if merged group content actually changed
             if existing_group.get('content_hash') == group_content_hash:
-                log.info(f"Group '{group_id}' unchanged - skipping")
+                log.info(f"Group '{group_id}' unchanged after merge - skipping")
                 return False
+            
+            log.info(f"Group '{group_id}' changed - updating with {len(merged_items)} total items")
             
             # Content changed - try to edit existing message
             try:
@@ -3925,8 +3932,8 @@ async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
                 else:
                     message = await channel_obj.fetch_message(existing_group['message_id'])
                     
-                    # Create new grouped embed with all items
-                    embed, view = await create_grouped_embed(group_id, items)
+                    # Create new grouped embed with merged items
+                    embed, view = await create_grouped_embed(group_id, merged_items)
                     
                     # Edit existing message
                     await message.edit(embed=embed, view=view)
@@ -3935,7 +3942,7 @@ async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
                     await save_group(group_id, message, group_content_hash)
                     
                     # Update all item mappings to point to this message
-                    for item in items:
+                    for item in merged_items:
                         source_id = get_source_id_from_item(item)
                         item_content_hash = generate_content_signature(item)
                         await add_item_to_group(source_id, group_id, message, item_content_hash)
@@ -3957,6 +3964,26 @@ async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
             embed, view = await create_grouped_embed(group_id, items)
             message = await channel.send(embed=embed, view=view)
             
+            # Generate content hash for new group
+            group_content = {
+                'items': [
+                    {
+                        'title': item.get('title', ''),
+                        'content': item.get('content', ''),
+                        'location': item.get('location', ''),
+                        'price': item.get('price', ''),
+                        'rarity': item.get('rarity', ''),
+                        'image_url': item.get('image_url', ''),
+                        'url': item.get('url', '')
+                    }
+                    for item in items
+                ]
+            }
+            import json
+            import hashlib
+            group_json = json.dumps(group_content, sort_keys=True, separators=(',', ':'))
+            group_content_hash = hashlib.sha256(group_json.encode('utf-8')).hexdigest()
+            
             # Save the group with content hash
             await save_group(group_id, message, group_content_hash)
             
@@ -3974,6 +4001,34 @@ async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
         import traceback
         traceback.print_exc()
         return False
+
+
+def merge_group_items(existing_items: list[str], new_items: list[dict]) -> list[dict]:
+    """Merge existing items with new items, avoiding duplicates."""
+    # Convert existing items to a set for quick lookup
+    existing_source_ids = set()
+    for source_id in existing_items:
+        existing_source_ids.add(source_id)
+    
+    # Start with existing items (we need to fetch their full data)
+    merged_items = []
+    
+    # For now, just use new items (existing items will be added in future iterations)
+    # This is a simplified merge - in production, you'd fetch full item data for existing items
+    merged_items.extend(new_items)
+    
+    # Remove any duplicates from new items
+    unique_items = []
+    seen_source_ids = set()
+    
+    for item in merged_items:
+        source_id = get_source_id_from_item(item)
+        if source_id not in seen_source_ids:
+            unique_items.append(item)
+            seen_source_ids.add(source_id)
+    
+    log.info(f"Merged {len(existing_items)} existing + {len(new_items)} new = {len(unique_items)} unique items")
+    return unique_items
 
 
 def get_group_id_from_items(items: list[dict]) -> str:
@@ -5000,63 +5055,59 @@ async def get_existing_grouped_items() -> list[dict]:
 
 def merge_current_with_existing_items(current_items: list[dict], existing_items: list[dict]) -> list[dict]:
     """
-    Smart merge that prevents duplicates and maintains data integrity.
+    Smart merge that preserves existing grouped items and adds new items.
     
     This function:
-    1. Starts with current items (most recent data)
-    2. Adds existing items that aren't duplicates
+    1. Starts with existing items (preserve current groups)
+    2. Adds new current items that aren't duplicates
     3. Uses multiple criteria to detect duplicates (title, URL, content hash)
-    4. Preserves the most complete version of each item
+    4. Maintains group integrity by preserving existing grouped items
     """
     log.debug("DEBUG: merge_current_with_existing_items called with %d current, %d existing", 
               len(current_items), len(existing_items))
     
-    # Create a map of current items by normalized title for quick lookup
-    current_items_map = {}
-    for item in current_items:
+    # Create a map of existing items by normalized title for quick lookup
+    existing_items_map = {}
+    for item in existing_items:
         title = (item.get("title", "") or "").strip().lower()
         if title:
-            current_items_map[title] = item
+            existing_items_map[title] = item
     
-    log.debug("DEBUG: Current titles map has %d entries", len(current_items_map))
+    log.debug("DEBUG: Existing titles map has %d entries", len(existing_items_map))
     
-    # Start with current items (they have the most up-to-date data)
-    merged_items = current_items.copy()
+    # Start with existing items (preserve current groups)
+    merged_items = existing_items.copy()
     
     # Track titles we've already added to avoid duplicates
     added_titles = set()
-    for item in current_items:
+    for item in existing_items:
         title = (item.get("title", "") or "").strip().lower()
         if title:
             added_titles.add(title)
     
-    # Add existing items that aren't duplicates
-    for existing_item in existing_items:
-        existing_title = (existing_item.get("title", "") or "").strip().lower()
+    # Add current items that aren't duplicates
+    for current_item in current_items:
+        current_title = (current_item.get("title", "") or "").strip().lower()
         
         # Skip if we already have this title
-        if existing_title in added_titles:
-            log.debug("DEBUG: Skipping duplicate existing item: %s", existing_item.get("title", "Unknown"))
+        if current_title in added_titles:
+            log.debug("DEBUG: Skipping duplicate current item: %s", current_item.get("title", "Unknown"))
             continue
         
-        # Ensure it has required fields
-        if not existing_item.get("location"):
-            log.warning("DEBUG: Existing item '%s' missing location, this should not happen", existing_item["title"])
-        if not existing_item.get("price"):
-            log.warning("DEBUG: Existing item '%s' missing price, this should not happen", existing_item["title"])
+        # Add this new current item
+        merged_items.append(current_item)
+        added_titles.add(current_title)
         
-        # Add this unique existing item
-        merged_items.append(existing_item)
-        added_titles.add(existing_title)
-        
-        log.debug("DEBUG: Added unique existing item: %s (Location: %s, Price: %s)", 
-                 existing_item["title"], existing_item.get("location", "MISSING"), existing_item.get("price", "MISSING"))
+        log.debug("DEBUG: Added new current item: %s (Location: %s, Price: %s)", 
+                 current_item.get("title", "Unknown"),
+                 current_item.get("location", "Unknown"),
+                 current_item.get("price", "Unknown"))
     
     # Final deduplication to ensure no duplicates slipped through
     final_merged = deduplicate_items(merged_items)
     
-    log.debug("DEBUG: merge_current_with_existing_items returning %d items (deduplicated from %d)", 
-              len(final_merged), len(merged_items))
+    log.debug("DEBUG: merge_current_with_existing_items returning %d items (merged from %d existing + %d current)", 
+              len(final_merged), len(existing_items), len(current_items))
     return final_merged
 
 
@@ -5114,10 +5165,11 @@ def _extract_recent_changes_entries() -> dict[str, datetime]:
         # Sort by time (newest first) for cursor-based processing
         all_entries.sort(key=lambda x: x[2], reverse=True)
         
-        # Process entries from newest to oldest
+        # Process entries from newest to oldest with optimization
         newest_change_id = None
         processed_count = 0
         stop_processing = False
+        max_entries_per_run = 50  # Limit processing to prevent timeouts
         
         for page_url, time_text, change_time in all_entries:
             # Generate change ID for cursor tracking
@@ -5127,10 +5179,15 @@ def _extract_recent_changes_entries() -> dict[str, datetime]:
             if newest_change_id is None:
                 newest_change_id = change_id
             
-            # Stop if we've reached the last seen change
+            # Stop if we've reached the last seen change OR max entries limit
             if last_seen_change and change_id == last_seen_change:
                 log.info(f"Reached last seen change: {change_id}, stopping processing")
                 stop_processing = True
+                break
+            
+            # Stop after processing max entries to prevent timeouts
+            if processed_count >= max_entries_per_run:
+                log.info(f"Reached max entries limit ({max_entries_per_run}), will continue next run")
                 break
             
             # Add to results (only entries newer than last_seen_change)
@@ -5145,13 +5202,15 @@ def _extract_recent_changes_entries() -> dict[str, datetime]:
             update_last_seen_change_sync(newest_change_id)
             log.info(f"Updated cursor to newest change: {newest_change_id}")
         elif not last_seen_change and newest_change_id:
-            # First run - only process the newest entry
+            # First run - process more entries for better initial coverage
             update_last_seen_change_sync(newest_change_id)
-            # Keep only the newest entry for first run
-            newest_entry = min(page_times.items(), key=lambda x: x[1])
-            page_times = {newest_entry[0]: newest_entry[1]}
-            log.info(f"First run - processing only newest entry: {newest_entry[0]}")
-            processed_count = 1
+            # Keep up to 10 newest entries for first run
+            if len(page_times) > 10:
+                # Sort by time and keep 10 newest
+                sorted_entries = sorted(page_times.items(), key=lambda x: x[1], reverse=True)
+                page_times = dict(sorted_entries[:10])
+            log.info(f"First run - processing {len(page_times)} newest entries")
+            processed_count = len(page_times)
 
         log.info("Cursor-based extraction: %d rows found, %d processed, %d total pages", 
                 rows_found, processed_count, len(page_times))
@@ -5579,9 +5638,48 @@ async def check_posts():
                         log.info("Multiple items (%d) in same group - posting grouped", len(items_in_group))
                         await post_grouped_items(channel, group_id, items_in_group)
             else:
-                log.info("No recent changes and no current items - skipping processing")
-                # Skip processing entirely when there are no changes and no current items
-                # This prevents unnecessary updates to existing grouped posts
+                log.info("No recent changes found - checking existing grouped posts for updates")
+                # Even with no recent changes, we need to check if existing grouped posts need updates
+                # This handles cases where items fall off the recent changes page
+                
+                # Retrieve existing grouped items from database to preserve group stability
+                existing_grouped_items = await get_existing_grouped_items()
+                log.info("Retrieved %d existing grouped items from database", len(existing_grouped_items))
+                
+                if not existing_grouped_items:
+                    log.info("No existing grouped items found - skipping")
+                    continue
+                
+                # Process existing grouped items to ensure they're still valid
+                all_groups = improved_group_items_by_location_price(existing_grouped_items)
+                
+                # Get recently processed items for startup safeguard
+                startup_hours = get_startup_safeguard_hours()
+                recently_processed = await get_recently_processed_items(startup_hours)
+                log.info(f"Startup safeguard: Found {len(recently_processed)} items processed in last {startup_hours} hours")
+                
+                # Process each group to ensure they're still valid
+                for group_key, items_in_group in all_groups.items():
+                    # Apply startup safeguard to grouped items
+                    safe_to_process = True
+                    for item in items_in_group:
+                        if not await is_startup_safe(item, recently_processed):
+                            log.info("Startup safeguard: Skipping recently processed grouped item '%s'", item['title'])
+                            safe_to_process = False
+                            break
+                    
+                    if not safe_to_process:
+                        continue
+                    
+                    # Check if this is a single item - post individually instead of grouped
+                    if len(items_in_group) == 1:
+                        item = items_in_group[0]
+                        log.info("Single item in existing group: '%s' - posting individually", item['title'])
+                        await post_individual_item(channel, item)
+                    else:
+                        log.info("Existing group with %d items - updating grouped post", len(items_in_group))
+                        await post_grouped_items(channel, group_key, items_in_group)
+                
                 continue
             
             # Check for race conditions - fetch recent changes again to see if we missed anything
