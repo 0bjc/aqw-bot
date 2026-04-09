@@ -371,13 +371,24 @@ async def get_post(source_id: str) -> dict | None:
 
 async def save_single_post(source_id: str, message, content_hash: str = None) -> None:
     """Save a single post record (group_id = NULL) with content hash."""
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            INSERT OR REPLACE INTO posts 
-            (source_id, message_id, channel_id, group_id, content_hash, updated_at) 
-            VALUES (?, ?, ?, NULL, ?, CURRENT_TIMESTAMP)
-        """, (source_id, message.id, message.channel.id, content_hash))
-        await db.commit()
+    try:
+        async with aiosqlite.connect(DB) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await db.execute("""
+                    INSERT OR REPLACE INTO posts 
+                    (source_id, message_id, channel_id, group_id, content_hash, updated_at) 
+                    VALUES (?, ?, ?, NULL, ?, CURRENT_TIMESTAMP)
+                """, (source_id, message.id, message.channel.id, content_hash))
+                await db.commit()
+                log.debug(f"Successfully saved post for {source_id}")
+            except Exception as e:
+                await db.rollback()
+                log.error(f"Failed to save post for {source_id}: {e}")
+                raise
+    except Exception as e:
+        log.error(f"Database connection error in save_single_post: {e}")
+        raise
 
 
 async def get_group(group_id: str) -> dict | None:
@@ -402,24 +413,46 @@ async def get_group(group_id: str) -> dict | None:
 
 async def save_group(group_id: str, message, content_hash: str = None) -> None:
     """Save a new group record with content hash."""
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            INSERT OR REPLACE INTO groups 
-            (group_id, message_id, channel_id, content_hash, updated_at) 
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """, (group_id, message.id, message.channel.id, content_hash))
-        await db.commit()
+    try:
+        async with aiosqlite.connect(DB) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await db.execute("""
+                    INSERT OR REPLACE INTO groups 
+                    (group_id, message_id, channel_id, content_hash, updated_at) 
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (group_id, message.id, message.channel.id, content_hash))
+                await db.commit()
+                log.debug(f"Successfully saved group {group_id}")
+            except Exception as e:
+                await db.rollback()
+                log.error(f"Failed to save group {group_id}: {e}")
+                raise
+    except Exception as e:
+        log.error(f"Database connection error in save_group: {e}")
+        raise
 
 
 async def add_item_to_group(source_id: str, group_id: str, message, content_hash: str = None) -> None:
     """Add an item to a group (maps source_id to group's message) with content hash."""
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("""
-            INSERT OR REPLACE INTO posts 
-            (source_id, message_id, channel_id, group_id, content_hash, updated_at) 
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """, (source_id, message.id, message.channel.id, group_id, content_hash))
-        await db.commit()
+    try:
+        async with aiosqlite.connect(DB) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await db.execute("""
+                    INSERT OR REPLACE INTO posts 
+                    (source_id, message_id, channel_id, group_id, content_hash, updated_at) 
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (source_id, message.id, message.channel.id, group_id, content_hash))
+                await db.commit()
+                log.debug(f"Successfully added {source_id} to group {group_id}")
+            except Exception as e:
+                await db.rollback()
+                log.error(f"Failed to add {source_id} to group {group_id}: {e}")
+                raise
+    except Exception as e:
+        log.error(f"Database connection error in add_item_to_group: {e}")
+        raise
 
 
 async def get_group_items(group_id: str) -> list[str]:
@@ -4108,7 +4141,6 @@ def get_startup_safeguard_hours() -> int:
 def get_last_seen_change_sync() -> str | None:
     """Sync version of get_last_seen_change for use in sync contexts."""
     try:
-        # Use a simple synchronous approach
         import sqlite3
         with sqlite3.connect(DB) as conn:
             cursor = conn.execute("""
@@ -4126,15 +4158,22 @@ def update_last_seen_change_sync(change_id: str) -> None:
     try:
         import sqlite3
         with sqlite3.connect(DB) as conn:
-            conn.execute("""
-                UPDATE scraper_state 
-                SET value = ?, updated_at = CURRENT_TIMESTAMP 
-                WHERE key = 'last_seen_change'
-            """, (change_id,))
-            conn.commit()
-            log.debug(f"Updated last_seen_change to: {change_id}")
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute("""
+                    UPDATE scraper_state 
+                    SET value = ?, updated_at = CURRENT_TIMESTAMP 
+                    WHERE key = 'last_seen_change'
+                """, (change_id,))
+                conn.commit()
+                log.debug(f"Updated last_seen_change to: {change_id}")
+            except Exception as e:
+                conn.rollback()
+                log.error(f"Error updating last_seen_change (sync): {e}")
+                raise
     except Exception as e:
-        log.error(f"Error updating last_seen_change (sync): {e}")
+        log.error(f"Database connection error in update_last_seen_change_sync: {e}")
+        raise
 
 
 async def get_last_seen_change() -> str | None:
@@ -4155,15 +4194,22 @@ async def update_last_seen_change(change_id: str) -> None:
     """Update the last seen change identifier."""
     try:
         async with aiosqlite.connect(DB) as db:
-            await db.execute("""
-                UPDATE scraper_state 
-                SET value = ?, updated_at = CURRENT_TIMESTAMP 
-                WHERE key = 'last_seen_change'
-            """, (change_id,))
-            await db.commit()
-            log.debug(f"Updated last_seen_change to: {change_id}")
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await db.execute("""
+                    UPDATE scraper_state 
+                    SET value = ?, updated_at = CURRENT_TIMESTAMP 
+                    WHERE key = 'last_seen_change'
+                """, (change_id,))
+                await db.commit()
+                log.debug(f"Updated last_seen_change to: {change_id}")
+            except Exception as e:
+                await db.rollback()
+                log.error(f"Error updating last_seen_change (async): {e}")
+                raise
     except Exception as e:
-        log.error(f"Error updating last_seen_change: {e}")
+        log.error(f"Database connection error in update_last_seen_change: {e}")
+        raise
 
 
 def generate_change_id(page_url: str, timestamp: str) -> str:
@@ -5880,6 +5926,255 @@ async def testaegift(interaction: discord.Interaction):
 @bot.tree.command(name="ping", description="Test if bot is responding")
 async def ping(interaction: discord.Interaction):
     await interaction.response.send_message("Pong! Bot is working!")
+
+
+@bot.tree.command(name="diagnose_db", description="Diagnose database consistency issues")
+@commands.has_permissions(manage_messages=True)
+async def diagnose_db(interaction: discord.Interaction):
+    """Comprehensive database diagnostic tool."""
+    try:
+        await interaction.response.defer(thinking=True)
+        
+        embed = discord.Embed(
+            title="🔍 Database Diagnostic Report",
+            color=discord.Color.blue()
+        )
+        
+        # 1. Check database file integrity
+        try:
+            import sqlite3
+            with sqlite3.connect(DB) as conn:
+                cursor = conn.execute("PRAGMA integrity_check")
+                integrity_result = cursor.fetchone()
+                if integrity_result[0] == "ok":
+                    embed.add_field(name="✅ Database Integrity", value="Database file is healthy", inline=False)
+                else:
+                    embed.add_field(name="❌ Database Integrity", value=f"Issues found: {integrity_result[0]}", inline=False)
+        except Exception as e:
+            embed.add_field(name="❌ Database Check Failed", value=f"Error: {e}", inline=False)
+        
+        # 2. Check for duplicate records
+        try:
+            async with aiosqlite.connect(DB) as db:
+                # Check duplicate source_ids in posts table
+                cursor = await db.execute("""
+                    SELECT source_id, COUNT(*) as count 
+                    FROM posts 
+                    GROUP BY source_id 
+                    HAVING COUNT(*) > 1
+                    LIMIT 5
+                """)
+                duplicates = await cursor.fetchall()
+                
+                if duplicates:
+                    dup_text = "\n".join([f"• {row[0]} ({row[1]} copies)" for row in duplicates])
+                    embed.add_field(name="⚠️ Duplicate Records", value=dup_text, inline=False)
+                else:
+                    embed.add_field(name="✅ Duplicate Check", value="No duplicate source_ids found", inline=False)
+                
+                # Check duplicate group_keys in grouped_posts table
+                cursor = await db.execute("""
+                    SELECT group_key, COUNT(*) as count 
+                    FROM grouped_posts 
+                    GROUP BY group_key 
+                    HAVING COUNT(*) > 1
+                    LIMIT 5
+                """)
+                group_duplicates = await cursor.fetchall()
+                
+                if group_duplicates:
+                    group_dup_text = "\n".join([f"• {row[0][:8]}... ({row[1]} copies)" for row in group_duplicates])
+                    embed.add_field(name="⚠️ Group Duplicates", value=group_dup_text, inline=False)
+                else:
+                    embed.add_field(name="✅ Group Duplicate Check", value="No duplicate group_keys found", inline=False)
+        except Exception as e:
+            embed.add_field(name="❌ Duplicate Check Failed", value=f"Error: {e}", inline=False)
+        
+        # 3. Check cursor state consistency
+        try:
+            last_seen_async = await get_last_seen_change()
+            last_seen_sync = get_last_seen_change_sync()
+            
+            cursor_status = f"Async: {last_seen_async or 'NULL'}\nSync: {last_seen_sync or 'NULL'}"
+            if last_seen_async == last_seen_sync:
+                embed.add_field(name="✅ Cursor Consistency", value="Async and sync cursors match", inline=False)
+            else:
+                embed.add_field(name="⚠️ Cursor Mismatch", value=cursor_status, inline=False)
+        except Exception as e:
+            embed.add_field(name="❌ Cursor Check Failed", value=f"Error: {e}", inline=False)
+        
+        # 4. Check for orphaned records
+        try:
+            async with aiosqlite.connect(DB) as db:
+                # Posts without valid messages
+                cursor = await db.execute("""
+                    SELECT COUNT(*) as count FROM posts 
+                    WHERE message_id IS NULL OR channel_id IS NULL
+                """)
+                orphaned_posts = (await cursor.fetchone())[0]
+                
+                # Groups without valid messages
+                cursor = await db.execute("""
+                    SELECT COUNT(*) as count FROM grouped_posts 
+                    WHERE discord_message_id IS NULL OR discord_channel_id IS NULL
+                """)
+                orphaned_groups = (await cursor.fetchone())[0]
+                
+                orphaned_text = f"Posts: {orphaned_posts}, Groups: {orphaned_groups}"
+                if orphaned_posts > 0 or orphaned_groups > 0:
+                    embed.add_field(name="⚠️ Orphaned Records", value=orphaned_text, inline=False)
+                else:
+                    embed.add_field(name="✅ Orphan Check", value="No orphaned records found", inline=False)
+        except Exception as e:
+            embed.add_field(name="❌ Orphan Check Failed", value=f"Error: {e}", inline=False)
+        
+        # 5. Check database size and performance
+        try:
+            import os
+            if os.path.exists(DB):
+                db_size = os.path.getsize(DB) / (1024 * 1024)  # MB
+                embed.add_field(name="📊 Database Stats", value=f"Size: {db_size:.2f} MB", inline=False)
+                
+                # Check table row counts
+                async with aiosqlite.connect(DB) as db:
+                    posts_count = (await (await db.execute("SELECT COUNT(*) FROM posts")).fetchone())[0]
+                    groups_count = (await (await db.execute("SELECT COUNT(*) FROM groups")).fetchone())[0]
+                    grouped_posts_count = (await (await db.execute("SELECT COUNT(*) FROM grouped_posts")).fetchone())[0]
+                    
+                    stats_text = f"Posts: {posts_count}\nGroups: {groups_count}\nGrouped Posts: {grouped_posts_count}"
+                    embed.add_field(name="📈 Record Counts", value=stats_text, inline=False)
+        except Exception as e:
+            embed.add_field(name="❌ Stats Check Failed", value=f"Error: {e}", inline=False)
+        
+        embed.set_footer(text="Database Diagnostic Complete")
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        log.error("Database diagnostic failed: %s", e)
+        await interaction.followup.send(f"Diagnostic failed: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="clean_db", description="Clean up database inconsistencies")
+@commands.has_permissions(manage_messages=True)
+async def clean_db(interaction: discord.Interaction):
+    """Clean up database inconsistencies found during diagnosis."""
+    try:
+        await interaction.response.defer(thinking=True)
+        
+        embed = discord.Embed(
+            title="🧹 Database Cleanup",
+            description="Cleaning up database inconsistencies...",
+            color=discord.Color.orange()
+        )
+        
+        cleanup_stats = {"duplicates_removed": 0, "orphans_cleaned": 0, "errors_fixed": 0}
+        
+        async with aiosqlite.connect(DB) as db:
+            # 1. Remove duplicate posts (keep newest)
+            try:
+                await db.execute("""
+                    DELETE FROM posts WHERE id NOT IN (
+                        SELECT MAX(id) FROM posts GROUP BY source_id
+                    )
+                """)
+                duplicates_removed = db.total_changes
+                cleanup_stats["duplicates_removed"] = duplicates_removed
+                await db.commit()
+                embed.add_field(name="✅ Duplicates Cleaned", value=f"Removed {duplicates_removed} duplicate posts", inline=False)
+            except Exception as e:
+                log.error("Error cleaning duplicates: %s", e)
+                embed.add_field(name="❌ Duplicate Cleanup Failed", value=f"Error: {e}", inline=False)
+            
+            # 2. Remove duplicate grouped_posts (keep newest)
+            try:
+                await db.execute("""
+                    DELETE FROM grouped_posts WHERE id NOT IN (
+                        SELECT MAX(id) FROM grouped_posts GROUP BY group_key
+                    )
+                """)
+                group_duplicates_removed = db.total_changes
+                cleanup_stats["duplicates_removed"] += group_duplicates_removed
+                await db.commit()
+                embed.add_field(name="✅ Group Duplicates Cleaned", value=f"Removed {group_duplicates_removed} duplicate groups", inline=False)
+            except Exception as e:
+                log.error("Error cleaning group duplicates: %s", e)
+                embed.add_field(name="❌ Group Duplicate Cleanup Failed", value=f"Error: {e}", inline=False)
+            
+            # 3. Remove orphaned records
+            try:
+                await db.execute("DELETE FROM posts WHERE message_id IS NULL OR channel_id IS NULL")
+                orphaned_posts = db.total_changes
+                cleanup_stats["orphans_cleaned"] += orphaned_posts
+                await db.commit()
+                
+                await db.execute("DELETE FROM grouped_posts WHERE discord_message_id IS NULL OR discord_channel_id IS NULL")
+                orphaned_groups = db.total_changes
+                cleanup_stats["orphans_cleaned"] += orphaned_groups
+                await db.commit()
+                
+                embed.add_field(name="✅ Orphans Cleaned", value=f"Removed {orphaned_posts + orphaned_groups} orphaned records", inline=False)
+            except Exception as e:
+                log.error("Error cleaning orphans: %s", e)
+                embed.add_field(name="❌ Orphan Cleanup Failed", value=f"Error: {e}", inline=False)
+            
+            # 4. Vacuum database to optimize
+            try:
+                await db.execute("VACUUM")
+                await db.commit()
+                embed.add_field(name="✅ Database Optimized", value="VACUUM completed", inline=False)
+            except Exception as e:
+                log.error("Error vacuuming database: %s", e)
+                embed.add_field(name="❌ Vacuum Failed", value=f"Error: {e}", inline=False)
+        
+        # Summary
+        total_cleaned = cleanup_stats["duplicates_removed"] + cleanup_stats["orphans_cleaned"]
+        embed.description = f"Cleanup complete! Fixed {total_cleaned} issues."
+        embed.set_footer(text=f"Duplicates: {cleanup_stats['duplicates_removed']} | Orphans: {cleanup_stats['orphans_cleaned']}")
+        
+        await interaction.followup.send(embed=embed)
+        log.info("Database cleanup completed: %s", cleanup_stats)
+        
+        if passed_count == total_count:
+            embed.color = discord.Color.green()
+        elif passed_count >= total_count * 0.7:
+            embed.color = discord.Color.orange()
+        else:
+            embed.color = discord.Color.red()
+        
+        embed.set_footer(text="Run /clean_db to fix identified issues")
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        log.error("Data verification failed: %s", e)
+        await interaction.followup.send(f"Verification failed: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="reset_cursor", description="Reset cursor to force reprocessing from scratch")
+@commands.has_permissions(manage_messages=True)
+async def reset_cursor(interaction: discord.Interaction):
+    """Reset cursor to force reprocessing all changes."""
+    try:
+        await interaction.response.defer(thinking=True)
+        
+        # Reset cursor using both async and sync methods
+        await update_last_seen_change(None)
+        update_last_seen_change_sync(None)
+        
+        embed = discord.Embed(
+            title="🔄 Cursor Reset",
+            description="Cursor has been reset to NULL. Bot will reprocess all changes from scratch.",
+            color=discord.Color.red()
+        )
+        embed.add_field(name="⚠️ Warning", value="This will cause the bot to reprocess all items on next run.", inline=False)
+        embed.set_footer(text="Use /diagnose_db to verify database state")
+        
+        await interaction.followup.send(embed=embed)
+        log.warning("Cursor manually reset by admin command")
+        
+    except Exception as e:
+        log.error("Cursor reset failed: %s", e)
+        await interaction.followup.send(f"Reset failed: {e}", ephemeral=True)
 
 
 @bot.tree.command(name="monitordeletions", description="Monitor if grouped messages are being deleted")
