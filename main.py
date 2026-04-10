@@ -26,6 +26,13 @@ try:
 except ImportError:
     pass  # dotenv not installed, use system environment variables
 
+# ---------------- UTILITIES ----------------
+def datetime_serializer(obj):
+    """JSON serializer for datetime objects."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
 # ==================== CUSTOM EMOJI SYSTEM ====================
 
 # Custom emoji mapping for item types (using actual Discord emoji IDs)
@@ -4477,45 +4484,22 @@ def merge_group_items(existing_items: list[str], new_items: list[dict]) -> list[
 
 
 def get_group_key(item: dict) -> str:
-    """Generate stable CDC-based group key from location and price only."""
-    location = item.get('location', '').strip()
-    price = item.get('price', '').strip()
+    """Generate stable group key from raw location and price values without normalization."""
+    location = item.get('location', '')
+    price = item.get('price', '')
     
     # CDC SAFETY: Fallback to single post if missing required data
     if not location or not price:
         log.debug(f"[GROUP] Missing location or price - treating as single post: location='{location}', price='{price}'")
         return None  # Indicates no grouping
     
-    # NORMALIZATION REQUIREMENTS
-    def normalize_location(loc: str) -> str:
-        """Normalize location for consistent grouping."""
-        if not loc:
-            return None
-        
-        # Trim whitespace, lowercase, replace spaces with hyphens, remove special chars
-        normalized = loc.lower().strip()
-        # Replace multiple spaces with single space
-        normalized = re.sub(r'\s+', ' ', normalized)
-        # Replace spaces with hyphens
-        normalized = normalized.replace(' ', '-')
-        # Remove special characters except hyphens
-        normalized = re.sub(r'[^a-z0-9\-]', '', normalized)
-        # Remove duplicate hyphens
-        normalized = re.sub(r'-+', '-', normalized)
-        # Remove leading/trailing hyphens
-        normalized = normalized.strip('-')
-        
-        return normalized if normalized else None
-    
-    def normalize_price(p: str) -> tuple[str, str]:
+    # Extract numeric value and currency from price without modifying the original
+    def extract_price_components(p: str) -> tuple[str, str]:
         """Extract numeric value and currency from price string."""
         if not p:
             return None, None
         
-        # Trim and normalize
-        p = p.strip().lower()
-        
-        # Extract numeric value
+        # Extract numeric value (handle commas)
         numeric_match = re.search(r'(\d+(?:,\d{3})*(?:\.\d+)?)', p)
         if not numeric_match:
             return None, None
@@ -4523,24 +4507,25 @@ def get_group_key(item: dict) -> str:
         numeric_value = numeric_match.group(1).replace(',', '')
         
         # Extract currency (AC, Gold, etc.)
-        currency_match = re.search(r'(ac|gold|coins|g|c)', p)
+        currency_match = re.search(r'(ac|gold|coins|g|c)', p.lower())
         currency = currency_match.group(1) if currency_match else 'unknown'
         
         return numeric_value, currency
     
-    # Apply normalization
-    normalized_location = normalize_location(location)
-    numeric_price, currency = normalize_price(price)
+    # Use raw location value for grouping stability
+    raw_location = location.strip()
+    numeric_price, currency = extract_price_components(price)
     
-    # CDC SAFETY: Fallback if normalization fails
-    if not normalized_location or not numeric_price or not currency:
-        log.debug(f"[GROUP] Normalization failed - treating as single post: location='{location}' -> '{normalized_location}', price='{price}' -> '{numeric_price}_{currency}'")
+    # CDC SAFETY: Fallback if price parsing fails
+    if not numeric_price or not currency:
+        log.debug(f"[GROUP] Price parsing failed - treating as single post: price='{price}' -> '{numeric_price}_{currency}'")
         return None
     
-    # NEW GROUP KEY FORMAT: location_slug + "__" + price_value + "_" + currency
-    group_key = f"{normalized_location}__{numeric_price}_{currency}"
+    # NEW GROUP KEY FORMAT: raw_location + "__" + price_value + "_" + currency
+    # Using raw location ensures grouping stability without normalization
+    group_key = f"{raw_location}__{numeric_price}_{currency}"
     
-    log.debug(f"[GROUP] Generated key: '{group_key}' from location='{location}' -> '{normalized_location}', price='{price}' -> '{numeric_price}_{currency}'")
+    log.debug(f"[GROUP] Generated key: '{group_key}' from raw location='{location}', price='{price}' -> '{numeric_price}_{currency}'")
     
     return group_key
 
