@@ -5895,27 +5895,79 @@ async def check_posts():
             # Track the last successfully processed change_id for cursor advancement
             latest_processed = None
             
-            # Process items in chronological order (oldest first) to ensure proper cursor advancement
+            # Group items by group_key for proper processing
+            items_by_group = {}
             for post in posts:
                 try:
-                    # Extract source ID and change ID
                     source_id = get_source_id_from_item(post)
                     change_id = post.get('change_id')
+                    group_key = get_group_key(post)
                     
-                    log.info(f"[PROCESS] Processing item source_id={source_id}, change_id={change_id}")
+                    if group_key not in items_by_group:
+                        items_by_group[group_key] = []
                     
-                    # Process the item using the new logic
-                    success = await process_item(post, channel)
+                    items_by_group[group_key].append({
+                        'post': post,
+                        'source_id': source_id,
+                        'change_id': change_id
+                    })
                     
-                    if success:
-                        latest_processed = change_id
-                        log.info(f"[CURSOR] Successfully processed change_id={change_id}")
-                    else:
-                        log.warning(f"[PROCESS] Failed to process change_id={change_id}")
-                        
+                    log.info(f"[GROUP] Item {source_id} assigned to group {group_key}")
+                    
                 except Exception as e:
-                    log.error(f"[PROCESS] Error processing change_id={post.get('change_id')}: {e}")
-                    continue  # Continue to next item even if this one fails
+                    log.error(f"[GROUP] Error grouping item: {e}")
+                    continue
+            
+            # Process each group
+            for group_key, items in items_by_group.items():
+                try:
+                    if len(items) == 1:
+                        # Single item - post individually
+                        item_data = items[0]
+                        post = item_data['post']
+                        change_id = item_data['change_id']
+                        
+                        log.info(f"[SINGLE] Processing single item for group {group_key}")
+                        success = await process_item(post, channel)
+                        
+                        if success:
+                            latest_processed = change_id
+                            log.info(f"[CURSOR] Successfully processed single item change_id={change_id}")
+                        else:
+                            log.warning(f"[SINGLE] Failed to process single item change_id={change_id}")
+                    
+                    else:
+                        # Multiple items - create grouped post
+                        log.info(f"[GROUPED] Processing group {group_key} with {len(items)} items")
+                        
+                        # Extract post objects
+                        group_posts = [item['post'] for item in items]
+                        
+                        # Create grouped post
+                        success = await post_grouped_items(channel, group_key, group_posts)
+                        
+                        if success:
+                            # Update cursor to the latest change_id in this group
+                            latest_change_id = max(item['change_id'] for item in items)
+                            latest_processed = latest_change_id
+                            log.info(f"[CURSOR] Successfully processed group {group_key}, cursor advanced to {latest_processed}")
+                        else:
+                            log.warning(f"[GROUPED] Failed to process group {group_key}")
+                            
+                            # Fallback: process items individually
+                            log.info(f"[FALLBACK] Processing group {group_key} items individually")
+                            for item_data in items:
+                                post = item_data['post']
+                                change_id = item_data['change_id']
+                                
+                                success = await process_item(post, channel)
+                                if success:
+                                    latest_processed = change_id
+                                    log.info(f"[FALLBACK] Successfully processed fallback item change_id={change_id}")
+                
+                except Exception as e:
+                    log.error(f"[GROUP] Error processing group {group_key}: {e}")
+                    continue
             
             # Update cursor ONLY after all processing is complete
             if latest_processed:
