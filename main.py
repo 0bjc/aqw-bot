@@ -573,7 +573,7 @@ def generate_daily_gift_title(gift_number: int) -> str:
     weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     current_weekday = weekday_names[datetime.now().weekday()]
     
-    return f"<:aqwgift:1491402207894179850> __{current_weekday} Daily Gift__ <:aqwgift:1491402207894179850>"
+    return f"<:aqwgift:1491402775009955950> __{current_weekday} Daily Gift__ <:aqwgift:1491402775009955950>"
 
 
 def extract_breadcrumb_category(html_content: str, page_url: str = "") -> str:
@@ -1394,7 +1394,7 @@ def create_categorized_item_list(items: list[dict]) -> str:
         
         # Format category name with emoji
         category_name = item_type.capitalize()
-        sections.append(f"{emoji} {category_name}:")
+        sections.append(f"__**{emoji} {category_name}:**__")
         
         # Add items in this category
         for item in type_items:
@@ -2599,7 +2599,7 @@ async def create_grouped_embed(group_key: str, items: list[dict]) -> tuple[disco
     
     # Build description with new formatting
     description_parts = [
-        f"**Location:**",
+        f"__**Location:**__",
         location,
         "",
         item_list
@@ -5714,6 +5714,10 @@ async def check_posts():
                         # Apply startup safeguard
                         if not await is_startup_safe(item, recently_processed):
                             log.info("Startup safeguard: Skipping recently processed individual item '%s'", item['title'])
+                            # Still advance cursor to prevent infinite loops
+                            if item.get('change_id'):
+                                last_successful_change_id = item['change_id']
+                                log.info(f"Cursor candidate -> {item['change_id']} (skipped by safeguard)")
                             continue
                         
                         log.info("Single item detected: '%s' - posting individually", item['title'])
@@ -5731,6 +5735,10 @@ async def check_posts():
                             if not await is_startup_safe(item, recently_processed):
                                 log.info("Startup safeguard: Group contains recently processed item, skipping group")
                                 group_safe = False
+                                # Still advance cursor to prevent infinite loops
+                                if item.get('change_id'):
+                                    last_successful_change_id = item['change_id']
+                                    log.info(f"Cursor candidate -> {item['change_id']} (group skipped by safeguard)")
                                 break
                         
                         if not group_safe:
