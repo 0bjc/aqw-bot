@@ -6410,13 +6410,17 @@ async def latestdrops(interaction: discord.Interaction):
             
             # Initialize empty posts list since CDC system handles new items
             posts = []
+    except Exception as e:
+        log.error(f"Error in latestdrops setup: {e}")
+        await interaction.followup.send("Error setting up latestdrops command.")
+        return
     
     if not posts:
-            await interaction.followup.send("No recent AE gifts found in the last 30 pages.")
-            return
-
-        embed, view = await create_pane_embed(posts[0])
-        await interaction.followup.send(embed=embed, view=view)
+        await interaction.followup.send("No recent AE gifts found in the last 30 pages.")
+        return
+    
+    embed, view = await create_pane_embed(posts[0])
+    await interaction.followup.send(embed=embed, view=view)
     except asyncio.TimeoutError:
         await interaction.followup.send("Timed out fetching latest drops. Please try again in a few seconds.")
     except Exception as e:
