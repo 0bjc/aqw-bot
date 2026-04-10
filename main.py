@@ -180,6 +180,329 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
 
+# ---------------- CDC TABLES ----------------
+async def setup_cdc_tables():
+    """Set up Change Data Capture tables for real-time tracking."""
+    async with aiosqlite.connect(DB) as db:
+        # Create CDC tracking table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS change_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                table_name TEXT NOT NULL,
+                operation TEXT NOT NULL CHECK (operation IN ('INSERT', 'UPDATE', 'DELETE')),
+                record_id TEXT NOT NULL,
+                old_data TEXT,
+                new_data TEXT,
+                group_key TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                processed BOOLEAN DEFAULT FALSE,
+                INDEX idx_processed (processed),
+                INDEX idx_timestamp (timestamp),
+                INDEX idx_table_record (table_name, record_id)
+            )
+        """)
+        
+        # Create CDC triggers for posts table
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS posts_insert_cdc
+            AFTER INSERT ON posts
+            BEGIN
+                INSERT INTO change_log (table_name, operation, record_id, new_data, group_key)
+                VALUES ('posts', 'INSERT', NEW.source_id, 
+                        json_object('source_id', NEW.source_id, 'title', json_extract(NEW.last_data, '$.title'), 
+                                   'location', json_extract(NEW.last_data, '$.location'), 'price', json_extract(NEW.last_data, '$.price')),
+                        NEW.group_key);
+            END
+        """)
+        
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS posts_update_cdc
+            AFTER UPDATE ON posts
+            BEGIN
+                INSERT INTO change_log (table_name, operation, record_id, old_data, new_data, group_key)
+                VALUES ('posts', 'UPDATE', NEW.source_id, OLD.last_data, NEW.last_data, NEW.group_key);
+            END
+        """)
+        
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS posts_delete_cdc
+            AFTER DELETE ON posts
+            BEGIN
+                INSERT INTO change_log (table_name, operation, record_id, old_data, group_key)
+                VALUES ('posts', 'DELETE', OLD.source_id, OLD.last_data, OLD.group_key);
+            END
+        """)
+        
+        # Create CDC triggers for groups table
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS groups_insert_cdc
+            AFTER INSERT ON groups
+            BEGIN
+                INSERT INTO change_log (table_name, operation, record_id, new_data, group_key)
+                VALUES ('groups', 'INSERT', NEW.group_key, 
+                        json_object('group_key', NEW.group_key, 'message_id', NEW.message_id, 'channel_id', NEW.channel_id),
+                        NEW.group_key);
+            END
+        """)
+        
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS groups_update_cdc
+            AFTER UPDATE ON groups
+            BEGIN
+                INSERT INTO change_log (table_name, operation, record_id, old_data, new_data, group_key)
+                VALUES ('groups', 'UPDATE', NEW.group_key, OLD.last_data, NEW.last_data, NEW.group_key);
+            END
+        """)
+        
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS groups_delete_cdc
+            AFTER DELETE ON groups
+            BEGIN
+                INSERT INTO change_log (table_name, operation, record_id, old_data, group_key)
+                VALUES ('groups', 'DELETE', OLD.group_key, OLD.last_data, OLD.group_key);
+            END
+        """)
+        
+        await db.commit()
+        log.info("CDC tables and triggers set up successfully")
+
+
+# ---------------- CDC PROCESSING ----------------
+async def get_unprocessed_cdc_changes(limit: int = 50) -> list[dict]:
+    """Get unprocessed CDC changes."""
+    async with aiosqlite.connect(DB) as db:
+        cursor = await db.execute("""
+            SELECT id, table_name, operation, record_id, old_data, new_data, group_key, timestamp
+            FROM change_log 
+            WHERE processed = FALSE 
+            ORDER BY timestamp ASC 
+            LIMIT ?
+        """, (limit,))
+        return [dict(row) for row in await cursor.fetchall()]
+
+async def mark_cdc_changes_processed(change_ids: list[int]) -> None:
+    """Mark CDC changes as processed."""
+    if not change_ids:
+        return
+    
+    async with aiosqlite.connect(DB) as db:
+        placeholders = ','.join('?' * len(change_ids))
+        await db.execute(f"""
+            UPDATE change_log 
+            SET processed = TRUE 
+            WHERE id IN ({placeholders})
+        """, change_ids)
+        await db.commit()
+
+async def process_cdc_changes(channel) -> bool:
+    """Process unprocessed CDC changes in real-time."""
+    try:
+        changes = await get_unprocessed_cdc_changes()
+        if not changes:
+            return False
+        
+        log.info(f"[CDC] Processing {len(changes)} unprocessed changes")
+        processed_ids = []
+        
+        # Group changes by group_key for efficient processing
+        changes_by_group = {}
+        for change in changes:
+            group_key = change.get('group_key')
+            if group_key not in changes_by_group:
+                changes_by_group[group_key] = []
+            changes_by_group[group_key].append(change)
+        
+        # Process each group
+        for group_key, group_changes in changes_by_group.items():
+            try:
+                await process_group_cdc_changes(channel, group_key, group_changes)
+                
+                # Mark all changes in this group as processed
+                change_ids = [change['id'] for change in group_changes]
+                await mark_cdc_changes_processed(change_ids)
+                processed_ids.extend(change_ids)
+                
+                log.info(f"[CDC] Processed group {group_key} with {len(group_changes)} changes")
+                
+            except Exception as e:
+                log.error(f"[CDC] Error processing group {group_key}: {e}")
+                # Continue with other groups even if one fails
+                continue
+        
+        log.info(f"[CDC] Successfully processed {len(processed_ids)} changes")
+        return len(processed_ids) > 0
+        
+    except Exception as e:
+        log.error(f"[CDC] Error in process_cdc_changes: {e}")
+        return False
+
+async def process_group_cdc_changes(channel, group_key: str, changes: list[dict]) -> None:
+    """Process CDC changes for a specific group."""
+    # Get current state of items in this group
+    async with aiosqlite.connect(DB) as db:
+        cursor = await db.execute("""
+            SELECT source_id, last_data FROM posts 
+            WHERE group_key = ? 
+            ORDER BY created_at
+        """, (group_key,))
+        current_items = {row[0]: json.loads(row[1]) if row[1] else {} for row in await cursor.fetchall()}
+    
+    # Apply changes in chronological order
+    for change in sorted(changes, key=lambda x: x['timestamp']):
+        operation = change['operation']
+        record_id = change['record_id']
+        
+        if operation == 'INSERT':
+            await handle_cdc_insert(channel, change, current_items)
+        elif operation == 'UPDATE':
+            await handle_cdc_update(channel, change, current_items)
+        elif operation == 'DELETE':
+            await handle_cdc_delete(channel, change, current_items)
+
+async def handle_cdc_insert(channel, change: dict, current_items: dict) -> None:
+    """Handle CDC INSERT operation."""
+    try:
+        new_data = json.loads(change['new_data']) if change['new_data'] else {}
+        log.info(f"[CDC] INSERT: {change['record_id']} in group {change['group_key']}")
+        
+        # Check if this is part of a multi-item group
+        group_items = [current_items.get(rid, {}) for rid in current_items.keys() 
+                     if get_group_key({'location': new_data.get('location'), 'price': new_data.get('price')}) == change['group_key']]
+        
+        if len(group_items) > 1:
+            # Multi-item group - rebuild group message
+            await rebuild_group_from_cdc(channel, change['group_key'])
+        else:
+            # Single item - post individually
+            await post_individual_item_from_cdc(channel, new_data)
+            
+    except Exception as e:
+        log.error(f"[CDC] Error handling INSERT: {e}")
+
+async def handle_cdc_update(channel, change: dict, current_items: dict) -> None:
+    """Handle CDC UPDATE operation."""
+    try:
+        old_data = json.loads(change['old_data']) if change['old_data'] else {}
+        new_data = json.loads(change['new_data']) if change['new_data'] else {}
+        
+        old_group_key = get_group_key(old_data)
+        new_group_key = change['group_key']
+        
+        log.info(f"[CDC] UPDATE: {change['record_id']} from {old_group_key} to {new_group_key}")
+        
+        if old_group_key != new_group_key:
+            # Item moved between groups - rebuild both groups
+            await rebuild_group_from_cdc(channel, old_group_key)
+            await rebuild_group_from_cdc(channel, new_group_key)
+        else:
+            # Item updated within same group - rebuild group
+            await rebuild_group_from_cdc(channel, new_group_key)
+            
+    except Exception as e:
+        log.error(f"[CDC] Error handling UPDATE: {e}")
+
+async def handle_cdc_delete(channel, change: dict, current_items: dict) -> None:
+    """Handle CDC DELETE operation."""
+    try:
+        log.info(f"[CDC] DELETE: {change['record_id']} from group {change['group_key']}")
+        
+        # Rebuild the group to reflect the deletion
+        await rebuild_group_from_cdc(channel, change['group_key'])
+        
+    except Exception as e:
+        log.error(f"[CDC] Error handling DELETE: {e}")
+
+async def rebuild_group_from_cdc(channel, group_key: str) -> bool:
+    """Rebuild a group message based on current database state."""
+    try:
+        async with aiosqlite.connect(DB) as db:
+            # Get all current items for this group
+            cursor = await db.execute("""
+                SELECT source_id, last_data FROM posts 
+                WHERE group_key = ? 
+                ORDER BY created_at
+            """, (group_key,))
+            items_data = await cursor.fetchall()
+            
+            if not items_data:
+                # Empty group - delete the group message
+                await delete_group_message_from_cdc(channel, group_key)
+                return False
+            
+            # Parse items
+            items = []
+            for source_id, last_data in items_data:
+                if last_data:
+                    try:
+                        item_data = json.loads(last_data)
+                        items.append(item_data)
+                    except json.JSONDecodeError:
+                        continue
+            
+            if not items:
+                await delete_group_message_from_cdc(channel, group_key)
+                return False
+            
+            # Create or update group message
+            if len(items) == 1:
+                # Single item - post individually
+                await post_individual_item_from_cdc(channel, items[0])
+            else:
+                # Multiple items - create grouped post
+                await post_grouped_items_from_cdc(channel, group_key, items)
+            
+            return True
+            
+    except Exception as e:
+        log.error(f"[CDC] Error rebuilding group {group_key}: {e}")
+        return False
+
+async def post_individual_item_from_cdc(channel, item: dict) -> bool:
+    """Post individual item from CDC change."""
+    try:
+        # Use existing post_individual_item function
+        return await post_individual_item(channel, item)
+    except Exception as e:
+        log.error(f"[CDC] Error posting individual item: {e}")
+        return False
+
+async def post_grouped_items_from_cdc(channel, group_key: str, items: list[dict]) -> bool:
+    """Post grouped items from CDC change."""
+    try:
+        # Use existing post_grouped_items function
+        return await post_grouped_items(channel, group_key, items)
+    except Exception as e:
+        log.error(f"[CDC] Error posting grouped items: {e}")
+        return False
+
+async def delete_group_message_from_cdc(channel, group_key: str) -> None:
+    """Delete group message when group becomes empty."""
+    try:
+        async with aiosqlite.connect(DB) as db:
+            cursor = await db.execute("""
+                SELECT message_id, channel_id FROM groups 
+                WHERE group_key = ?
+            """, (group_key,))
+            group_info = await cursor.fetchone()
+            
+            if group_info:
+                message_id, channel_id = group_info
+                try:
+                    channel_obj = channel.guild.get_channel(channel_id) if hasattr(channel, 'guild') else channel
+                    if channel_obj:
+                        message = await channel_obj.fetch_message(message_id)
+                        await message.delete()
+                        log.info(f"[CDC] Deleted empty group message {message_id}")
+                except Exception as e:
+                    log.warning(f"[CDC] Failed to delete group message {message_id}: {e}")
+                
+                # Remove group from database
+                await db.execute("DELETE FROM groups WHERE group_key = ?", (group_key,))
+                await db.commit()
+                
+    except Exception as e:
+        log.error(f"[CDC] Error deleting group message {group_key}: {e}")
+
 
 # ---------------- DATABASE ----------------
 async def init_db() -> None:
@@ -5856,12 +6179,10 @@ class SmartPolling:
 
 # Global smart polling instance
 smart_polling = SmartPolling()
-
-# Global posting lock to prevent race conditions
 posting_lock = asyncio.Lock()
 
 # ---------------- LOOP ----------------
-@tasks.loop(seconds=1)  # Base loop, interval managed dynamically
+@tasks.loop(seconds=5)  # CDC polling interval
 async def check_posts():
     await bot.wait_until_ready()
 
@@ -5870,201 +6191,67 @@ async def check_posts():
         log.warning("Channel %s not found", CHANNEL_ID)
         return
     
-    # Add delay between messages to avoid rate limiting
-    message_delay = 2.0  # 2 seconds between messages
+    # Initialize CDC system on startup
+    await setup_cdc_tables()
+    log.info("[CDC] System initialized, starting real-time monitoring")
     
     while True:
         try:
+            # Process CDC changes in real-time
+            has_changes = await process_cdc_changes(channel)
+            
+            # Also fetch new items from wikidot to add to system
             posts = await asyncio.wait_for(asyncio.to_thread(fetch_recent_aegifts, limit=10), timeout=30)
             log.info("DEBUG: fetch_recent_aegifts returned %d posts", len(posts) if posts else 0)
             
-            if posts is None:
-                # Request failed
-                smart_polling.update_interval(has_new_changes=False, has_error=True)
-                await asyncio.sleep(smart_polling.current_interval)
-                continue
-            
-            # Check for new changes and collect changed items
-            has_new_changes = False
-            changed_items = []
-            all_current_items = []
-            
-            # Store the timestamp at the start of processing to detect race conditions
-            processing_start_time = datetime.now()
-            
-            # Track the last successfully processed change_id for cursor advancement
-            latest_processed = None
-            
-            # Group items by group_key for proper processing
-            items_by_group = {}
-            for post in posts:
-                try:
-                    source_id = get_source_id_from_item(post)
-                    change_id = post.get('change_id')
-                    group_key = get_group_key(post)
-                    
-                    if group_key not in items_by_group:
-                        items_by_group[group_key] = []
-                    
-                    items_by_group[group_key].append({
-                        'post': post,
-                        'source_id': source_id,
-                        'change_id': change_id
-                    })
-                    
-                    log.info(f"[GROUP] Item {source_id} assigned to group {group_key}")
-                    
-                except Exception as e:
-                    log.error(f"[GROUP] Error grouping item: {e}")
-                    continue
-            
-            # Process each group
-            for group_key, items in items_by_group.items():
-                try:
-                    if len(items) == 1:
-                        # Single item - post individually
-                        item_data = items[0]
-                        post = item_data['post']
-                        change_id = item_data['change_id']
+            if posts:
+                # Process new items through CDC system
+                for post in posts:
+                    try:
+                        # Check if item already exists
+                        source_id = get_source_id_from_item(post)
+                        async with aiosqlite.connect(DB) as db:
+                            cursor = await db.execute("""
+                                SELECT source_id FROM posts WHERE source_id = ?
+                            """, (source_id,))
+                            exists = await cursor.fetchone()
                         
-                        log.info(f"[SINGLE] Processing single item for group {group_key}")
-                        success = await process_item(post, channel)
-                        
-                        if success:
-                            latest_processed = change_id
-                            log.info(f"[CURSOR] Successfully processed single item change_id={change_id}")
-                        else:
-                            log.warning(f"[SINGLE] Failed to process single item change_id={change_id}")
-                    
-                    else:
-                        # Multiple items - create grouped post
-                        log.info(f"[GROUPED] Processing group {group_key} with {len(items)} items")
-                        
-                        # Extract post objects
-                        group_posts = [item['post'] for item in items]
-                        
-                        # Create grouped post
-                        success = await post_grouped_items(channel, group_key, group_posts)
-                        
-                        if success:
-                            # Update cursor to the latest change_id in this group
-                            latest_change_id = max(item['change_id'] for item in items)
-                            latest_processed = latest_change_id
-                            log.info(f"[CURSOR] Successfully processed group {group_key}, cursor advanced to {latest_processed}")
-                        else:
-                            log.warning(f"[GROUPED] Failed to process group {group_key}")
+                        if not exists:
+                            # New item - insert into database (CDC trigger will handle the rest)
+                            group_key = get_group_key(post)
+                            item_data = json.dumps(post, sort_keys=True, separators=(',', ':'), default=datetime_serializer)
                             
-                            # Fallback: process items individually
-                            log.info(f"[FALLBACK] Processing group {group_key} items individually")
-                            for item_data in items:
-                                post = item_data['post']
-                                change_id = item_data['change_id']
-                                
-                                success = await process_item(post, channel)
-                                if success:
-                                    latest_processed = change_id
-                                    log.info(f"[FALLBACK] Successfully processed fallback item change_id={change_id}")
-                
-                except Exception as e:
-                    log.error(f"[GROUP] Error processing group {group_key}: {e}")
-                    continue
-            
-            # Update cursor ONLY after all processing is complete
-            if latest_processed:
-                update_last_seen_change_sync(latest_processed)
-                log.info(f"[CURSOR] Updated cursor to={latest_processed}")
-            else:
-                log.info("[CURSOR] No items processed - cursor not updated")
-                
-            if not posts:  # This handles the case where fetch_recent_aegifts returns empty
-                log.info("No recent changes found - checking existing grouped posts for updates")
-                # Even with no recent changes, we need to check if existing grouped posts need updates
-                # This handles cases where items fall off the recent changes page
-                
-                # Retrieve existing grouped items from database to preserve group stability
-                existing_grouped_items = await get_existing_grouped_items()
-                log.info("Retrieved %d existing grouped items from database", len(existing_grouped_items))
-                
-                if not existing_grouped_items:
-                    log.info("No existing grouped items found - skipping")
-                    continue
-            else:
-                log.info("No changed items found - no processing needed")
-                # No processing means no cursor advancement
-                
-                # Retrieve existing grouped items from database to preserve group stability
-                existing_grouped_items = await get_existing_grouped_items()
-                log.info("Retrieved %d existing grouped items from database", len(existing_grouped_items))
-                
-                # Process existing grouped items to ensure they're still valid
-                all_groups = improved_group_items_by_location_price(existing_grouped_items)
-                
-                # Get recently processed items for startup safeguard
-                startup_hours = get_startup_safeguard_hours()
-                recently_processed = await get_recently_processed_items(startup_hours)
-                log.info(f"Startup safeguard: Found {len(recently_processed)} items processed in last {startup_hours} hours")
-                
-                # Process each group to ensure they're still valid
-                for group_key, items_in_group in all_groups.items():
-                    # Apply startup safeguard to grouped items
-                    safe_to_process = True
-                    for item in items_in_group:
-                        if not await is_startup_safe(item, recently_processed):
-                            log.info("Startup safeguard: Skipping recently processed grouped item '%s'", item['title'])
-                            safe_to_process = False
-                            break
+                            async with aiosqlite.connect(DB) as db:
+                                await db.execute("""
+                                    INSERT INTO posts (source_id, group_key, last_data, content_hash, created_at, updated_at)
+                                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                                """, (source_id, group_key, item_data, generate_content_signature(post)))
+                                await db.commit()
+                            
+                            log.info(f"[CDC] New item inserted: {source_id}")
                     
-                    if not safe_to_process:
+                    except Exception as e:
+                        log.error(f"[CDC] Error processing new item {post.get('url')}: {e}")
                         continue
-                    
-                    # Check if this is a single item - post individually instead of grouped
-                    if len(items_in_group) == 1:
-                        item = items_in_group[0]
-                        log.info("Single item in existing group: '%s' - posting individually", item['title'])
-                        await post_individual_item(channel, item)
-                    else:
-                        log.info("Existing group with %d items - updating grouped post", len(items_in_group))
-                        await post_grouped_items(channel, group_key, items_in_group)
-                
-                continue
             
-            # Check for race conditions - fetch recent changes again to see if we missed anything
-            try:
-                race_check_posts = await asyncio.to_thread(fetch_recent_aegifts, limit=10)
-                if race_check_posts:
-                    processing_time = (datetime.now() - processing_start_time).total_seconds()
-                    log.debug("Race condition check: Processing took %.2f seconds", processing_time)
-                    
-                    # Check if any new items appeared during processing
-                    race_check_pids = set()
-                    for post in race_check_posts:
-                        pid = urlparse(post["url"]).path.strip("/").replace("/", "-") or post["url"]
-                        race_check_pids.add(pid)
-                    
-                    original_pids = set(post["pid"] for post in all_current_items)
-                    new_pids_during_processing = race_check_pids - original_pids
-                    
-                    if new_pids_during_processing:
-                        log.warning("Race condition detected: %d new items appeared during processing: %s", 
-                                   len(new_pids_during_processing), list(new_pids_during_processing))
-                        # Force a shorter polling interval to catch these changes quickly
-                        smart_polling.update_interval(has_new_changes=True, has_error=False)
-                        await asyncio.sleep(2)  # Brief pause before next iteration
-                        continue
-            except Exception as e:
-                log.debug("Race condition check failed: %s", e)
+            # Smart polling interval based on activity
+            if has_changes:
+                smart_polling.update_interval(has_new_changes=True, has_error=False)
+            else:
+                smart_polling.update_interval(has_new_changes=False, has_error=False)
             
-            # Update polling interval based on whether we found changes
-            smart_polling.update_interval(has_new_changes=has_new_changes, has_error=False)
+            await asyncio.sleep(smart_polling.current_interval)
             
-        except Exception as e:
-            log.error("Error in check_posts loop: %s", e)
+        except asyncio.TimeoutError:
+            log.warning("Timeout fetching recent changes")
             smart_polling.update_interval(has_new_changes=False, has_error=True)
-        
-        # Sleep for the dynamically determined interval
-        await asyncio.sleep(smart_polling.current_interval)
-
-
+            await asyncio.sleep(smart_polling.current_interval)
+            continue
+        except Exception as e:
+            log.error(f"[CDC] Error in main loop: {e}")
+            smart_polling.update_interval(has_new_changes=False, has_error=True)
+            await asyncio.sleep(smart_polling.current_interval)
+            continue
 
 # ---------------- COMMAND ----------------
 @bot.tree.command(name="latestdrops", description="Check latest AE gift pages")
