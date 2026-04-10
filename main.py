@@ -4145,7 +4145,6 @@ async def process_item(item: dict, channel) -> bool:
     
     log.info(f"[ITEM] Processing source_id={source_id}, group_key={new_group_key}")
     
-    # Serialize item data for storage
     import json
     
     def datetime_serializer(obj):
@@ -4156,76 +4155,54 @@ async def process_item(item: dict, channel) -> bool:
     
     new_data = json.dumps(item, sort_keys=True, separators=(',', ':'), default=datetime_serializer)
     
-    async with aiosqlite.connect(DB) as db:
-        async with db.execute("BEGIN IMMEDIATE"):
-            try:
-                # Check if item exists
-                cursor = await db.execute("""
-                    SELECT group_key, last_data FROM posts 
-                    WHERE source_id = ?
-                """, (source_id,))
-                existing_item = await cursor.fetchone()
-                
-                if not existing_item:
-                    # CASE 1: NEW ITEM
-                    log.info(f"[DB] New item detected for source_id={source_id}")
-                    
-                    # For new items, we need to create a Discord message first
-                    # Use the existing post_individual_item function which handles the full flow
-                    success = await post_individual_item(channel, item)
-                    if success:
-                        log.info(f"[POST] Created individual post for new item source_id={source_id}")
-                    return success
-                
-                old_group_key, old_data = existing_item
-                
-                if old_group_key == new_group_key:
-                    # CASE 2: EXISTING ITEM, SAME GROUP
-                    if new_data == old_data:
-                        log.info(f"[DB] Item unchanged source_id={source_id}")
-                        return True  # Still counts as processed
-                    
-                    log.info(f"[UPDATE] Item content changed source_id={source_id}")
-                    
-                    # Update item data
-                    await db.execute("""
-                        UPDATE posts SET 
-                        last_data = ?, 
-                        content_hash = ?, 
-                        updated_at = CURRENT_TIMESTAMP 
-                        WHERE source_id = ?
-                    """, (new_data, generate_content_signature(item), source_id))
-                    
-                    # Use existing function to update the Discord message
-                    success = await post_individual_item(channel, item)
-                    if success:
-                        log.info(f"[UPDATE] Updated Discord message for item source_id={source_id}")
-                    return success
-                
-                else:
-                    # CASE 3: EXISTING ITEM, GROUP CHANGED (PRICE CHANGE)
-                    log.info(f"[MOVE] Item moved from {old_group_key} to {new_group_key} source_id={source_id}")
-                    
-                    # Update item's group key and data
-                    await db.execute("""
-                        UPDATE posts SET 
-                        group_key = ?, 
-                        last_data = ?, 
-                        content_hash = ?, 
-                        updated_at = CURRENT_TIMESTAMP 
-                        WHERE source_id = ?
-                    """, (new_group_key, new_data, generate_content_signature(item), source_id))
-                    
-                    # Use existing function to handle the group change
-                    success = await post_individual_item(channel, item)
-                    if success:
-                        log.info(f"[MOVE] Updated item for group change source_id={source_id}")
-                    return success
-                
-            except Exception as e:
-                log.error(f"[ITEM] Error processing item {source_id}: {e}")
-                await db.rollback()
-                return False
+    try:
+        # Check if item exists in database (without transaction)
+        async with aiosqlite.connect(DB) as db:
+            cursor = await db.execute("""
+                SELECT group_key, last_data FROM posts 
+                WHERE source_id = ?
+            """, (source_id,))
+            existing_item = await cursor.fetchone()
+        
+        if not existing_item:
+            # CASE 1: NEW ITEM
+            log.info(f"[DB] New item detected for source_id={source_id}")
+            
+            # Use existing function to handle Discord message creation and database insertion
+            success = await post_individual_item(channel, item)
+            if success:
+                log.info(f"[POST] Created individual post for new item source_id={source_id}")
+            return success
+        
+        old_group_key, old_data = existing_item
+        
+        if old_group_key == new_group_key:
+            # CASE 2: EXISTING ITEM, SAME GROUP
+            if new_data == old_data:
+                log.info(f"[DB] Item unchanged source_id={source_id}")
+                return True  # Still counts as processed
+            
+            log.info(f"[UPDATE] Item content changed source_id={source_id}")
+            
+            # Use existing function to update the Discord message
+            success = await post_individual_item(channel, item)
+            if success:
+                log.info(f"[UPDATE] Updated Discord message for item source_id={source_id}")
+            return success
+        
+        else:
+            # CASE 3: EXISTING ITEM, GROUP CHANGED (PRICE CHANGE)
+            log.info(f"[MOVE] Item moved from {old_group_key} to {new_group_key} source_id={source_id}")
+            
+            # Use existing function to handle the group change
+            success = await post_individual_item(channel, item)
+            if success:
+                log.info(f"[MOVE] Updated item for group change source_id={source_id}")
+            return success
+        
+    except Exception as e:
+        log.error(f"[ITEM] Error processing item {source_id}: {e}")
+        return False
 
 
 async def rebuild_group(group_key: str, channel) -> bool:
