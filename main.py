@@ -308,11 +308,21 @@ async def process_cdc_changes(channel) -> bool:
         
         # Group changes by group_key for efficient processing
         changes_by_group = {}
+        ungrouped_changes = []
+        
         for change in changes:
-            group_key = change.get('group_key')
-            if group_key not in changes_by_group:
-                changes_by_group[group_key] = []
-            changes_by_group[group_key].append(change)
+            # Parse new data to get current group key
+            new_data = json.loads(change['new_data']) if change['new_data'] else {}
+            group_key = get_group_key(new_data)
+            
+            if group_key is None:
+                # Single item - handle directly
+                ungrouped_changes.append(change)
+            else:
+                # Grouped item - group by key
+                if group_key not in changes_by_group:
+                    changes_by_group[group_key] = []
+                changes_by_group[group_key].append(change)
         
         # Process each group
         for group_key, group_changes in changes_by_group.items():
@@ -329,6 +339,22 @@ async def process_cdc_changes(channel) -> bool:
             except Exception as e:
                 log.error(f"[CDC] Error processing group {group_key}: {e}")
                 # Continue with other groups even if one fails
+                continue
+        
+        # Process ungrouped (single) changes
+        for change in ungrouped_changes:
+            try:
+                new_data = json.loads(change['new_data']) if change['new_data'] else {}
+                await post_individual_item_from_cdc(channel, new_data)
+                
+                # Mark as processed
+                await mark_cdc_changes_processed([change['id']])
+                processed_ids.append(change['id'])
+                
+                log.info(f"[CDC] Processed single item {change['record_id']}")
+                
+            except Exception as e:
+                log.error(f"[CDC] Error processing single item {change['record_id']}: {e}")
                 continue
         
         log.info(f"[CDC] Successfully processed {len(processed_ids)} changes")
@@ -362,43 +388,55 @@ async def process_group_cdc_changes(channel, group_key: str, changes: list[dict]
             await handle_cdc_delete(channel, change, current_items)
 
 async def handle_cdc_insert(channel, change: dict, current_items: dict) -> None:
-    """Handle CDC INSERT operation."""
+    """Handle CDC INSERT operation with new grouping system."""
     try:
         new_data = json.loads(change['new_data']) if change['new_data'] else {}
-        log.info(f"[CDC] INSERT: {change['record_id']} in group {change['group_key']}")
+        group_key = get_group_key(new_data)
         
-        # Check if this is part of a multi-item group
-        group_items = [current_items.get(rid, {}) for rid in current_items.keys() 
-                     if get_group_key({'location': new_data.get('location'), 'price': new_data.get('price')}) == change['group_key']]
+        log.info(f"[CDC] INSERT: {change['record_id']} with group_key={group_key}")
         
-        if len(group_items) > 1:
-            # Multi-item group - rebuild group message
-            await rebuild_group_from_cdc(channel, change['group_key'])
-        else:
+        if group_key is None:
             # Single item - post individually
             await post_individual_item_from_cdc(channel, new_data)
+        else:
+            # Check if this is part of a multi-item group
+            group_items = [current_items.get(rid, {}) for rid in current_items.keys() 
+                         if get_group_key(current_items.get(rid, {})) == group_key]
+            
+            if len(group_items) > 1:
+                # Multi-item group - rebuild group message
+                await rebuild_group_from_cdc(channel, group_key)
+            else:
+                # Single item in group - post individually
+                await post_individual_item_from_cdc(channel, new_data)
             
     except Exception as e:
         log.error(f"[CDC] Error handling INSERT: {e}")
 
 async def handle_cdc_update(channel, change: dict, current_items: dict) -> None:
-    """Handle CDC UPDATE operation."""
+    """Handle CDC UPDATE operation with new grouping system."""
     try:
         old_data = json.loads(change['old_data']) if change['old_data'] else {}
         new_data = json.loads(change['new_data']) if change['new_data'] else {}
         
         old_group_key = get_group_key(old_data)
-        new_group_key = change['group_key']
+        new_group_key = get_group_key(new_data)
         
         log.info(f"[CDC] UPDATE: {change['record_id']} from {old_group_key} to {new_group_key}")
         
-        if old_group_key != new_group_key:
-            # Item moved between groups - rebuild both groups
-            await rebuild_group_from_cdc(channel, old_group_key)
-            await rebuild_group_from_cdc(channel, new_group_key)
+        if old_group_key == new_group_key:
+            # Same group - rebuild if both have group keys
+            if new_group_key is not None:
+                await rebuild_group_from_cdc(channel, new_group_key)
+            else:
+                # Both are single items - update individually
+                await post_individual_item_from_cdc(channel, new_data)
         else:
-            # Item updated within same group - rebuild group
-            await rebuild_group_from_cdc(channel, new_group_key)
+            # Group changed - rebuild both old and new groups
+            if old_group_key is not None:
+                await rebuild_group_from_cdc(channel, old_group_key)
+            if new_group_key is not None:
+                await rebuild_group_from_cdc(channel, new_group_key)
             
     except Exception as e:
         log.error(f"[CDC] Error handling UPDATE: {e}")
@@ -4439,20 +4477,72 @@ def merge_group_items(existing_items: list[str], new_items: list[dict]) -> list[
 
 
 def get_group_key(item: dict) -> str:
-    """Generate stable group key from location and price only."""
-    location = item.get('location', 'unknown')
-    price = item.get('price', 'unknown')
+    """Generate stable CDC-based group key from location and price only."""
+    location = item.get('location', '').strip()
+    price = item.get('price', '').strip()
     
-    # Normalize values for consistent keys
-    def normalize(text):
-        if not text:
-            return 'unknown'
-        return str(text).lower().replace(' ', '_').replace('/', '_').replace('\\', '_').replace('-', '_')
+    # CDC SAFETY: Fallback to single post if missing required data
+    if not location or not price:
+        log.debug(f"[GROUP] Missing location or price - treating as single post: location='{location}', price='{price}'")
+        return None  # Indicates no grouping
     
-    normalized_location = normalize(location)
-    normalized_price = normalize(price)
+    # NORMALIZATION REQUIREMENTS
+    def normalize_location(loc: str) -> str:
+        """Normalize location for consistent grouping."""
+        if not loc:
+            return None
+        
+        # Trim whitespace, lowercase, replace spaces with hyphens, remove special chars
+        normalized = loc.lower().strip()
+        # Replace multiple spaces with single space
+        normalized = re.sub(r'\s+', ' ', normalized)
+        # Replace spaces with hyphens
+        normalized = normalized.replace(' ', '-')
+        # Remove special characters except hyphens
+        normalized = re.sub(r'[^a-z0-9\-]', '', normalized)
+        # Remove duplicate hyphens
+        normalized = re.sub(r'-+', '-', normalized)
+        # Remove leading/trailing hyphens
+        normalized = normalized.strip('-')
+        
+        return normalized if normalized else None
     
-    return f"{normalized_location}_{normalized_price}"
+    def normalize_price(p: str) -> tuple[str, str]:
+        """Extract numeric value and currency from price string."""
+        if not p:
+            return None, None
+        
+        # Trim and normalize
+        p = p.strip().lower()
+        
+        # Extract numeric value
+        numeric_match = re.search(r'(\d+(?:,\d{3})*(?:\.\d+)?)', p)
+        if not numeric_match:
+            return None, None
+        
+        numeric_value = numeric_match.group(1).replace(',', '')
+        
+        # Extract currency (AC, Gold, etc.)
+        currency_match = re.search(r'(ac|gold|coins|g|c)', p)
+        currency = currency_match.group(1) if currency_match else 'unknown'
+        
+        return numeric_value, currency
+    
+    # Apply normalization
+    normalized_location = normalize_location(location)
+    numeric_price, currency = normalize_price(price)
+    
+    # CDC SAFETY: Fallback if normalization fails
+    if not normalized_location or not numeric_price or not currency:
+        log.debug(f"[GROUP] Normalization failed - treating as single post: location='{location}' -> '{normalized_location}', price='{price}' -> '{numeric_price}_{currency}'")
+        return None
+    
+    # NEW GROUP KEY FORMAT: location_slug + "__" + price_value + "_" + currency
+    group_key = f"{normalized_location}__{numeric_price}_{currency}"
+    
+    log.debug(f"[GROUP] Generated key: '{group_key}' from location='{location}' -> '{normalized_location}', price='{price}' -> '{numeric_price}_{currency}'")
+    
+    return group_key
 
 
 def get_group_id_from_items(items: list[dict]) -> str:
@@ -6219,18 +6309,33 @@ async def check_posts():
                             exists = await cursor.fetchone()
                         
                         if not exists:
-                            # New item - insert into database (CDC trigger will handle the rest)
+                            # Get group key for new item
                             group_key = get_group_key(post)
-                            item_data = json.dumps(post, sort_keys=True, separators=(',', ':'), default=datetime_serializer)
                             
-                            async with aiosqlite.connect(DB) as db:
-                                await db.execute("""
-                                    INSERT INTO posts (source_id, group_key, last_data, content_hash, created_at, updated_at)
-                                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                                """, (source_id, group_key, item_data, generate_content_signature(post)))
-                                await db.commit()
-                            
-                            log.info(f"[CDC] New item inserted: {source_id}")
+                            if group_key is None:
+                                # Single item - insert with NULL group_key
+                                item_data = json.dumps(post, sort_keys=True, separators=(',', ':'), default=datetime_serializer)
+                                
+                                async with aiosqlite.connect(DB) as db:
+                                    await db.execute("""
+                                        INSERT INTO posts (source_id, group_key, last_data, content_hash, created_at, updated_at)
+                                        VALUES (?, NULL, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                                    """, (source_id, item_data, generate_content_signature(post)))
+                                    await db.commit()
+                                
+                                log.info(f"[CDC] New single item inserted: {source_id}")
+                            else:
+                                # Grouped item - insert with group_key
+                                item_data = json.dumps(post, sort_keys=True, separators=(',', ':'), default=datetime_serializer)
+                                
+                                async with aiosqlite.connect(DB) as db:
+                                    await db.execute("""
+                                        INSERT INTO posts (source_id, group_key, last_data, content_hash, created_at, updated_at)
+                                        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                                    """, (source_id, group_key, item_data, generate_content_signature(post)))
+                                    await db.commit()
+                                
+                                log.info(f"[CDC] New grouped item inserted: {source_id} -> {group_key}")
                     
                     except Exception as e:
                         log.error(f"[CDC] Error processing new item {post.get('url')}: {e}")
