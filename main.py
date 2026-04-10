@@ -2035,7 +2035,7 @@ class ItemCategoryButton(discord.ui.Button):
         item = self.items[index]
         
         embed = discord.Embed(
-            title=item.get('name', 'Unknown'),
+            title=item.get('title', 'Unknown'),
             description=f"Item {index + 1} of {len(self.items)}",
             color=discord.Color.blue()
         )
@@ -2077,7 +2077,7 @@ class ItemPaginationView(discord.ui.View):
         item = self.items[self.current_index]
         
         embed = discord.Embed(
-            title=item.get('name', 'Unknown'),
+            title=item.get('title', 'Unknown'),
             description=f"Item {self.current_index + 1} of {len(self.items)}",
             color=discord.Color.blue()
         )
@@ -5789,7 +5789,7 @@ class SingleItemButton(discord.ui.Button):
         item = self.item
         
         embed = discord.Embed(
-            title=item.get('name', 'Unknown'),
+            title=item.get('title', 'Unknown'),
             description="Item Details",
             color=discord.Color.blue()
         )
