@@ -6410,8 +6410,8 @@ async def latestdrops(interaction: discord.Interaction):
             
             # Initialize empty posts list since CDC system handles new items
             posts = []
-        
-        if not posts:
+    
+    if not posts:
             await interaction.followup.send("No recent AE gifts found in the last 30 pages.")
             return
 
