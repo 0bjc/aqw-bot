@@ -573,7 +573,7 @@ def generate_daily_gift_title(gift_number: int) -> str:
     weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     current_weekday = weekday_names[datetime.now().weekday()]
     
-    return f"🎁 __{current_weekday} Daily Gift__ 🎁"
+    return f"<:aqwgift:1491402207894179850> __{current_weekday} Daily Gift__ <:aqwgift:1491402207894179850>"
 
 
 def extract_breadcrumb_category(html_content: str, page_url: str = "") -> str:
