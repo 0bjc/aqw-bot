@@ -6407,6 +6407,9 @@ async def latestdrops(interaction: discord.Interaction):
             # OLD FETCH DISABLED - CDC system handles new items
             # posts = await asyncio.wait_for(asyncio.to_thread(fetch_recent_aegifts, limit=10), timeout=30)
             # log.info("DEBUG: fetch_recent_aegifts returned %d posts", len(posts) if posts else 0)
+            
+            # Initialize empty posts list since CDC system handles new items
+            posts = []
         if not posts:
             await interaction.followup.send("No recent AE gifts found in the last 30 pages.")
             return
