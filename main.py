@@ -5692,10 +5692,10 @@ async def check_posts():
                 existing_grouped_items = await get_existing_grouped_items()
                 log.info("Retrieved %d existing grouped items from database", len(existing_grouped_items))
                 
-                # Merge current items with existing grouped items
-                merged_items = merge_current_with_existing_items(all_current_items, existing_grouped_items)
-                log.info("Merged items: %d current + %d existing = %d total", 
-                         len(all_current_items), len(existing_grouped_items), len(merged_items))
+                # Only use current items from recent changes - DO NOT merge with database items
+                # This prevents posting items that are not in recent changes
+                merged_items = all_current_items
+                log.info("Using only current items from recent changes: %d items", len(merged_items))
                 
                 # Group ALL merged items by Location and Price to maintain stable groups
                 all_groups = improved_group_items_by_location_price(merged_items)
@@ -5719,10 +5719,11 @@ async def check_posts():
                         log.info("Single item detected: '%s' - posting individually", item['title'])
                         success = await post_individual_item(channel, item)
                         
-                        # Update cursor tracking after successful processing
-                        if success and item.get('change_id'):
+                        # Update cursor tracking after processing (even if unchanged)
+                        # This prevents infinite loops when items are unchanged
+                        if item.get('change_id'):
                             last_successful_change_id = item['change_id']
-                            log.info(f"Cursor candidate -> {item['change_id']}")
+                            log.info(f"Cursor candidate -> {item['change_id']} (processed: {success})")
                     else:
                         # Apply startup safeguard to grouped items
                         group_safe = True
@@ -5741,13 +5742,14 @@ async def check_posts():
                         log.info("Multiple items (%d) in same group - posting grouped", len(items_in_group))
                         success = await post_grouped_items(channel, group_id, items_in_group)
                         
-                        # Update cursor tracking after successful processing
-                        if success and items_in_group:
-                            # Find the newest item in the group for cursor tracking
+                        # Update cursor tracking after processing (even if unchanged)
+                        # This prevents infinite loops when items are unchanged
+                        if items_in_group:
+                            # Find newest item in group for cursor tracking
                             newest_item = max(items_in_group, key=lambda x: x.get('change_time', datetime.min))
                             if newest_item.get('change_id'):
                                 last_successful_change_id = newest_item['change_id']
-                                log.info(f"Cursor candidate -> {newest_item['change_id']}")
+                                log.info(f"Cursor candidate -> {newest_item['change_id']} (processed: {success})")
                 
                 # Update cursor ONLY after successful processing
                 if last_successful_change_id:
