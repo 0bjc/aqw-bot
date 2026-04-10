@@ -165,7 +165,7 @@ def ensure_wikidot_session(session: requests.Session) -> bool:
 
 # ---------------- CONFIG ----------------
 # Discord Configuration
-TOKEN = "MTQ4NDExMDk4NDYyMzgyMDgxMA.GWhB6o.gTuG0A39fFDEx3SNR5rAF1XrfCwDe8uos4lGFE"
+TOKEN = os.getenv("TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1484113318095622315"))
 
 WIKI_BASE = "https://reaqw.wikidot.com"
