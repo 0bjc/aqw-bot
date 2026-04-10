@@ -293,9 +293,29 @@ async def init_db() -> None:
             )
         """)
         
+        # Add group_key column to posts table if it doesn't exist
+        try:
+            await db.execute("ALTER TABLE posts ADD COLUMN group_key TEXT")
+            log.info("Added group_key column to posts table (migration)")
+        except aiosqlite.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                log.debug("group_key column already exists in posts table")
+            else:
+                log.error(f"Error adding group_key column to posts: {e}")
+        
+        # Add last_data column to posts table if it doesn't exist
+        try:
+            await db.execute("ALTER TABLE posts ADD COLUMN last_data TEXT")
+            log.info("Added last_data column to posts table (migration)")
+        except aiosqlite.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                log.debug("last_data column already exists in posts table")
+            else:
+                log.error(f"Error adding last_data column to posts: {e}")
+        
         await db.execute("""
             CREATE TABLE IF NOT EXISTS groups (
-                group_id TEXT PRIMARY KEY,
+                group_key TEXT PRIMARY KEY,
                 message_id INTEGER NOT NULL,
                 channel_id INTEGER NOT NULL,
                 content_hash TEXT NULL,
@@ -1401,9 +1421,9 @@ def create_categorized_item_list(items: list[dict]) -> str:
             title = item.get("title", "Unknown")
             url = item.get("url", "")
             if url:
-                sections.append(f"  - [{title}]({url})")
+                sections.append(f"** [{title}]({url})")
             else:
-                sections.append(f"  - {title}")
+                sections.append(f"** {title}")
         
         sections.append("")  # Empty line between categories
     
@@ -4093,14 +4113,243 @@ def merge_group_items(existing_items: list[str], new_items: list[dict]) -> list[
     return unique_items
 
 
+def get_group_key(item: dict) -> str:
+    """Generate stable group key from location and price only."""
+    location = item.get('location', 'unknown')
+    price = item.get('price', 'unknown')
+    
+    # Normalize values for consistent keys
+    def normalize(text):
+        if not text:
+            return 'unknown'
+        return str(text).lower().replace(' ', '_').replace('/', '_').replace('\\', '_').replace('-', '_')
+    
+    normalized_location = normalize(location)
+    normalized_price = normalize(price)
+    
+    return f"{normalized_location}_{normalized_price}"
+
+
 def get_group_id_from_items(items: list[dict]) -> str:
-    """Generate a consistent group_id from items (your existing grouping logic)."""
+    """Generate a consistent group_id from items (legacy function - use get_group_key instead)."""
     if items:
         first_item = items[0]
-        location = first_item.get('location', 'unknown')
-        price = first_item.get('price', 'unknown')
-        return f"group_{location}_{price}".replace(' ', '_').replace('/', '_').lower()
+        return get_group_key(first_item)
     return f"group_{len(items)}"
+
+
+async def process_item(item: dict, channel) -> bool:
+    """Process a single item - handles new, same group, and group changed cases."""
+    source_id = get_source_id_from_item(item)
+    new_group_key = get_group_key(item)
+    
+    log.info(f"[ITEM] Processing source_id={source_id}, group_key={new_group_key}")
+    
+    # Serialize item data for storage
+    import json
+    new_data = json.dumps(item, sort_keys=True, separators=(',', ':'))
+    
+    async with aiosqlite.connect(DB) as db:
+        async with db.execute("BEGIN IMMEDIATE"):
+            try:
+                # Check if item exists
+                cursor = await db.execute("""
+                    SELECT group_key, last_data FROM posts 
+                    WHERE source_id = ?
+                """, (source_id,))
+                existing_item = await cursor.fetchone()
+                
+                if not existing_item:
+                    # CASE 1: NEW ITEM
+                    log.info(f"[DB] New item detected for source_id={source_id}")
+                    
+                    # Insert new item
+                    await db.execute("""
+                        INSERT INTO posts 
+                        (source_id, group_key, last_data, content_hash) 
+                        VALUES (?, ?, ?, ?)
+                    """, (source_id, new_group_key, new_data, generate_content_signature(item)))
+                    
+                    # Rebuild the group
+                    success = await rebuild_group(new_group_key, channel)
+                    if success:
+                        log.info(f"[POST] Created group for new item source_id={source_id}")
+                    return success
+                
+                old_group_key, old_data = existing_item
+                
+                if old_group_key == new_group_key:
+                    # CASE 2: EXISTING ITEM, SAME GROUP
+                    if new_data == old_data:
+                        log.info(f"[DB] Item unchanged source_id={source_id}")
+                        return True  # Still counts as processed
+                    
+                    log.info(f"[UPDATE] Item content changed source_id={source_id}")
+                    
+                    # Update item data
+                    await db.execute("""
+                        UPDATE posts SET 
+                        last_data = ?, 
+                        content_hash = ?, 
+                        updated_at = CURRENT_TIMESTAMP 
+                        WHERE source_id = ?
+                    """, (new_data, generate_content_signature(item), source_id))
+                    
+                    # Rebuild the group
+                    success = await rebuild_group(new_group_key, channel)
+                    if success:
+                        log.info(f"[UPDATE] Rebuilt group for updated item source_id={source_id}")
+                    return success
+                
+                else:
+                    # CASE 3: EXISTING ITEM, GROUP CHANGED (PRICE CHANGE)
+                    log.info(f"[MOVE] Item moved from {old_group_key} to {new_group_key} source_id={source_id}")
+                    
+                    # Update item's group key and data
+                    await db.execute("""
+                        UPDATE posts SET 
+                        group_key = ?, 
+                        last_data = ?, 
+                        content_hash = ?, 
+                        updated_at = CURRENT_TIMESTAMP 
+                        WHERE source_id = ?
+                    """, (new_group_key, new_data, generate_content_signature(item), source_id))
+                    
+                    # Rebuild both groups
+                    old_success = await rebuild_group(old_group_key, channel)
+                    new_success = await rebuild_group(new_group_key, channel)
+                    
+                    if old_success and new_success:
+                        log.info(f"[MOVE] Successfully moved item source_id={source_id}")
+                    elif not old_success:
+                        log.info(f"[DELETE] Old group {old_group_key} was empty and removed")
+                    elif not new_success:
+                        log.error(f"[MOVE] Failed to create new group {new_group_key}")
+                    
+                    return new_success
+                
+            except Exception as e:
+                log.error(f"[ITEM] Error processing item {source_id}: {e}")
+                await db.rollback()
+                return False
+
+
+async def rebuild_group(group_key: str, channel) -> bool:
+    """Rebuild a group with all current items - handles creation, update, and deletion."""
+    log.info(f"[GROUP] Rebuilding group_key={group_key}")
+    
+    async with aiosqlite.connect(DB) as db:
+        async with db.execute("BEGIN IMMEDIATE"):
+            try:
+                # Get all items for this group
+                cursor = await db.execute("""
+                    SELECT source_id, last_data FROM posts 
+                    WHERE group_key = ? 
+                    ORDER BY created_at
+                """, (group_key,))
+                items_data = await cursor.fetchall()
+                
+                if not items_data:
+                    log.info(f"[DELETE] Removing empty group={group_key}")
+                    
+                    # Get group message info before deletion
+                    cursor = await db.execute("""
+                        SELECT message_id, channel_id FROM groups 
+                        WHERE group_key = ?
+                    """, (group_key,))
+                    group_info = await cursor.fetchone()
+                    
+                    if group_info:
+                        message_id, channel_id = group_info
+                        try:
+                            # Delete Discord message
+                            channel_obj = channel.guild.get_channel(channel_id) if hasattr(channel, 'guild') else channel
+                            if channel_obj:
+                                message = await channel_obj.fetch_message(message_id)
+                                await message.delete()
+                                log.info(f"[DELETE] Removed Discord message {message_id} for group={group_key}")
+                        except Exception as e:
+                            log.warning(f"[DELETE] Failed to delete Discord message {message_id}: {e}")
+                    
+                    # Delete group from database
+                    await db.execute("DELETE FROM groups WHERE group_key = ?", (group_key,))
+                    await db.commit()
+                    return False
+                
+                # Parse items data
+                items = []
+                for source_id, last_data in items_data:
+                    if last_data:
+                        try:
+                            import json
+                            item_data = json.loads(last_data)
+                            items.append(item_data)
+                        except json.JSONDecodeError as e:
+                            log.error(f"[DB] Failed to parse item data for {source_id}: {e}")
+                            continue
+                
+                if not items:
+                    log.warning(f"[GROUP] No valid items found for group={group_key}")
+                    return False
+                
+                # Check if group message already exists
+                cursor = await db.execute("""
+                    SELECT message_id, channel_id FROM groups 
+                    WHERE group_key = ?
+                """, (group_key,))
+                existing_group = await cursor.fetchone()
+                
+                # Create grouped embed
+                embed, view = await create_grouped_embed(group_key, items)
+                
+                if existing_group:
+                    # Update existing message
+                    message_id, channel_id = existing_group
+                    try:
+                        channel_obj = channel.guild.get_channel(channel_id) if hasattr(channel, 'guild') else channel
+                        if not channel_obj:
+                            log.warning(f"[UPDATE] Channel {channel_id} not found for group={group_key}")
+                            return False
+                        
+                        message = await channel_obj.fetch_message(message_id)
+                        await message.edit(embed=embed, view=view)
+                        log.info(f"[UPDATE] Edited group message {message_id} for group={group_key}")
+                        
+                        # Update group record
+                        await db.execute("""
+                            UPDATE groups SET 
+                            content_hash = ?, 
+                            updated_at = CURRENT_TIMESTAMP 
+                            WHERE group_key = ?
+                        """, (generate_content_signature({'items': items}), group_key))
+                        
+                    except discord.NotFound:
+                        log.warning(f"[UPDATE] Group message {message_id} not found, creating new one")
+                        await db.execute("DELETE FROM groups WHERE group_key = ?", (group_key,))
+                        existing_group = None
+                    except discord.Forbidden:
+                        log.error(f"[UPDATE] No permission to edit group message {message_id}")
+                        return False
+                
+                if not existing_group:
+                    # Create new message
+                    message = await channel.send(embed=embed, view=view)
+                    log.info(f"[POST] Created new group message {message.id} for group={group_key}")
+                    
+                    # Store group record
+                    await db.execute("""
+                        INSERT OR REPLACE INTO groups 
+                        (group_key, message_id, channel_id, content_hash) 
+                        VALUES (?, ?, ?, ?)
+                    """, (group_key, message.id, channel.id, generate_content_signature({'items': items})))
+                
+                await db.commit()
+                return True
+                
+            except Exception as e:
+                log.error(f"[GROUP] Error rebuilding group={group_key}: {e}")
+                await db.rollback()
+                return False
 
 
 async def get_recently_processed_items(hours: int = 24) -> set[str]:
@@ -5673,103 +5922,38 @@ async def check_posts():
             processing_start_time = datetime.now()
             
             # Track the last successfully processed change_id for cursor advancement
-            last_successful_change_id = None
+            latest_processed = None
             
             # Process items in chronological order (oldest first) to ensure proper cursor advancement
             for post in posts:
-                pid = urlparse(post["url"]).path.strip("/").replace("/", "-") or post["url"]
-                
-                # Store all current items for group checking
-                post["pid"] = pid
-                all_current_items.append(post)
-                
-                if await has_item_changed(pid, post):
-                    has_new_changes = True
-                    changed_items.append(post)
-            
-            # Only process if there are actually changed items
-            if changed_items:
-                log.info("Checking groups - Changed items: %d, All current items: %d", 
-                         len(changed_items), len(all_current_items))
-                
-                # Retrieve existing grouped items from database to preserve group stability
-                existing_grouped_items = await get_existing_grouped_items()
-                log.info("Retrieved %d existing grouped items from database", len(existing_grouped_items))
-                
-                # Only use current items from recent changes - DO NOT merge with database items
-                # This prevents posting items that are not in recent changes
-                merged_items = all_current_items
-                log.info("Using only current items from recent changes: %d items", len(merged_items))
-                
-                # Group ALL merged items by Location and Price to maintain stable groups
-                all_groups = improved_group_items_by_location_price(merged_items)
-                
-                # Get recently processed items for startup safeguard
-                startup_hours = get_startup_safeguard_hours()
-                recently_processed = await get_recently_processed_items(startup_hours)
-                log.info(f"Startup safeguard: Found {len(recently_processed)} items processed in last {startup_hours} hours")
-                
-                # Process each group with startup safeguards
-                for group_key, items_in_group in all_groups.items():
-                    # Check if this is a single item - post individually instead of grouped
-                    if len(items_in_group) == 1:
-                        item = items_in_group[0]
-                        
-                        # Apply startup safeguard
-                        if not await is_startup_safe(item, recently_processed):
-                            log.info("Startup safeguard: Skipping recently processed individual item '%s'", item['title'])
-                            # Still advance cursor to prevent infinite loops
-                            if item.get('change_id'):
-                                last_successful_change_id = item['change_id']
-                                log.info(f"Cursor candidate -> {item['change_id']} (skipped by safeguard)")
-                            continue
-                        
-                        log.info("Single item detected: '%s' - posting individually", item['title'])
-                        success = await post_individual_item(channel, item)
-                        
-                        # Update cursor tracking after processing (even if unchanged)
-                        # This prevents infinite loops when items are unchanged
-                        if item.get('change_id'):
-                            last_successful_change_id = item['change_id']
-                            log.info(f"Cursor candidate -> {item['change_id']} (processed: {success})")
+                try:
+                    # Extract source ID and change ID
+                    source_id = get_source_id_from_item(post)
+                    change_id = post.get('change_id')
+                    
+                    log.info(f"[PROCESS] Processing item source_id={source_id}, change_id={change_id}")
+                    
+                    # Process the item using the new logic
+                    success = await process_item(post, channel)
+                    
+                    if success:
+                        latest_processed = change_id
+                        log.info(f"[CURSOR] Successfully processed change_id={change_id}")
                     else:
-                        # Apply startup safeguard to grouped items
-                        group_safe = True
-                        for item in items_in_group:
-                            if not await is_startup_safe(item, recently_processed):
-                                log.info("Startup safeguard: Group contains recently processed item, skipping group")
-                                group_safe = False
-                                # Still advance cursor to prevent infinite loops
-                                if item.get('change_id'):
-                                    last_successful_change_id = item['change_id']
-                                    log.info(f"Cursor candidate -> {item['change_id']} (group skipped by safeguard)")
-                                break
+                        log.warning(f"[PROCESS] Failed to process change_id={change_id}")
                         
-                        if not group_safe:
-                            continue
-                        
-                        # Always post grouped items using source ID tracking
-                        # Generate group ID from items
-                        group_id = get_group_id_from_items(items_in_group)
-                        log.info("Multiple items (%d) in same group - posting grouped", len(items_in_group))
-                        success = await post_grouped_items(channel, group_id, items_in_group)
-                        
-                        # Update cursor tracking after processing (even if unchanged)
-                        # This prevents infinite loops when items are unchanged
-                        if items_in_group:
-                            # Find newest item in group for cursor tracking
-                            newest_item = max(items_in_group, key=lambda x: x.get('change_time', datetime.min))
-                            if newest_item.get('change_id'):
-                                last_successful_change_id = newest_item['change_id']
-                                log.info(f"Cursor candidate -> {newest_item['change_id']} (processed: {success})")
+                except Exception as e:
+                    log.error(f"[PROCESS] Error processing change_id={post.get('change_id')}: {e}")
+                    continue  # Continue to next item even if this one fails
+            
+            # Update cursor ONLY after all processing is complete
+            if latest_processed:
+                update_last_seen_change_sync(latest_processed)
+                log.info(f"[CURSOR] Updated cursor to={latest_processed}")
+            else:
+                log.info("[CURSOR] No items processed - cursor not updated")
                 
-                # Update cursor ONLY after successful processing
-                if last_successful_change_id:
-                    update_last_seen_change_sync(last_successful_change_id)
-                    log.info(f"Cursor saved -> {last_successful_change_id}")
-                else:
-                    log.info("No successful processing - cursor not updated")
-            elif not posts:  # This handles the case where fetch_recent_aegifts returns empty
+        elif not posts:  # This handles the case where fetch_recent_aegifts returns empty
                 log.info("No recent changes found - checking existing grouped posts for updates")
                 # Even with no recent changes, we need to check if existing grouped posts need updates
                 # This handles cases where items fall off the recent changes page
