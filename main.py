@@ -6421,11 +6421,11 @@ async def latestdrops(interaction: discord.Interaction):
     
     embed, view = await create_pane_embed(posts[0])
     await interaction.followup.send(embed=embed, view=view)
-    except asyncio.TimeoutError:
-        await interaction.followup.send("Timed out fetching latest drops. Please try again in a few seconds.")
-    except Exception as e:
-        log.exception("latestdrops failed: %s", e)
-        await interaction.followup.send("Something went wrong while fetching recent AE gifts.")
+except asyncio.TimeoutError:
+    await interaction.followup.send("Timed out fetching latest drops. Please try again in a few seconds.")
+except Exception as e:
+    log.exception("latestdrops failed: %s", e)
+    await interaction.followup.send("Something went wrong while fetching recent AE gifts.")
 
 
 
