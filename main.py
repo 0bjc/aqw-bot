@@ -4170,17 +4170,11 @@ async def process_item(item: dict, channel) -> bool:
                     # CASE 1: NEW ITEM
                     log.info(f"[DB] New item detected for source_id={source_id}")
                     
-                    # Insert new item
-                    await db.execute("""
-                        INSERT INTO posts 
-                        (source_id, group_key, last_data, content_hash) 
-                        VALUES (?, ?, ?, ?)
-                    """, (source_id, new_group_key, new_data, generate_content_signature(item)))
-                    
-                    # Rebuild the group
-                    success = await rebuild_group(new_group_key, channel)
+                    # For new items, we need to create a Discord message first
+                    # Use the existing post_individual_item function which handles the full flow
+                    success = await post_individual_item(channel, item)
                     if success:
-                        log.info(f"[POST] Created group for new item source_id={source_id}")
+                        log.info(f"[POST] Created individual post for new item source_id={source_id}")
                     return success
                 
                 old_group_key, old_data = existing_item
@@ -4202,10 +4196,10 @@ async def process_item(item: dict, channel) -> bool:
                         WHERE source_id = ?
                     """, (new_data, generate_content_signature(item), source_id))
                     
-                    # Rebuild the group
-                    success = await rebuild_group(new_group_key, channel)
+                    # Use existing function to update the Discord message
+                    success = await post_individual_item(channel, item)
                     if success:
-                        log.info(f"[UPDATE] Rebuilt group for updated item source_id={source_id}")
+                        log.info(f"[UPDATE] Updated Discord message for item source_id={source_id}")
                     return success
                 
                 else:
@@ -4222,18 +4216,11 @@ async def process_item(item: dict, channel) -> bool:
                         WHERE source_id = ?
                     """, (new_group_key, new_data, generate_content_signature(item), source_id))
                     
-                    # Rebuild both groups
-                    old_success = await rebuild_group(old_group_key, channel)
-                    new_success = await rebuild_group(new_group_key, channel)
-                    
-                    if old_success and new_success:
-                        log.info(f"[MOVE] Successfully moved item source_id={source_id}")
-                    elif not old_success:
-                        log.info(f"[DELETE] Old group {old_group_key} was empty and removed")
-                    elif not new_success:
-                        log.error(f"[MOVE] Failed to create new group {new_group_key}")
-                    
-                    return new_success
+                    # Use existing function to handle the group change
+                    success = await post_individual_item(channel, item)
+                    if success:
+                        log.info(f"[MOVE] Updated item for group change source_id={source_id}")
+                    return success
                 
             except Exception as e:
                 log.error(f"[ITEM] Error processing item {source_id}: {e}")
@@ -4368,7 +4355,7 @@ async def get_recently_processed_items(hours: int = 24) -> set[str]:
                 WHERE created_at > datetime('now', '-{} hours')
                 UNION
                 SELECT p.source_id FROM posts p
-                JOIN groups g ON p.group_id = g.group_id
+                JOIN groups g ON p.group_key = g.group_key
                 WHERE g.created_at > datetime('now', '-{} hours')
             """.format(hours, hours))
             rows = await cursor.fetchall()
