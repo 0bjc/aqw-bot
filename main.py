@@ -6282,7 +6282,10 @@ async def check_posts():
             log.info("DEBUG: fetch_recent_aegifts returned %d posts", len(posts) if posts else 0)
             
             if posts:
-                # Process new items through CDC system
+                # Collect items by group_key first for proper grouping
+                items_by_group_key = {}
+                new_items_by_group = {}
+                
                 for post in posts:
                     try:
                         # Check if item already exists
@@ -6297,48 +6300,72 @@ async def check_posts():
                             # Get group key for new item
                             group_key = get_group_key(post)
                             
-                            # Create Discord message first to get message_id
                             if group_key is None:
-                                # Single item - post individually
-                                success = await post_individual_item(channel, post)
-                                if success:
-                                    log.info(f"[CDC] New single item posted: {source_id}")
-                                else:
-                                    log.error(f"[CDC] Failed to post single item: {source_id}")
+                                # Single item - collect for individual posting
+                                if 'singles' not in items_by_group_key:
+                                    items_by_group_key['singles'] = []
+                                items_by_group_key['singles'].append(post)
                             else:
-                                # Grouped item - check if group exists or create new
-                                async with aiosqlite.connect(DB) as db:
-                                    cursor = await db.execute("""
-                                        SELECT message_id, channel_id FROM groups WHERE group_key = ?
-                                    """, (group_key,))
-                                    existing_group = await cursor.fetchone()
-                                
-                                if existing_group:
-                                    # Group exists - add item to existing group
+                                # Grouped item - collect with others of same group
+                                if group_key not in new_items_by_group:
+                                    new_items_by_group[group_key] = []
+                                new_items_by_group[group_key].append(post)
+                    
+                    except Exception as e:
+                        log.error(f"[CDC] Error processing new item {post.get('url')}: {e}")
+                        continue
+                
+                # Process single items individually
+                if 'singles' in items_by_group_key:
+                    for post in items_by_group_key['singles']:
+                        try:
+                            success = await post_individual_item(channel, post)
+                            if success:
+                                log.info(f"[CDC] Single item posted: {get_source_id_from_item(post)}")
+                            else:
+                                log.error(f"[CDC] Failed to post single item: {get_source_id_from_item(post)}")
+                        except Exception as e:
+                            log.error(f"[CDC] Error posting single item: {e}")
+                
+                # Process grouped items together
+                for group_key, group_posts in new_items_by_group.items():
+                    try:
+                        # Check if group already exists
+                        async with aiosqlite.connect(DB) as db:
+                            cursor = await db.execute("""
+                                SELECT message_id, channel_id FROM groups WHERE group_key = ?
+                            """, (group_key,))
+                            existing_group = await cursor.fetchone()
+                        
+                        if existing_group:
+                            # Group exists - add all items to existing group
+                            for post in group_posts:
+                                try:
                                     item_data = json.dumps(post, sort_keys=True, separators=(',', ':'), default=datetime_serializer)
                                     
                                     async with aiosqlite.connect(DB) as db:
                                         await db.execute("""
                                             INSERT INTO posts (source_id, group_key, last_data, content_hash, message_id, channel_id, created_at, updated_at)
                                             VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                                        """, (source_id, group_key, item_data, generate_content_signature(post), existing_group['message_id'], existing_group['channel_id']))
+                                        """, (get_source_id_from_item(post), group_key, item_data, generate_content_signature(post), existing_group['message_id'], existing_group['channel_id']))
                                         await db.commit()
                                     
-                                    # Update existing group message
-                                    await rebuild_group_from_cdc(channel, group_key)
-                                    log.info(f"[CDC] New item added to existing group: {source_id} -> {group_key}")
-                                else:
-                                    # New group - create grouped post first
-                                    group_posts = [post]
-                                    success = await post_grouped_items(channel, group_key, group_posts)
-                                    if success:
-                                        log.info(f"[CDC] New group created: {group_key}")
-                                    else:
-                                        log.error(f"[CDC] Failed to create new group: {group_key}")
+                                except Exception as e:
+                                    log.error(f"[CDC] Error adding item to existing group {group_key}: {e}")
+                            
+                            # Update existing group message
+                            await rebuild_group_from_cdc(channel, group_key)
+                            log.info(f"[CDC] Added {len(group_posts)} items to existing group: {group_key}")
+                        else:
+                            # New group - create grouped post
+                            success = await post_grouped_items(channel, group_key, group_posts)
+                            if success:
+                                log.info(f"[CDC] New group created: {group_key}")
+                            else:
+                                log.error(f"[CDC] Failed to create new group: {group_key}")
                     
                     except Exception as e:
-                        log.error(f"[CDC] Error processing new item {post.get('url')}: {e}")
-                        continue
+                        log.error(f"[CDC] Error processing group {group_key}: {e}")
             
             # Smart polling interval based on activity
             if has_changes:
