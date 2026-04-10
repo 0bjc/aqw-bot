@@ -6399,33 +6399,29 @@ async def latestdrops(interaction: discord.Interaction):
 
     try:
         # OLD CURSOR SYSTEM DISABLED - CDC system handles this now
-            # log.info("Starting cursor-based recent changes extraction")
-            # page_times = _extract_recent_changes_entries()
-            # log.info("Cursor-based extraction: %d rows found, %d processed, %d total pages", 
-            #           rows_found, processed_count, len(page_times))
-            
-            # OLD FETCH DISABLED - CDC system handles new items
-            # posts = await asyncio.wait_for(asyncio.to_thread(fetch_recent_aegifts, limit=10), timeout=30)
-            # log.info("DEBUG: fetch_recent_aegifts returned %d posts", len(posts) if posts else 0)
-            
-            # Initialize empty posts list since CDC system handles new items
-            posts = []
+        # log.info("Starting cursor-based recent changes extraction")
+        # page_times = _extract_recent_changes_entries()
+        # log.info("Cursor-based extraction: %d rows found, %d processed, %d total pages", 
+        #           rows_found, processed_count, len(page_times))
+        
+        # OLD FETCH DISABLED - CDC system handles new items
+        # posts = await asyncio.wait_for(asyncio.to_thread(fetch_recent_aegifts, limit=10), timeout=30)
+        # log.info("DEBUG: fetch_recent_aegifts returned %d posts", len(posts) if posts else 0)
+        
+        # Initialize empty posts list since CDC system handles new items
+        posts = []
+        
+        if not posts:
+            await interaction.followup.send("No recent AE gifts found in the last 30 pages.")
+            return
+        
+        embed, view = await create_pane_embed(posts[0])
+        await interaction.followup.send(embed=embed, view=view)
+    except asyncio.TimeoutError:
+        await interaction.followup.send("Timed out fetching latest drops. Please try again in a few seconds.")
     except Exception as e:
-        log.error(f"Error in latestdrops setup: {e}")
-        await interaction.followup.send("Error setting up latestdrops command.")
-        return
-    
-    if not posts:
-        await interaction.followup.send("No recent AE gifts found in the last 30 pages.")
-        return
-    
-    embed, view = await create_pane_embed(posts[0])
-    await interaction.followup.send(embed=embed, view=view)
-except asyncio.TimeoutError:
-    await interaction.followup.send("Timed out fetching latest drops. Please try again in a few seconds.")
-except Exception as e:
-    log.exception("latestdrops failed: %s", e)
-    await interaction.followup.send("Something went wrong while fetching recent AE gifts.")
+        log.exception("latestdrops failed: %s", e)
+        await interaction.followup.send("Something went wrong while fetching recent AE gifts.")
 
 
 
