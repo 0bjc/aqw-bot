@@ -165,7 +165,7 @@ def ensure_wikidot_session(session: requests.Session) -> bool:
 
 # ---------------- CONFIG ----------------
 # Discord Configuration
-TOKEN = os.getenv("TOKEN")
+TOKEN = "MTQ4NDExMDk4NDYyMzgyMDgxMA.GWhB6o.gTuG0A39fFDEx3SNR5rAF1XrfCwDe8uos4lGFE"
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1484113318095622315"))
 
 WIKI_BASE = "https://reaqw.wikidot.com"
@@ -6283,6 +6283,9 @@ async def check_posts():
             # log.info("Cursor-based extraction: %d rows found, %d processed, %d total pages", 
             #           rows_found, processed_count, len(page_times))
             
+            # Initialize empty posts - CDC handles new items via triggers
+            posts = []
+            
             if posts:
                 # Collect items by group_key first for proper grouping
                 items_by_group_key = {}
@@ -6398,23 +6401,6 @@ async def latestdrops(interaction: discord.Interaction):
         return
 
     try:
-        # OLD CURSOR SYSTEM DISABLED - CDC system handles this now
-        # log.info("Starting cursor-based recent changes extraction")
-        # page_times = _extract_recent_changes_entries()
-        # log.info("Cursor-based extraction: %d rows found, %d processed, %d total pages", 
-        #           rows_found, processed_count, len(page_times))
-        
-        # OLD FETCH DISABLED - CDC system handles new items
-        # posts = await asyncio.wait_for(asyncio.to_thread(fetch_recent_aegifts, limit=10), timeout=30)
-        # log.info("DEBUG: fetch_recent_aegifts returned %d posts", len(posts) if posts else 0)
-        
-        # Initialize empty posts list since CDC system handles new items
-        posts = []
-        
-        if not posts:
-            await interaction.followup.send("No recent AE gifts found in the last 30 pages.")
-            return
-        
         embed, view = await create_pane_embed(posts[0])
         await interaction.followup.send(embed=embed, view=view)
     except asyncio.TimeoutError:
