@@ -4147,7 +4147,14 @@ async def process_item(item: dict, channel) -> bool:
     
     # Serialize item data for storage
     import json
-    new_data = json.dumps(item, sort_keys=True, separators=(',', ':'))
+    
+    def datetime_serializer(obj):
+        """JSON serializer for datetime objects."""
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+    
+    new_data = json.dumps(item, sort_keys=True, separators=(',', ':'), default=datetime_serializer)
     
     async with aiosqlite.connect(DB) as db:
         async with db.execute("BEGIN IMMEDIATE"):
@@ -5968,6 +5975,10 @@ async def check_posts():
             else:
                 log.info("No changed items found - no processing needed")
                 # No processing means no cursor advancement
+                
+                # Retrieve existing grouped items from database to preserve group stability
+                existing_grouped_items = await get_existing_grouped_items()
+                log.info("Retrieved %d existing grouped items from database", len(existing_grouped_items))
                 
                 # Process existing grouped items to ensure they're still valid
                 all_groups = improved_group_items_by_location_price(existing_grouped_items)
