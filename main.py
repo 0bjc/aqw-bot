@@ -1399,7 +1399,11 @@ def create_categorized_item_list(items: list[dict]) -> str:
         # Add items in this category
         for item in type_items:
             title = item.get("title", "Unknown")
-            sections.append(f"  {title}")
+            url = item.get("url", "")
+            if url:
+                sections.append(f"  - [{title}]({url})")
+            else:
+                sections.append(f"  - {title}")
         
         sections.append("")  # Empty line between categories
     
