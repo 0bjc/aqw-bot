@@ -6283,8 +6283,9 @@ async def check_posts():
             # log.info("Cursor-based extraction: %d rows found, %d processed, %d total pages", 
             #           rows_found, processed_count, len(page_times))
             
-            # Initialize empty posts - CDC handles new items via triggers
-            posts = []
+            # Fetch new items from wikidot for CDC processing
+            posts = await asyncio.wait_for(asyncio.to_thread(fetch_recent_aegifts, limit=10), timeout=30)
+            log.info("[CDC] Fetched %d posts from wikidot", len(posts) if posts else 0)
             
             if posts:
                 # Collect items by group_key first for proper grouping
