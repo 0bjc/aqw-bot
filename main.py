@@ -5953,7 +5953,7 @@ async def check_posts():
             else:
                 log.info("[CURSOR] No items processed - cursor not updated")
                 
-        elif not posts:  # This handles the case where fetch_recent_aegifts returns empty
+        if not posts:  # This handles the case where fetch_recent_aegifts returns empty
                 log.info("No recent changes found - checking existing grouped posts for updates")
                 # Even with no recent changes, we need to check if existing grouped posts need updates
                 # This handles cases where items fall off the recent changes page
