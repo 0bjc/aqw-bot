@@ -195,12 +195,14 @@ async def setup_cdc_tables():
                 new_data TEXT,
                 group_key TEXT,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                processed BOOLEAN DEFAULT FALSE,
-                INDEX idx_processed (processed),
-                INDEX idx_timestamp (timestamp),
-                INDEX idx_table_record (table_name, record_id)
+                processed BOOLEAN DEFAULT FALSE
             )
         """)
+        
+        # Create indexes separately (SQLite requires separate statements)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_processed ON change_log (processed)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON change_log (timestamp)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_table_record ON change_log (table_name, record_id)")
         
         # Create CDC triggers for posts table
         await db.execute("""
