@@ -6434,25 +6434,37 @@ async def check_posts():
                 # Process grouped items together
                 log.info(f"[CDC] Processing {len(new_items_by_group)} groups")
                 for group_key, group_posts in new_items_by_group.items():
-                    log.info(f"[CDC] Group '{group_key}' has {len(group_posts)} items: {[p.get('title', 'unknown') for p in group_posts]}")
+                    log.info(f"[CDC] Group '{group_key}' has {len(group_posts)} new items: {[p.get('title', 'unknown') for p in group_posts]}")
                     try:
-                        # If only 1 item in group, post as individual item
-                        if len(group_posts) == 1:
+                        # Check if group already exists FIRST
+                        async with aiosqlite.connect(DB) as db:
+                            cursor = await db.execute("""
+                                SELECT message_id, channel_id FROM groups WHERE group_id = ?
+                            """, (group_key,))
+                            existing_group = await cursor.fetchone()
+                            
+                            # Count existing items in this group
+                            if existing_group:
+                                cursor = await db.execute("""
+                                    SELECT COUNT(*) as count FROM posts WHERE group_id = ?
+                                """, (group_key,))
+                                existing_count = (await cursor.fetchone())['count']
+                            else:
+                                existing_count = 0
+                        
+                        total_items = existing_count + len(group_posts)
+                        log.info(f"[CDC] Group '{group_key}': {existing_count} existing + {len(group_posts)} new = {total_items} total")
+                        
+                        # If only 1 item total and no existing group, post as individual item
+                        if total_items == 1 and not existing_group:
                             post = group_posts[0]
-                            log.info(f"[CDC] Single item in group - posting individually: '{post.get('title', 'unknown')}'")
+                            log.info(f"[CDC] Single item in new group - posting individually: '{post.get('title', 'unknown')}'")
                             success = await post_individual_item(channel, post)
                             if success:
                                 log.info(f"[CDC] Single item posted: {get_source_id_from_item(post)}")
                             else:
                                 log.error(f"[CDC] Failed to post single item: {get_source_id_from_item(post)}")
                             continue
-                        
-                        # Check if group already exists
-                        async with aiosqlite.connect(DB) as db:
-                            cursor = await db.execute("""
-                                SELECT message_id, channel_id FROM groups WHERE group_id = ?
-                            """, (group_key,))
-                            existing_group = await cursor.fetchone()
                         
                         if existing_group:
                             # Group exists - add all items to existing group
@@ -6472,7 +6484,7 @@ async def check_posts():
                             
                             # Update existing group message
                             await rebuild_group_from_cdc(channel, group_key)
-                            log.info(f"[CDC] Added {len(group_posts)} items to existing group: {group_key}")
+                            log.info(f"[CDC] Added {len(group_posts)} items to existing group: {group_key} (total: {total_items})")
                         else:
                             # New group - create grouped post
                             success = await post_grouped_items(channel, group_key, group_posts)
