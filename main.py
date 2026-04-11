@@ -2780,21 +2780,22 @@ def get_singular_form(category: str) -> str:
         return plural_to_singular[category_key]
     
     # Apply regular singularization rules for unknown categories
+    result = category
     if category.endswith('ies') and len(category) > 3:
         # Words ending in 'ies' often come from 'y' (cities → city)
-        return category[:-3] + 'y'
+        result = category[:-3] + 'y'
     elif category.endswith('ves') and len(category) > 3:
         # Words ending in 'ves' often come from 'f' or 'fe' (wolves → wolf)
-        return category[:-3] + 'f'
+        result = category[:-3] + 'f'
     elif category.endswith('es') and len(category) > 2:
         # Words ending in 'es' often come from simple nouns (boxes → box)
-        return category[:-2]
+        result = category[:-2]
     elif category.endswith('s') and len(category) > 1:
         # Simple plural: remove 's' (cats → cat)
-        return category[:-1]
+        result = category[:-1]
     
-    # If no规则 applies, return as-is (might already be singular)
-    return category
+    # Capitalize the result to ensure consistent formatting
+    return result.capitalize()
 
 
 def get_plural_form(category: str) -> str:
