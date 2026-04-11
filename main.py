@@ -4851,6 +4851,99 @@ def get_startup_safeguard_hours() -> int:
     return 2  # Skip items processed in last 2 hours
 
 
+async def sync_from_discord(channel) -> tuple[int, int]:
+    """
+    Sync database with existing Discord messages on startup.
+    
+    This prevents duplicate posts when the bot restarts by scanning
+    the Discord channel and rebuilding database records for existing messages.
+    
+    Returns:
+        tuple[int, int]: (individual_posts_synced, groups_synced)
+    """
+    try:
+        log.info("[SYNC] Starting Discord channel sync to rebuild database...")
+        individual_count = 0
+        group_count = 0
+        
+        # Fetch recent messages from channel (limit to last 100)
+        messages = []
+        async for message in channel.history(limit=100):
+            # Only process bot's own messages with embeds
+            if message.author.id == bot.user.id and message.embeds:
+                messages.append(message)
+        
+        log.info(f"[SYNC] Found {len(messages)} bot messages in channel")
+        
+        # Process messages to identify individual posts vs groups
+        for message in messages:
+            try:
+                embed = message.embeds[0]
+                
+                # Check if this is a grouped post (has group location in title)
+                if embed.title and "Items at" in embed.title:
+                    # This is a group post - extract location
+                    location = embed.title.replace("Items at ", "").strip()
+                    # Generate group key from location (need to extract price from description)
+                    group_key = None
+                    if embed.description:
+                        # Try to extract price from description
+                        price_match = re.search(r'__\*\*Price:\*\*__\s*\n([^\n]+)', embed.description)
+                        if price_match:
+                            price_str = price_match.group(1).strip()
+                            # Generate stable group key
+                            from urllib.parse import quote
+                            group_key = f"{location}__{quote(price_str, safe='')[:50]}"
+                    
+                    if group_key:
+                        # Save group to database
+                        async with aiosqlite.connect(DB) as db:
+                            await db.execute("""
+                                INSERT OR REPLACE INTO groups (group_id, message_id, channel_id, updated_at)
+                                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                            """, (group_key, message.id, message.channel.id))
+                            await db.commit()
+                            group_count += 1
+                            log.debug(f"[SYNC] Synced group: {group_key}")
+                
+                else:
+                    # This is an individual item post
+                    # Extract title from embed
+                    title = embed.title or "Unknown"
+                    # Try to extract URL from embed or footer
+                    url = None
+                    if embed.url:
+                        url = embed.url
+                    elif embed.footer and embed.footer.text:
+                        # Try to extract URL from footer
+                        url_match = re.search(r'https?://[^\s]+', embed.footer.text)
+                        if url_match:
+                            url = url_match.group(0)
+                    
+                    if url:
+                        source_id = url
+                        # Save individual post to database
+                        async with aiosqlite.connect(DB) as db:
+                            await db.execute("""
+                                INSERT OR REPLACE INTO posts (source_id, message_id, channel_id, updated_at)
+                                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                            """, (source_id, message.id, message.channel.id))
+                            await db.commit()
+                            individual_count += 1
+                            log.debug(f"[SYNC] Synced individual post: {title}")
+                            
+            except Exception as e:
+                log.warning(f"[SYNC] Error processing message {message.id}: {e}")
+                continue
+        
+        log.info(f"[SYNC] Completed: {individual_count} individual posts, {group_count} groups synced")
+        return (individual_count, group_count)
+        
+    except Exception as e:
+        log.error(f"[SYNC] Error syncing from Discord: {e}")
+        return (0, 0)
+
+
 # ==================== CURSOR-BASED SCRAPER STATE ====================
 
 def get_last_seen_change_sync() -> str | None:
@@ -7315,6 +7408,14 @@ async def on_ready():
     cleaned = await cleanup_corrupted_groups()
     if cleaned > 0:
         log.info("Startup cleanup completed: %d corrupted groups removed", cleaned)
+    
+    # Sync with Discord to rebuild database from existing messages
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel:
+        individuals, groups = await sync_from_discord(channel)
+        log.info(f"Startup sync complete: {individuals} individual posts, {groups} groups restored from Discord")
+    else:
+        log.warning(f"Could not find channel {CHANNEL_ID} for startup sync")
     
     if not check_posts.is_running():
         check_posts.start()
