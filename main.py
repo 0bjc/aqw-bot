@@ -336,6 +336,7 @@ async def setup_cdc_tables():
 async def get_unprocessed_cdc_changes(limit: int = 50) -> list[dict]:
     """Get unprocessed CDC changes."""
     async with aiosqlite.connect(DB) as db:
+        db.row_factory = aiosqlite.Row
         cursor = await db.execute("""
             SELECT id, table_name, operation, record_id, old_data, new_data, group_key, timestamp
             FROM change_log 
