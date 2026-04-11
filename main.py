@@ -284,15 +284,24 @@ async def setup_cdc_tables():
             END
         """)
         
+        # Drop old groups triggers if they exist (to handle schema migration from group_key to group_id)
+        try:
+            await db.execute("DROP TRIGGER IF EXISTS groups_insert_cdc")
+            await db.execute("DROP TRIGGER IF EXISTS groups_update_cdc")
+            await db.execute("DROP TRIGGER IF EXISTS groups_delete_cdc")
+            log.info("Dropped old groups CDC triggers for schema migration")
+        except Exception as e:
+            log.debug(f"Could not drop old groups triggers: {e}")
+        
         # Create CDC triggers for groups table
         await db.execute("""
             CREATE TRIGGER IF NOT EXISTS groups_insert_cdc
             AFTER INSERT ON groups
             BEGIN
                 INSERT INTO change_log (table_name, operation, record_id, new_data, group_key)
-                VALUES ('groups', 'INSERT', NEW.group_key, 
-                        json_object('group_key', NEW.group_key, 'message_id', NEW.message_id, 'channel_id', NEW.channel_id),
-                        NEW.group_key);
+                VALUES ('groups', 'INSERT', NEW.group_id, 
+                        json_object('group_id', NEW.group_id, 'message_id', NEW.message_id, 'channel_id', NEW.channel_id),
+                        NEW.group_id);
             END
         """)
         
@@ -301,7 +310,7 @@ async def setup_cdc_tables():
             AFTER UPDATE ON groups
             BEGIN
                 INSERT INTO change_log (table_name, operation, record_id, old_data, new_data, group_key)
-                VALUES ('groups', 'UPDATE', NEW.group_key, OLD.last_data, NEW.last_data, NEW.group_key);
+                VALUES ('groups', 'UPDATE', NEW.group_id, OLD.last_data, NEW.last_data, NEW.group_id);
             END
         """)
         
@@ -310,7 +319,7 @@ async def setup_cdc_tables():
             AFTER DELETE ON groups
             BEGIN
                 INSERT INTO change_log (table_name, operation, record_id, old_data, group_key)
-                VALUES ('groups', 'DELETE', OLD.group_key, OLD.last_data, OLD.group_key);
+                VALUES ('groups', 'DELETE', OLD.group_id, OLD.last_data, OLD.group_id);
             END
         """)
         
@@ -725,9 +734,19 @@ async def init_db() -> None:
             else:
                 log.error(f"Error adding last_data column to posts: {e}")
         
+        # Fix existing groups table with old schema (group_key instead of group_id)
+        try:
+            await db.execute("ALTER TABLE groups RENAME COLUMN group_key TO group_id")
+            log.info("Migrated groups table: renamed group_key to group_id")
+        except aiosqlite.OperationalError as e:
+            if "no such column" in str(e).lower():
+                log.debug("groups table already has correct schema (group_id)")
+            else:
+                log.error(f"Error migrating groups table: {e}")
+        
         await db.execute("""
             CREATE TABLE IF NOT EXISTS groups (
-                group_key TEXT PRIMARY KEY,
+                group_id TEXT PRIMARY KEY,
                 message_id INTEGER NOT NULL,
                 channel_id INTEGER NOT NULL,
                 content_hash TEXT NULL,
