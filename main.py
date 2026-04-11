@@ -6265,13 +6265,12 @@ class SingleItemButton(discord.ui.Button):
         parsed_emoji = parse_discord_emoji(emoji)
         
         # Use item type instead of item name for button label
-        # For single items, always use singular form (remove trailing 's')
-        item_type = item.get('type', 'misc').capitalize()
-        if item_type.endswith('s'):
-            item_type = item_type[:-1]
+        # For single items, use proper singular form
+        item_type_raw = item.get('type', 'misc')
+        item_type = get_singular_form(item_type_raw).capitalize()
         
         super().__init__(
-            label=item_type,  # Show singular item type instead of item name
+            label=item_type,  # Show properly singularized item type
             style=discord.ButtonStyle.secondary,
             emoji=parsed_emoji
         )
