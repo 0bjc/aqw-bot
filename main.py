@@ -1866,17 +1866,21 @@ def create_categorized_item_list(items: list[dict]) -> str:
         emoji = get_item_type_emoji(item_type)
         
         # Format category name with emoji (outside bold/underline)
+        # Handle pluralization - if only 1 item, use singular form
+        count = len(type_items)
         category_name = item_type.capitalize()
+        if count == 1 and category_name.endswith('s'):
+            category_name = category_name[:-1]  # Remove trailing 's' for singular
         sections.append(f"{emoji} __**{category_name}:**__")
         
-        # Add items in this category
+        # Add items in this category with bullet points
         for item in type_items:
             title = item.get("title") or item.get("name", "Unknown")
             url = item.get("url", "")
             if url:
-                sections.append(f"** [{title}]({url})")
+                sections.append(f"• **[{title}]({url})**")
             else:
-                sections.append(f"** {title}")
+                sections.append(f"• **{title}**")
         
         sections.append("")  # Empty line between categories
     
