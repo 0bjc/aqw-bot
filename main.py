@@ -49,7 +49,33 @@ ITEM_TYPE_EMOJIS = {
     'ground': '<:aqwground:1491402322318721074>',
     'necklace': '<:aqwnecklace:1491402627244884103>',
     'misc': '<:aqwmisc:1491402592884887612>',
-    'gift': '<:aqwgift:1491402775009955950>'
+    'gift': '<:aqwgift:1491402775009955950>',
+    # Weapon type aliases with correct custom emojis
+    'axes': '<:aqwaxe:1492476375867588748>',
+    'axe': '<:aqwaxe:1492476375867588748>',
+    'bows': '<:aqwbow:1492476460756242602>',
+    'bow': '<:aqwbow:1492476460756242602>',
+    'daggers': '<:aqwdagger:1492476519207931958>',
+    'dagger': '<:aqwdagger:1492476519207931958>',
+    'gauntlets': '<:aqwgauntlet:1492476573566107759>',
+    'gauntlet': '<:aqwgauntlet:1492476573566107759>',
+    'guns': '<:aqwgun:1492476668269563944>',
+    'gun': '<:aqwgun:1492476668269563944>',
+    'handguns': '<:aqwhandgun:1492477220290039979>',
+    'handgun': '<:aqwhandgun:1492477220290039979>',
+    'maces': '<:aqwmace:1492476738343534605>',
+    'mace': '<:aqwmace:1492476738343534605>',
+    'polearms': '<:aqwpolearm:1492476809365819432>',
+    'polearm': '<:aqwpolearm:1492476809365819432>',
+    'rifles': '<:aqwrifle:1492477290230054946>',
+    'rifle': '<:aqwrifle:1492477290230054946>',
+    'staffs': '<:aqwstaff:1492476857344327842>',
+    'staff': '<:aqwstaff:1492476857344327842>',
+    'wands': '<:aqwwand:1492476918740549723>',
+    'wand': '<:aqwwand:1492476918740549723>',
+    'whips': '<:aqwwhip:1492477358433763428>',
+    'whip': '<:aqwwhip:1492477358433763428>',
+    'swords': '<:aqwsword:1491402704822468690>'
 }
 
 # Fallback emoji for unknown types
@@ -78,21 +104,27 @@ def parse_discord_emoji(emoji_string: str) -> discord.PartialEmoji:
 def get_item_type_emoji(item_type: str) -> str:
     """Get the custom emoji for an item type, with fallback."""
     if not item_type:
+        log.info(f"[EMOJI] No item_type provided, using default: {DEFAULT_EMOJI}")
         return DEFAULT_EMOJI
     
     # Normalize item type to lowercase
     normalized_type = item_type.lower().strip()
+    log.info(f"[EMOJI] Looking up emoji for type='{item_type}' -> normalized='{normalized_type}'")
     
     # Direct mapping
     if normalized_type in ITEM_TYPE_EMOJIS:
-        return ITEM_TYPE_EMOJIS[normalized_type]
+        emoji = ITEM_TYPE_EMOJIS[normalized_type]
+        log.info(f"[EMOJI] Found direct mapping: {normalized_type} -> {emoji}")
+        return emoji
     
     # Check if any keyword matches the type
     for key, emoji in ITEM_TYPE_EMOJIS.items():
         if key in normalized_type:
+            log.info(f"[EMOJI] Found keyword match: '{key}' in '{normalized_type}' -> {emoji}")
             return emoji
     
     # Fallback to misc
+    log.info(f"[EMOJI] No match found for '{normalized_type}', using default: {DEFAULT_EMOJI}")
     return DEFAULT_EMOJI
 
 def detect_item_type_from_title(title: str, item: dict = None) -> str:
@@ -5662,6 +5694,10 @@ def extract_item_details(page_url: str) -> dict | None:
 
     raw_text = content_el.get_text(separator="\n", strip=True)
     cleaned, price = _clean_item_text(raw_text)
+    
+    # Extract location from the cleaned content
+    location = extract_location_from_content(cleaned)
+    log.info(f"[EXTRACT] Item '{title}': location='{location}', price='{price}'")
 
     # Debug: if the page actually has a Location label but our parser failed,
     # log a small snippet so we can tune the regex to the real wording.
@@ -5686,6 +5722,7 @@ def extract_item_details(page_url: str) -> dict | None:
     return {
         "title": title or "Untitled",
         "content": cleaned or "No item info available.",
+        "location": location,
         "price": price,
         "image": img_url,
         "images": img_urls,  # All images for collage
