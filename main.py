@@ -2453,8 +2453,8 @@ class CategoryButtonsView(discord.ui.View):
         # Add category buttons (one per type, not per item)
         for item_type, type_items in categories.items():
             emoji = get_item_type_emoji(item_type)
-            # Use category name instead of individual item name
-            category_name = item_type.capitalize()
+            # Use category name with proper pluralization based on count
+            category_name = get_category_form(item_type, len(type_items))
             button = ItemCategoryButton(item_type, type_items, self, emoji, category_name, len(type_items))
             self.add_item(button)
 
@@ -6265,10 +6265,13 @@ class SingleItemButton(discord.ui.Button):
         parsed_emoji = parse_discord_emoji(emoji)
         
         # Use item type instead of item name for button label
+        # For single items, always use singular form (remove trailing 's')
         item_type = item.get('type', 'misc').capitalize()
+        if item_type.endswith('s'):
+            item_type = item_type[:-1]
         
         super().__init__(
-            label=item_type,  # Show item type instead of item name
+            label=item_type,  # Show singular item type instead of item name
             style=discord.ButtonStyle.secondary,
             emoji=parsed_emoji
         )
