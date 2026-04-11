@@ -49,7 +49,7 @@ ITEM_TYPE_EMOJIS = {
     'ground': '<:aqwground:1491402322318721074>',
     'necklace': '<:aqwnecklace:1491402627244884103>',
     'misc': '<:aqwmisc:1491402592884887612>',
-    'gift': '<:aqwgift:1491402775009955950>',
+    'gift': '<:aqwgift:1492499970287341688>',
     # Weapon type aliases with correct custom emojis
     'axes': '<:aqwaxe:1492476375867588748>',
     'axe': '<:aqwaxe:1492476375867588748>',
@@ -1046,7 +1046,7 @@ def generate_daily_gift_title(gift_number: int) -> str:
     weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     current_weekday = weekday_names[datetime.now().weekday()]
     
-    return f"<:aqwgift:1491402775009955950> __{current_weekday} Daily Gift__ <:aqwgift:1491402775009955950>"
+    return f"<:aqwgift:1492499970287341688> __{current_weekday} Daily Gift__ <:aqwgift:1492499970287341688>"
 
 
 def extract_breadcrumb_category(html_content: str, page_url: str = "") -> str:
