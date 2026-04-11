@@ -428,7 +428,7 @@ async def process_group_cdc_changes(channel, group_key: str, changes: list[dict]
     async with aiosqlite.connect(DB) as db:
         cursor = await db.execute("""
             SELECT source_id, last_data FROM posts 
-            WHERE group_key = ? 
+            WHERE group_id = ? 
             ORDER BY created_at
         """, (group_key,))
         current_items = {row[0]: json.loads(row[1]) if row[1] else {} for row in await cursor.fetchall()}
@@ -579,7 +579,7 @@ async def delete_group_message_from_cdc(channel, group_key: str) -> None:
         async with aiosqlite.connect(DB) as db:
             cursor = await db.execute("""
                 SELECT message_id, channel_id FROM groups 
-                WHERE group_key = ?
+                WHERE group_id = ?
             """, (group_key,))
             group_info = await cursor.fetchone()
             
@@ -595,7 +595,7 @@ async def delete_group_message_from_cdc(channel, group_key: str) -> None:
                     log.warning(f"[CDC] Failed to delete group message {message_id}: {e}")
                 
                 # Remove group from database
-                await db.execute("DELETE FROM groups WHERE group_key = ?", (group_key,))
+                await db.execute("DELETE FROM groups WHERE group_id = ?", (group_key,))
                 await db.commit()
                 
     except Exception as e:
@@ -714,15 +714,25 @@ async def init_db() -> None:
             )
         """)
         
-        # Add group_key column to posts table if it doesn't exist
+        # Add group_id column to posts table if it doesn't exist (for existing tables without it)
         try:
-            await db.execute("ALTER TABLE posts ADD COLUMN group_key TEXT")
-            log.info("Added group_key column to posts table (migration)")
+            await db.execute("ALTER TABLE posts ADD COLUMN group_id TEXT")
+            log.info("Added group_id column to posts table (migration)")
         except aiosqlite.OperationalError as e:
             if "duplicate column name" in str(e).lower():
-                log.debug("group_key column already exists in posts table")
+                log.debug("group_id column already exists in posts table")
             else:
-                log.error(f"Error adding group_key column to posts: {e}")
+                log.error(f"Error adding group_id column to posts: {e}")
+        
+        # Migration: rename group_key to group_id for old tables
+        try:
+            await db.execute("ALTER TABLE posts RENAME COLUMN group_key TO group_id")
+            log.info("Migrated posts table: renamed group_key to group_id")
+        except aiosqlite.OperationalError as e:
+            if "no such column" in str(e).lower():
+                log.debug("posts table already has correct schema (group_id)")
+            else:
+                log.error(f"Error migrating posts table: {e}")
         
         # Add last_data column to posts table if it doesn't exist
         try:
@@ -734,16 +744,7 @@ async def init_db() -> None:
             else:
                 log.error(f"Error adding last_data column to posts: {e}")
         
-        # Fix existing groups table with old schema (group_key instead of group_id)
-        try:
-            await db.execute("ALTER TABLE groups RENAME COLUMN group_key TO group_id")
-            log.info("Migrated groups table: renamed group_key to group_id")
-        except aiosqlite.OperationalError as e:
-            if "no such column" in str(e).lower():
-                log.debug("groups table already has correct schema (group_id)")
-            else:
-                log.error(f"Error migrating groups table: {e}")
-        
+        # Create groups table first
         await db.execute("""
             CREATE TABLE IF NOT EXISTS groups (
                 group_id TEXT PRIMARY KEY,
@@ -754,6 +755,18 @@ async def init_db() -> None:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Fix existing groups table with old schema (group_key instead of group_id)
+        try:
+            await db.execute("ALTER TABLE groups RENAME COLUMN group_key TO group_id")
+            log.info("Migrated groups table: renamed group_key to group_id")
+        except aiosqlite.OperationalError as e:
+            if "no such column" in str(e).lower():
+                log.debug("groups table already has correct schema (group_id)")
+            elif "no such table" in str(e).lower():
+                log.debug("groups table doesn't exist yet, will be created")
+            else:
+                log.error(f"Error migrating groups table: {e}")
         
         # Add content_hash column to existing posts table if it doesn't exist
         try:
@@ -4705,7 +4718,7 @@ async def rebuild_group(group_key: str, channel) -> bool:
                             log.warning(f"[DELETE] Failed to delete Discord message {message_id}: {e}")
                     
                     # Delete group from database
-                    await db.execute("DELETE FROM groups WHERE group_key = ?", (group_key,))
+                    await db.execute("DELETE FROM groups WHERE group_id = ?", (group_key,))
                     await db.commit()
                     return False
                 
@@ -4753,12 +4766,12 @@ async def rebuild_group(group_key: str, channel) -> bool:
                             UPDATE groups SET 
                             content_hash = ?, 
                             updated_at = CURRENT_TIMESTAMP 
-                            WHERE group_key = ?
+                            WHERE group_id = ?
                         """, (generate_content_signature({'items': items}), group_key))
                         
                     except discord.NotFound:
                         log.warning(f"[UPDATE] Group message {message_id} not found, creating new one")
-                        await db.execute("DELETE FROM groups WHERE group_key = ?", (group_key,))
+                        await db.execute("DELETE FROM groups WHERE group_id = ?", (group_key,))
                         existing_group = None
                     except discord.Forbidden:
                         log.error(f"[UPDATE] No permission to edit group message {message_id}")
