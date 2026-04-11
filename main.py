@@ -2774,9 +2774,10 @@ def get_singular_form(category: str) -> str:
         "Millennia": "Millennium"
     }
     
-    # Check if we have a direct mapping
-    if category in plural_to_singular:
-        return plural_to_singular[category]
+    # Check if we have a direct mapping (handle case-insensitive lookup)
+    category_key = category.capitalize()
+    if category_key in plural_to_singular:
+        return plural_to_singular[category_key]
     
     # Apply regular singularization rules for unknown categories
     if category.endswith('ies') and len(category) > 3:
