@@ -253,6 +253,15 @@ async def setup_cdc_tables():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON change_log (timestamp)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_table_record ON change_log (table_name, record_id)")
         
+        # Drop old posts triggers if they exist (to handle schema migration)
+        try:
+            await db.execute("DROP TRIGGER IF EXISTS posts_insert_cdc")
+            await db.execute("DROP TRIGGER IF EXISTS posts_update_cdc")
+            await db.execute("DROP TRIGGER IF EXISTS posts_delete_cdc")
+            log.info("Dropped old posts CDC triggers for schema migration")
+        except Exception as e:
+            log.debug(f"Could not drop old posts triggers: {e}")
+        
         # Create CDC triggers for posts table
         await db.execute("""
             CREATE TRIGGER IF NOT EXISTS posts_insert_cdc
@@ -262,7 +271,7 @@ async def setup_cdc_tables():
                 VALUES ('posts', 'INSERT', NEW.source_id, 
                         json_object('source_id', NEW.source_id, 'title', json_extract(NEW.last_data, '$.title'), 
                                    'location', json_extract(NEW.last_data, '$.location'), 'price', json_extract(NEW.last_data, '$.price')),
-                        NEW.group_key);
+                        NEW.group_id);
             END
         """)
         
@@ -271,7 +280,7 @@ async def setup_cdc_tables():
             AFTER UPDATE ON posts
             BEGIN
                 INSERT INTO change_log (table_name, operation, record_id, old_data, new_data, group_key)
-                VALUES ('posts', 'UPDATE', NEW.source_id, OLD.last_data, NEW.last_data, NEW.group_key);
+                VALUES ('posts', 'UPDATE', NEW.source_id, OLD.last_data, NEW.last_data, NEW.group_id);
             END
         """)
         
@@ -280,7 +289,7 @@ async def setup_cdc_tables():
             AFTER DELETE ON posts
             BEGIN
                 INSERT INTO change_log (table_name, operation, record_id, old_data, group_key)
-                VALUES ('posts', 'DELETE', OLD.source_id, OLD.last_data, OLD.group_key);
+                VALUES ('posts', 'DELETE', OLD.source_id, OLD.last_data, OLD.group_id);
             END
         """)
         
@@ -517,7 +526,7 @@ async def rebuild_group_from_cdc(channel, group_key: str) -> bool:
             # Get all current items for this group
             cursor = await db.execute("""
                 SELECT source_id, last_data FROM posts 
-                WHERE group_key = ? 
+                WHERE group_id = ? 
                 ORDER BY created_at
             """, (group_key,))
             items_data = await cursor.fetchall()
@@ -4701,7 +4710,7 @@ async def rebuild_group(group_key: str, channel) -> bool:
                     # Get group message info before deletion
                     cursor = await db.execute("""
                         SELECT message_id, channel_id FROM groups 
-                        WHERE group_key = ?
+                        WHERE group_id = ?
                     """, (group_key,))
                     group_info = await cursor.fetchone()
                     
@@ -4741,7 +4750,7 @@ async def rebuild_group(group_key: str, channel) -> bool:
                 # Check if group message already exists
                 cursor = await db.execute("""
                     SELECT message_id, channel_id FROM groups 
-                    WHERE group_key = ?
+                    WHERE group_id = ?
                 """, (group_key,))
                 existing_group = await cursor.fetchone()
                 
@@ -4807,7 +4816,7 @@ async def get_recently_processed_items(hours: int = 24) -> set[str]:
                 WHERE created_at > datetime('now', '-{} hours')
                 UNION
                 SELECT p.source_id FROM posts p
-                JOIN groups g ON p.group_key = g.group_key
+                JOIN groups g ON p.group_id = g.group_id
                 WHERE g.created_at > datetime('now', '-{} hours')
             """.format(hours, hours))
             rows = await cursor.fetchall()
@@ -6422,7 +6431,7 @@ async def check_posts():
                         # Check if group already exists
                         async with aiosqlite.connect(DB) as db:
                             cursor = await db.execute("""
-                                SELECT message_id, channel_id FROM groups WHERE group_key = ?
+                                SELECT message_id, channel_id FROM groups WHERE group_id = ?
                             """, (group_key,))
                             existing_group = await cursor.fetchone()
                         
