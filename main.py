@@ -144,11 +144,7 @@ def detect_item_type_from_title(title: str, item: dict = None) -> str:
     
     title_lower = title.lower()
     
-    # Check for daily gift
-    if 'daily gift' in title_lower or 'gift' in title_lower:
-        return 'gift'
-    
-    # Check for specific item types
+    # Check for specific item types (note: 'gift' is NOT an item type, it's only for main title emoji)
     type_keywords = {
         'sword': ['sword', 'blade', 'dagger', 'weapon'],
         'helm': ['helm', 'helmet', 'hat', 'cap'],
