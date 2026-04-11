@@ -6305,6 +6305,7 @@ async def check_posts():
                         if not exists:
                             # Get group key for new item
                             group_key = get_group_key(post)
+                            log.info(f"[CDC] Item '{post.get('title', 'unknown')}' -> group_key: {group_key}")
                             
                             if group_key is None:
                                 # Single item - collect for individual posting
@@ -6334,7 +6335,9 @@ async def check_posts():
                             log.error(f"[CDC] Error posting single item: {e}")
                 
                 # Process grouped items together
+                log.info(f"[CDC] Processing {len(new_items_by_group)} groups")
                 for group_key, group_posts in new_items_by_group.items():
+                    log.info(f"[CDC] Group '{group_key}' has {len(group_posts)} items: {[p.get('title', 'unknown') for p in group_posts]}")
                     try:
                         # Check if group already exists
                         async with aiosqlite.connect(DB) as db:
