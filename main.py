@@ -95,10 +95,20 @@ def get_item_type_emoji(item_type: str) -> str:
     # Fallback to misc
     return DEFAULT_EMOJI
 
-def detect_item_type_from_title(title: str) -> str:
-    """Detect item type from title or content."""
+def detect_item_type_from_title(title: str, item: dict = None) -> str:
+    """Detect item type from title, content, or breadcrumbs."""
     if not title:
         return 'misc'
+    
+    # First, try breadcrumb extraction if item data is available
+    if item and "html_content" in item:
+        try:
+            breadcrumb_category = extract_breadcrumb_category(item["html_content"], item.get("url", ""))
+            if breadcrumb_category and breadcrumb_category != "No category found":
+                log.info(f"[ITEM TYPE] '{title}' -> from breadcrumb: {breadcrumb_category}")
+                return breadcrumb_category.lower()
+        except Exception as e:
+            log.error(f"[ITEM TYPE] Breadcrumb extraction failed for '{title}': {e}")
     
     title_lower = title.lower()
     
@@ -1769,8 +1779,8 @@ def create_categorized_item_list(items: list[dict]) -> str:
     # Group items by detected type
     categorized = {}
     for item in items:
-        # Detect item type from title
-        item_type = detect_item_type_from_title(item.get('title', ''))
+        # Detect item type from title and breadcrumbs
+        item_type = detect_item_type_from_title(item.get('title', ''), item)
         if item_type not in categorized:
             categorized[item_type] = []
         categorized[item_type].append(item)
@@ -3022,7 +3032,7 @@ async def create_grouped_embed(group_key: str, items: list[dict]) -> tuple[disco
             'price': item.get('price', 'Unknown'),
             'location': item.get('location', 'Unknown'),
             'rarity': item.get('rarity', 'Unknown'),
-            'type': detect_item_type_from_title(item.get('title', ''))
+            'type': detect_item_type_from_title(item.get('title', ''), item)
         })
     
     # Create category buttons view for grouped items
@@ -4487,10 +4497,11 @@ def get_group_key(item: dict) -> str:
     """Generate stable group key from raw location and price values without normalization."""
     location = item.get('location', '')
     price = item.get('price', '')
+    title = item.get('title', 'unknown')
     
     # CDC SAFETY: Fallback to single post if missing required data
     if not location or not price:
-        log.debug(f"[GROUP] Missing location or price - treating as single post: location='{location}', price='{price}'")
+        log.info(f"[GROUP KEY] Item '{title}': MISSING location='{location}' or price='{price}' - treating as single post")
         return None  # Indicates no grouping
     
     # Extract numeric value and currency from price without modifying the original
@@ -4518,7 +4529,7 @@ def get_group_key(item: dict) -> str:
     
     # CDC SAFETY: Fallback if price parsing fails
     if not numeric_price or not currency:
-        log.debug(f"[GROUP] Price parsing failed - treating as single post: price='{price}' -> '{numeric_price}_{currency}'")
+        log.info(f"[GROUP KEY] Item '{title}': PRICE PARSING FAILED price='{price}' -> numeric='{numeric_price}', currency='{currency}' - treating as single post")
         return None
     
     # NEW GROUP KEY FORMAT: raw_location + "__" + price_value + "_" + currency
@@ -6134,7 +6145,7 @@ async def create_pane_embed(post: dict) -> tuple[discord.Embed, discord.ui.View]
     embed.set_footer(text="AQW Daily Gift")
     
     # Create view with item-type button
-    item_type = detect_item_type_from_title(post.get('title', ''))
+    item_type = detect_item_type_from_title(post.get('title', ''), post)
     structured_item = {
         'name': post.get('title', 'Unknown'),
         'image': post.get('image', ''),
