@@ -1867,11 +1867,11 @@ def create_categorized_item_list(items: list[dict]) -> str:
         
         # Format category name with emoji
         category_name = item_type.capitalize()
-        sections.append(f"__**{emoji} {category_name}:**__")
+        sections.append(f"**{emoji} {category_name}:**")
         
         # Add items in this category
         for item in type_items:
-            title = item.get("title", "Unknown")
+            title = item.get("title") or item.get("name", "Unknown")
             url = item.get("url", "")
             if url:
                 sections.append(f"** [{title}]({url})")
@@ -2015,7 +2015,7 @@ class GroupedShowPaneButton(discord.ui.Button):
         embed = discord.Embed(
             title=f"📂 {category} ({len(items)} items)",
             description=f"From: {group_title}\n\n" + 
-                        "\n".join(f"• **{item.get('title', 'Unknown')}**\n  💰 {item.get('price', 'N/A')}" for item in items),
+                        "\n".join(f"• **{item.get('title') or item.get('name', 'Unknown')}**\n  💰 {item.get('price', 'N/A')}" for item in items),
             color=discord.Color.blue()
         )
         
@@ -2045,7 +2045,7 @@ class GroupedShowPaneButton(discord.ui.Button):
                 fallback_embed = discord.Embed(
                     title=f"📂 {category} ({len(items)} items)",
                     description=f"From: {group_title}\n\n" + 
-                                "\n".join(f"• **{item.get('title', 'Unknown')}**" for item in items),
+                                "\n".join(f"• **{item.get('title') or item.get('name', 'Unknown')}**" for item in items),
                     color=discord.Color.blue()
                 )
                 await interaction.followup.send(embed=fallback_embed, ephemeral=True)
@@ -2053,7 +2053,7 @@ class GroupedShowPaneButton(discord.ui.Button):
                 # Final fallback: send text only
                 await interaction.followup.send(
                     f"📂 **{category}** ({len(items)} items) from {group_title}:\n" +
-                    "\n".join(f"• {item.get('title', 'Unknown')}" for item in items),
+                    "\n".join(f"• {item.get('title') or item.get('name', 'Unknown')}" for item in items),
                     ephemeral=True
                 )
 
@@ -2370,7 +2370,7 @@ class CategoryButton(discord.ui.Button):
             # Add items to embed
             item_list = []
             for item in category_items:
-                title = item.get("title", "Unknown")
+                title = item.get("title") or item.get("name", "Unknown")
                 url = item.get("url", "")
                 price = item.get("price", "N/A")
                 
@@ -2486,9 +2486,11 @@ class ItemCategoryButton(discord.ui.Button):
             return discord.Embed(title="No items", color=discord.Color.red())
         
         item = self.items[index]
+        # Support both 'title' and 'name' fields
+        title = item.get('title') or item.get('name', 'Unknown')
         
         embed = discord.Embed(
-            title=item.get('title', 'Unknown'),
+            title=title,
             description=f"Item {index + 1} of {len(self.items)}",
             color=discord.Color.blue()
         )
@@ -2528,9 +2530,11 @@ class ItemPaginationView(discord.ui.View):
             return discord.Embed(title="No items available", color=discord.Color.red())
         
         item = self.items[self.current_index]
+        # Support both 'title' and 'name' fields
+        title = item.get('title') or item.get('name', 'Unknown')
         
         embed = discord.Embed(
-            title=item.get('title', 'Unknown'),
+            title=title,
             description=f"Item {self.current_index + 1} of {len(self.items)}",
             color=discord.Color.blue()
         )
@@ -3076,7 +3080,7 @@ async def create_grouped_embed(group_key: str, items: list[dict]) -> tuple[disco
     
     # Build description with new formatting
     description_parts = [
-        f"__**Location:**__",
+        f"**Location:**",
         location,
         "",
         item_list
@@ -5648,27 +5652,27 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
         p_norm = (p or "").strip()
         return p_norm.upper() == "N/A" or p_norm.upper().startswith("N/A")
 
-    # Assemble only the important fields
+    # Assemble only the important fields (using Discord-compatible markdown)
     parts: list[str] = [
-        f"__**Location:**__\n{_format_list(loc)}",
+        f"**Location:**\n{_format_list(loc)}",
     ]
 
     if _price_is_na(price):
         # When Price is N/A, show Dropped by / Merge the following
         if dropped_by:
-            parts.append(f"__**Dropped by:**__\n{_format_list(dropped_by)}")
+            parts.append(f"**Dropped by:**\n{_format_list(dropped_by)}")
         if merge_following:
-            parts.append(f"__**Merge the following:**__\n{_format_list(merge_following)}")
+            parts.append(f"**Merge the following:**\n{_format_list(merge_following)}")
         # Fallback if neither exists
         if not dropped_by and not merge_following:
-            parts.append(f"__**Price:**__\n{_format_list(price)}")
+            parts.append(f"**Price:**\n{_format_list(price)}")
     else:
-        parts.append(f"__**Price:**__\n{_format_list(price)}")
+        parts.append(f"**Price:**\n{_format_list(price)}")
 
-    parts.append(f"__**Rarity:**__\n{_format_list(rarity)}")
+    parts.append(f"**Rarity:**\n{_format_list(rarity)}")
 
     if note:
-        parts.append(f"__**Note:**__\n{_format_list(note)}")
+        parts.append(f"**Note:**\n{_format_list(note)}")
         log.info("Found note field: %s", note)
 
     structured = "\n\n".join(parts).strip()
