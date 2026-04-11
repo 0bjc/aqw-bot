@@ -1865,9 +1865,9 @@ def create_categorized_item_list(items: list[dict]) -> str:
     for item_type, type_items in categorized.items():
         emoji = get_item_type_emoji(item_type)
         
-        # Format category name with emoji
+        # Format category name with emoji (outside bold/underline)
         category_name = item_type.capitalize()
-        sections.append(f"**{emoji} {category_name}:**")
+        sections.append(f"{emoji} __**{category_name}:**__")
         
         # Add items in this category
         for item in type_items:
@@ -3080,7 +3080,7 @@ async def create_grouped_embed(group_key: str, items: list[dict]) -> tuple[disco
     
     # Build description with new formatting
     description_parts = [
-        f"**Location:**",
+        f"__**Location:**__",
         location,
         "",
         item_list
@@ -5654,25 +5654,25 @@ def _clean_item_text(raw_text: str) -> tuple[str, str]:
 
     # Assemble only the important fields (using Discord-compatible markdown)
     parts: list[str] = [
-        f"**Location:**\n{_format_list(loc)}",
+        f"__**Location:**__\n{_format_list(loc)}",
     ]
 
     if _price_is_na(price):
         # When Price is N/A, show Dropped by / Merge the following
         if dropped_by:
-            parts.append(f"**Dropped by:**\n{_format_list(dropped_by)}")
+            parts.append(f"__**Dropped by:**__\n{_format_list(dropped_by)}")
         if merge_following:
-            parts.append(f"**Merge the following:**\n{_format_list(merge_following)}")
+            parts.append(f"__**Merge the following:**__\n{_format_list(merge_following)}")
         # Fallback if neither exists
         if not dropped_by and not merge_following:
-            parts.append(f"**Price:**\n{_format_list(price)}")
+            parts.append(f"__**Price:**__\n{_format_list(price)}")
     else:
-        parts.append(f"**Price:**\n{_format_list(price)}")
+        parts.append(f"__**Price:**__\n{_format_list(price)}")
 
-    parts.append(f"**Rarity:**\n{_format_list(rarity)}")
+    parts.append(f"__**Rarity:**__\n{_format_list(rarity)}")
 
     if note:
-        parts.append(f"**Note:**\n{_format_list(note)}")
+        parts.append(f"__**Note:**__\n{_format_list(note)}")
         log.info("Found note field: %s", note)
 
     structured = "\n\n".join(parts).strip()
@@ -6432,6 +6432,17 @@ async def check_posts():
                 for group_key, group_posts in new_items_by_group.items():
                     log.info(f"[CDC] Group '{group_key}' has {len(group_posts)} items: {[p.get('title', 'unknown') for p in group_posts]}")
                     try:
+                        # If only 1 item in group, post as individual item
+                        if len(group_posts) == 1:
+                            post = group_posts[0]
+                            log.info(f"[CDC] Single item in group - posting individually: '{post.get('title', 'unknown')}'")
+                            success = await post_individual_item(channel, post)
+                            if success:
+                                log.info(f"[CDC] Single item posted: {get_source_id_from_item(post)}")
+                            else:
+                                log.error(f"[CDC] Failed to post single item: {get_source_id_from_item(post)}")
+                            continue
+                        
                         # Check if group already exists
                         async with aiosqlite.connect(DB) as db:
                             cursor = await db.execute("""
@@ -6447,7 +6458,7 @@ async def check_posts():
                                     
                                     async with aiosqlite.connect(DB) as db:
                                         await db.execute("""
-                                            INSERT INTO posts (source_id, group_key, last_data, content_hash, message_id, channel_id, created_at, updated_at)
+                                            INSERT INTO posts (source_id, group_id, last_data, content_hash, message_id, channel_id, created_at, updated_at)
                                             VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                                         """, (get_source_id_from_item(post), group_key, item_data, generate_content_signature(post), existing_group['message_id'], existing_group['channel_id']))
                                         await db.commit()
