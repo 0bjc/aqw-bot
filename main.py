@@ -264,10 +264,7 @@ async def setup_cdc_tables():
             AFTER INSERT ON posts
             BEGIN
                 INSERT INTO change_log (table_name, operation, record_id, new_data, group_key)
-                VALUES ('posts', 'INSERT', NEW.source_id, 
-                        json_object('source_id', NEW.source_id, 'title', json_extract(NEW.last_data, '$.title'), 
-                                   'location', json_extract(NEW.last_data, '$.location'), 'price', json_extract(NEW.last_data, '$.price')),
-                        NEW.group_id);
+                VALUES ('posts', 'INSERT', NEW.source_id, NEW.last_data, NEW.group_id);
             END
         """)
         
