@@ -1005,10 +1005,11 @@ async def has_content_changed(source_id: str, item: dict) -> bool:
             
             # Compare signatures
             if stored_signature != current_signature:
-                # Update stored signature
+                # Update stored signature AND last_data so CDC gets fresh data
+                last_data = json.dumps(item, sort_keys=True, separators=(',', ':'), default=str)
                 await db.execute("""
-                    UPDATE posts SET content_hash = ? WHERE source_id = ?
-                """, (current_signature, source_id))
+                    UPDATE posts SET content_hash = ?, last_data = ? WHERE source_id = ?
+                """, (current_signature, last_data, source_id))
                 await db.commit()
                 return True
             
