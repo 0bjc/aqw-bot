@@ -839,17 +839,20 @@ async def get_post(source_id: str) -> dict | None:
         return None
 
 
-async def save_single_post(source_id: str, message, content_hash: str = None) -> None:
-    """Save a single post record (group_id = NULL) with content hash."""
+async def save_single_post(source_id: str, message, content_hash: str = None, item: dict = None) -> None:
+    """Save a single post record (group_id = NULL) with content hash and item data."""
     try:
+        # Serialize item data for CDC
+        last_data = json.dumps(item, sort_keys=True, separators=(',', ':'), default=str) if item else None
+        
         async with aiosqlite.connect(DB) as db:
             await db.execute("BEGIN IMMEDIATE")
             try:
                 await db.execute("""
                     INSERT OR REPLACE INTO posts 
-                    (source_id, message_id, channel_id, group_id, content_hash, updated_at) 
-                    VALUES (?, ?, ?, NULL, ?, CURRENT_TIMESTAMP)
-                """, (source_id, message.id, message.channel.id, content_hash))
+                    (source_id, message_id, channel_id, group_id, content_hash, last_data, updated_at) 
+                    VALUES (?, ?, ?, NULL, ?, ?, CURRENT_TIMESTAMP)
+                """, (source_id, message.id, message.channel.id, content_hash, last_data))
                 await db.commit()
                 log.debug(f"Successfully saved post for {source_id}")
             except Exception as e:
@@ -903,17 +906,20 @@ async def save_group(group_id: str, message, content_hash: str = None) -> None:
         raise
 
 
-async def add_item_to_group(source_id: str, group_id: str, message, content_hash: str = None) -> None:
-    """Add an item to a group (maps source_id to group's message) with content hash."""
+async def add_item_to_group(source_id: str, group_id: str, message, content_hash: str = None, item: dict = None) -> None:
+    """Add an item to a group (maps source_id to group's message) with content hash and item data."""
     try:
+        # Serialize item data for CDC
+        last_data = json.dumps(item, sort_keys=True, separators=(',', ':'), default=str) if item else None
+        
         async with aiosqlite.connect(DB) as db:
             await db.execute("BEGIN IMMEDIATE")
             try:
                 await db.execute("""
                     INSERT OR REPLACE INTO posts 
-                    (source_id, message_id, channel_id, group_id, content_hash, updated_at) 
-                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, (source_id, message.id, message.channel.id, group_id, content_hash))
+                    (source_id, message_id, channel_id, group_id, content_hash, last_data, updated_at) 
+                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (source_id, message.id, message.channel.id, group_id, content_hash, last_data))
                 await db.commit()
                 log.debug(f"Successfully added {source_id} to group {group_id}")
             except Exception as e:
@@ -4382,7 +4388,7 @@ async def post_individual_item(channel, item: dict) -> bool:
                     
                     # Update content hash in database
                     content_hash = generate_content_signature(item)
-                    await save_single_post(source_id, message, content_hash)
+                    await save_single_post(source_id, message, content_hash, item)
                     
                     log.info(f"Updated individual item '{item['title']}' (Message ID: {message.id})")
                     return True
@@ -4403,7 +4409,7 @@ async def post_individual_item(channel, item: dict) -> bool:
             
             # Save the mapping with content hash
             content_hash = generate_content_signature(item)
-            await save_single_post(source_id, message, content_hash)
+            await save_single_post(source_id, message, content_hash, item)
             
             log.info(f"Posted new individual item '{item['title']}' (Message ID: {message.id})")
             
@@ -4487,7 +4493,7 @@ async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
                     for item in merged_items:
                         source_id = get_source_id_from_item(item)
                         item_content_hash = generate_content_signature(item)
-                        await add_item_to_group(source_id, group_id, message, item_content_hash)
+                        await add_item_to_group(source_id, group_id, message, item_content_hash, item)
                     
                     log.info(f"Updated group '{group_id}' (Message ID: {message.id})")
                     return True
@@ -4533,7 +4539,7 @@ async def post_grouped_items(channel, group_id: str, items: list[dict]) -> bool:
             for item in items:
                 source_id = get_source_id_from_item(item)
                 item_content_hash = generate_content_signature(item)
-                await add_item_to_group(source_id, group_id, message, item_content_hash)
+                await add_item_to_group(source_id, group_id, message, item_content_hash, item)
             
             log.info(f"Posted new group '{group_id}' (Message ID: {message.id})")
             return True
