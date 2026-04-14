@@ -6383,8 +6383,11 @@ class SingleItemButton(discord.ui.Button):
         """Create embed for this item."""
         item = self.item
         
+        # Check both 'title' and 'name' keys (structured_item uses 'name')
+        title = item.get('title') or item.get('name', 'Unknown')
+        
         embed = discord.Embed(
-            title=item.get('title', 'Unknown'),
+            title=title,
             description="Item Details",
             color=discord.Color.blue()
         )
@@ -6486,6 +6489,7 @@ async def check_posts():
                 # Collect items by group_key first for proper grouping
                 items_by_group_key = {}
                 new_items_by_group = {}
+                items_to_update = {}  # Track existing items that need updates
                 
                 for post in posts:
                     try:
@@ -6500,7 +6504,7 @@ async def check_posts():
                         if not exists:
                             # Get group key for new item
                             group_key = get_group_key(post)
-                            log.info(f"[CDC] Item '{post.get('title', 'unknown')}' -> group_key: {group_key}")
+                            log.info(f"[CDC] New item '{post.get('title', 'unknown')}' -> group_key: {group_key}")
                             
                             if group_key is None:
                                 # Single item - collect for individual posting
@@ -6512,6 +6516,28 @@ async def check_posts():
                                 if group_key not in new_items_by_group:
                                     new_items_by_group[group_key] = []
                                 new_items_by_group[group_key].append(post)
+                        else:
+                            # Item exists - check if content changed
+                            try:
+                                content_changed = await has_content_changed(source_id, post)
+                                if content_changed:
+                                    log.info(f"[CDC] Existing item '{post.get('title', 'unknown')}' has changed - will update")
+                                    # Get group key to determine if single or grouped
+                                    group_key = get_group_key(post)
+                                    if group_key is None:
+                                        # Single item - add to updates list
+                                        if 'singles' not in items_to_update:
+                                            items_to_update['singles'] = []
+                                        items_to_update['singles'].append(post)
+                                    else:
+                                        # Grouped item - add to group updates
+                                        if group_key not in items_to_update:
+                                            items_to_update[group_key] = []
+                                        items_to_update[group_key].append(post)
+                                else:
+                                    log.debug(f"[CDC] Existing item '{post.get('title', 'unknown')}' unchanged")
+                            except Exception as e:
+                                log.error(f"[CDC] Error checking content changes for {post.get('url')}: {e}")
                     
                     except Exception as e:
                         log.error(f"[CDC] Error processing new item {post.get('url')}: {e}")
@@ -6593,6 +6619,26 @@ async def check_posts():
                     
                     except Exception as e:
                         log.error(f"[CDC] Error processing group {group_key}: {e}")
+                
+                # Process existing items that have content changes
+                if items_to_update:
+                    log.info(f"[CDC] Processing {len(items_to_update)} groups/keys needing updates")
+                    for group_key, update_posts in items_to_update.items():
+                        try:
+                            if group_key == 'singles':
+                                # Update individual posts
+                                for post in update_posts:
+                                    try:
+                                        await post_individual_item(channel, post)
+                                        log.info(f"[CDC] Updated individual item: {post.get('title', 'unknown')}")
+                                    except Exception as e:
+                                        log.error(f"[CDC] Error updating individual item {post.get('url')}: {e}")
+                            else:
+                                # Update group - rebuild entire group message
+                                await rebuild_group_from_cdc(channel, group_key)
+                                log.info(f"[CDC] Updated group message for: {group_key}")
+                        except Exception as e:
+                            log.error(f"[CDC] Error processing updates for {group_key}: {e}")
             
             # Smart polling interval based on activity
             if has_changes:
