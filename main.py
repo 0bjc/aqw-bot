@@ -6091,11 +6091,11 @@ def _extract_recent_changes_entries() -> dict[str, datetime]:
                 log.info(f"Reached max entries limit ({max_entries_per_run}), will continue next run")
                 break
             
-            # Add to results (only entries newer than last_successfully_processed_change)
+            # Add to results (only entries newer than what we've seen before)
             prev = page_times.get(page_url)
-            if prev is None or change_time < prev:
+            if prev is None or change_time > prev:  # Fixed: was <, should be > to detect edits
                 page_times[page_url] = change_time
-                log.debug("Found new page: %s (changed %s)", page_url, change_time)
+                log.debug("Found page change: %s (newer time %s > prev %s)", page_url, change_time, prev)
                 processed_count += 1
 
         # First run special handling - do NOT update cursor yet
