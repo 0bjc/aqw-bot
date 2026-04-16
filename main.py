@@ -962,26 +962,19 @@ def get_source_id_from_item(item: dict) -> str:
 
 
 def generate_content_signature(item: dict) -> str:
-    """Generate a stable content signature for change detection."""
-    import hashlib
-    import json
-    
-    # Extract only the relevant fields that affect embed content
-    content_fields = {
-        'title': item.get('title', ''),
-        'content': item.get('content', ''),
-        'location': item.get('location', ''),
-        'price': item.get('price', ''),
-        'rarity': item.get('rarity', ''),
-        'image_url': item.get('image_url', ''),
-        'url': item.get('url', '')
-    }
-    
-    # Create a normalized JSON string
-    content_json = json.dumps(content_fields, sort_keys=True, separators=(',', ':'))
-    
-    # Generate hash
-    return hashlib.sha256(content_json.encode('utf-8')).hexdigest()
+    """Generate a content hash for change detection using item fields."""
+    # Use relevant fields that should trigger updates when changed
+    # Note: extract_item_details uses 'image' not 'image_url', and doesn't extract 'rarity'
+    content_parts = [
+        str(item.get('title', '')),
+        str(item.get('content', '')),
+        str(item.get('location', '')),
+        str(item.get('price', '')),
+        str(item.get('image', '')),  # Changed from 'image_url' to 'image'
+        str(item.get('url', ''))
+    ]
+    content_str = '|'.join(content_parts)
+    return hashlib.sha256(content_str.encode()).hexdigest()[:32]
 
 
 async def has_content_changed(source_id: str, item: dict) -> bool:
