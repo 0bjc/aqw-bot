@@ -977,6 +977,32 @@ def generate_content_signature(item: dict) -> str:
     return hashlib.sha256(content_str.encode()).hexdigest()[:32]
 
 
+async def check_content_changed(source_id: str, item: dict) -> tuple[bool, str]:
+    """Check if item content has changed WITHOUT updating database.
+    
+    Returns (changed, current_signature) tuple.
+    Use this for CDC processing to avoid triggering CDC before Discord update.
+    """
+    try:
+        current_signature = generate_content_signature(item)
+        
+        async with aiosqlite.connect(DB) as db:
+            cursor = await db.execute("""
+                SELECT content_hash FROM posts WHERE source_id = ?
+            """, (source_id,))
+            result = await cursor.fetchone()
+            
+            if not result:
+                return True, current_signature
+            
+            stored_signature = result[0]
+            return stored_signature != current_signature, current_signature
+            
+    except Exception as e:
+        log.error(f"Error checking content changes for {source_id}: {e}")
+        return True, generate_content_signature(item)
+
+
 async def has_content_changed(source_id: str, item: dict) -> bool:
     """Check if item content has actually changed."""
     try:
@@ -6510,23 +6536,26 @@ async def check_posts():
                                     new_items_by_group[group_key] = []
                                 new_items_by_group[group_key].append(post)
                         else:
-                            # Item exists - check if content changed
+                            # Item exists - check if content changed (use check_content_changed to avoid DB update here)
                             try:
-                                content_changed = await has_content_changed(source_id, post)
+                                content_changed, current_sig = await check_content_changed(source_id, post)
                                 if content_changed:
                                     log.info(f"[CDC] Existing item '{post.get('title', 'unknown')}' has changed - will update")
                                     # Get group key to determine if single or grouped
                                     group_key = get_group_key(post)
+                                    log.info(f"[CDC] Change detected for '{post.get('title', 'unknown')}', group_key: {group_key}")
                                     if group_key is None:
                                         # Single item - add to updates list
                                         if 'singles' not in items_to_update:
                                             items_to_update['singles'] = []
                                         items_to_update['singles'].append(post)
+                                        log.info(f"[CDC] Added '{post.get('title', 'unknown')}' to singles update list")
                                     else:
                                         # Grouped item - add to group updates
                                         if group_key not in items_to_update:
                                             items_to_update[group_key] = []
                                         items_to_update[group_key].append(post)
+                                        log.info(f"[CDC] Added '{post.get('title', 'unknown')}' to group '{group_key}' update list")
                                 else:
                                     log.debug(f"[CDC] Existing item '{post.get('title', 'unknown')}' unchanged")
                             except Exception as e:
@@ -6614,6 +6643,7 @@ async def check_posts():
                         log.error(f"[CDC] Error processing group {group_key}: {e}")
                 
                 # Process existing items that have content changes
+                log.info(f"[CDC] items_to_update contents: {list(items_to_update.keys())}")
                 if items_to_update:
                     log.info(f"[CDC] Processing {len(items_to_update)} groups/keys needing updates")
                     for group_key, update_posts in items_to_update.items():
