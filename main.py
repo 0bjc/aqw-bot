@@ -6448,7 +6448,7 @@ class SingleItemButton(discord.ui.Button):
 # ---------------- SMART POLLING STATE ----------------
 class SmartPolling:
     def __init__(self):
-        self.current_interval = 60.0  # Default idle mode
+        self.current_interval = 10.0  # Default idle mode (was 60)
         self.last_change_timestamp = None
         self.burst_mode = False
         self.no_change_count = 0  # Track consecutive no-change cycles
@@ -6456,16 +6456,16 @@ class SmartPolling:
     def update_interval(self, has_new_changes: bool, has_error: bool = False):
         if has_error:
             # Error backoff mode
-            self.current_interval = 90.0
-            log.info("SMART POLLING: Error backoff (90s)")
+            self.current_interval = 30.0
+            log.info("SMART POLLING: Error backoff (30s)")
             return
             
         if has_new_changes:
             # Activity detected - enter burst mode
             if not self.burst_mode:
                 self.burst_mode = True
-                self.current_interval = 15.0
-                log.info("SMART POLLING: Burst mode (15s)")
+                self.current_interval = 5.0  # Aggressive burst mode (was 15)
+                log.info("SMART POLLING: Burst mode (5s)")
             self.last_change_timestamp = datetime.now(timezone.utc)
             self.no_change_count = 0
         else:
@@ -6473,18 +6473,18 @@ class SmartPolling:
             self.no_change_count += 1
             
             if self.burst_mode:
-                # Check if we should exit burst mode (3 minutes of no changes)
+                # Check if we should exit burst mode (1 minute of no changes - was 3 minutes)
                 time_since_change = (datetime.now(timezone.utc) - self.last_change_timestamp).total_seconds() if self.last_change_timestamp else float('inf')
                 
-                if time_since_change > 180:  # 3 minutes
+                if time_since_change > 60:  # 1 minute (was 3 minutes)
                     self.burst_mode = False
-                    self.current_interval = 60.0
-                    log.info("SMART POLLING: Cooldown → Idle")
+                    self.current_interval = 10.0  # Idle mode (was 60)
+                    log.info("SMART POLLING: Cooldown → Idle (10s)")
                     self.no_change_count = 0
             elif self.no_change_count >= 3 and not self.burst_mode:
                 # Safety: if we've had no changes for 3+ cycles, ensure idle mode
-                self.current_interval = 60.0
-                log.info("SMART POLLING: Idle (60s)")
+                self.current_interval = 10.0  # Idle mode (was 60)
+                log.info("SMART POLLING: Idle (10s)")
         
         return self.current_interval
 
