@@ -6099,30 +6099,46 @@ def _extract_recent_changes_entries() -> dict[str, datetime]:
         
         # Process entries from newest to oldest with optimization
         processed_count = 0
+        edit_check_count = 0  # Count entries checked for edits past the cursor
         stop_processing = False
         max_entries_per_run = 50  # Limit processing to prevent timeouts
+        max_edit_check_entries = 20  # Limit entries to check for edits past cursor
+        passed_cursor = not last_successfully_processed_change  # True if no cursor set yet
         
         for page_url, time_text, change_time in all_entries:
             # Generate change ID for cursor tracking
             change_id = generate_change_id(page_url, change_time.isoformat())
             
-            # Stop if we've reached the last successfully processed change OR max entries limit
+            # Check if we've passed the cursor position
             if last_successfully_processed_change and change_id == last_successfully_processed_change:
-                log.info(f"Reached last successfully processed change: {change_id}, stopping processing")
-                stop_processing = True
-                break
+                log.info(f"Reached cursor position: {change_id}, continuing to check for edits")
+                passed_cursor = True
+                continue  # Continue scanning, don't break
             
-            # Stop after processing max entries to prevent timeouts
-            if processed_count >= max_entries_per_run:
-                log.info(f"Reached max entries limit ({max_entries_per_run}), will continue next run")
+            # Stop after checking enough entries past cursor for edits
+            if passed_cursor and edit_check_count >= max_edit_check_entries:
+                log.info(f"Reached edit check limit ({max_edit_check_entries}), stopping")
                 break
             
             # Add to results (only entries newer than what we've seen before)
             prev = page_times.get(page_url)
-            if prev is None or change_time > prev:  # Fixed: was <, should be > to detect edits
+            if prev is None or change_time > prev:  # New page or edited page
+                if passed_cursor and prev is not None and change_time > prev:
+                    log.info(f"Found EDITED page: {page_url} (new time {change_time} > prev {prev})")
+                    edit_check_count += 1
+                elif not passed_cursor:
+                    log.debug("Found new page change: %s (newer time %s > prev %s)", page_url, change_time, prev)
+                    
                 page_times[page_url] = change_time
-                log.debug("Found page change: %s (newer time %s > prev %s)", page_url, change_time, prev)
                 processed_count += 1
+                
+                # Stop after processing max new entries to prevent timeouts
+                if processed_count >= max_entries_per_run:
+                    log.info(f"Reached max entries limit ({max_entries_per_run}), will continue next run")
+                    break
+            elif passed_cursor:
+                # Already seen this page with same or older timestamp
+                edit_check_count += 1
 
         # First run special handling - do NOT update cursor yet
         if not last_successfully_processed_change and len(page_times) > 10:
