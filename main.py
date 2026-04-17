@@ -964,12 +964,13 @@ def get_source_id_from_item(item: dict) -> str:
 def generate_content_signature(item: dict) -> str:
     """Generate a content hash for change detection using item fields."""
     # Use relevant fields that should trigger updates when changed
-    # Note: extract_item_details uses 'image' not 'image_url', and doesn't extract 'rarity'
+    # Note: extract_item_details uses 'image' not 'image_url'
     content_parts = [
         str(item.get('title', '')),
         str(item.get('content', '')),
         str(item.get('location', '')),
         str(item.get('price', '')),
+        str(item.get('rarity', '')),  # Added rarity to detect rarity changes
         str(item.get('image', '')),  # Changed from 'image_url' to 'image'
         str(item.get('url', ''))
     ]
@@ -6673,7 +6674,25 @@ async def check_posts():
                                     except Exception as e:
                                         log.error(f"[CDC] Error updating individual item {post.get('url')}: {e}")
                             else:
-                                # Update group - rebuild entire group message
+                                # Update group - first update DB with new item data, then rebuild
+                                log.info(f"[CDC] Updating {len(update_posts)} items in DB before rebuilding group {group_key}")
+                                for post in update_posts:
+                                    try:
+                                        source_id = get_source_id_from_item(post)
+                                        item_data = json.dumps(post, sort_keys=True, separators=(',', ':'), default=datetime_serializer)
+                                        content_hash = generate_content_signature(post)
+                                        
+                                        async with aiosqlite.connect(DB) as db:
+                                            await db.execute("""
+                                                UPDATE posts 
+                                                SET last_data = ?, content_hash = ?, updated_at = CURRENT_TIMESTAMP
+                                                WHERE source_id = ?
+                                            """, (item_data, content_hash, source_id))
+                                            await db.commit()
+                                            log.debug(f"[CDC] Updated DB for {source_id}: new hash {content_hash[:16]}...")
+                                    except Exception as e:
+                                        log.error(f"[CDC] Error updating DB for {post.get('url')}: {e}")
+                                
                                 await rebuild_group_from_cdc(channel, group_key)
                                 log.info(f"[CDC] Updated group message for: {group_key}")
                         except Exception as e:
